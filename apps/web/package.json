@@ -1,0 +1,39 @@
+{
+  "name": "@asi/web",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "typecheck": "tsc --noEmit",
+    "bootstrap:admin": "tsx src/lib/bootstrap-admin.ts"
+  },
+  "dependencies": {
+    "@asi/config": "*",
+    "@asi/contracts": "*",
+    "@asi/database": "*",
+    "@asi/ui": "*",
+    "@node-rs/argon2": "2.1.0",
+    "@tanstack/react-table": "9.1.2",
+    "drizzle-orm": "0.45.2",
+    "next": "16.3.1",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "recharts": "3.10.1",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "4.3.3",
+    "@types/node": "22.20.1",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "tailwindcss": "4.3.3",
+    "tsx": "4.20.6",
+    "typescript": "6.0.3"
+  }
+}

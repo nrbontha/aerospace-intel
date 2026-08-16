@@ -1,0 +1,36 @@
+# Dependencies
+node_modules/
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Build and framework output
+.next/
+dist/
+build/
+out/
+.turbo/
+.cache/
+*.tsbuildinfo
+
+# Tests and coverage
+coverage/
+playwright-report/
+test-results/
+blob-report/
+.nyc_output/
+
+# Local runtime data
+storage/
+uploads/
+
+# Logs and local tooling
+*.log
+npm-debug.log*
+.DS_Store
+.vscode/
+.idea/

@@ -1,0 +1,42 @@
+{
+  "name": "@asi/research",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./jobs": {
+      "types": "./src/jobs.ts",
+      "import": "./dist/jobs.js",
+      "default": "./dist/jobs.js"
+    },
+    "./tools": {
+      "types": "./src/tools.ts",
+      "import": "./dist/tools.js",
+      "default": "./dist/tools.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -b",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@asi/config": "*",
+    "@asi/contracts": "*",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "vitest": "4.1.10"
+  }
+}

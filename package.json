@@ -1,0 +1,42 @@
+{
+  "name": "aerospace-supplier-intelligence",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev:web": "npm run build:packages && npm run dev --workspace @asi/web",
+    "dev:worker": "npm run build:packages && npm run dev --workspace @asi/worker",
+    "build": "npm run build:packages && npm run build:apps",
+    "build:packages": "npm run build --workspace @asi/contracts && npm run build --workspace @asi/config && npm run build --workspace @asi/database && npm run build --workspace @asi/research",
+    "build:apps": "npm run build --workspace @asi/web && npm run build --workspace @asi/worker",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "lint": "eslint .",
+    "format:check": "prettier --check .",
+    "format:write": "prettier --write .",
+    "test:unit": "vitest run",
+    "test:e2e": "playwright test",
+    "db:generate": "npm run db:generate --workspace @asi/database",
+    "db:migrate": "npm run db:migrate --workspace @asi/database",
+    "db:seed": "npm run db:seed --workspace @asi/database",
+    "bootstrap:admin": "npm run bootstrap:admin --workspace @asi/web"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@playwright/test": "1.62.1",
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "4.1.10",
+    "eslint": "10.8.1",
+    "globals": "17.11.0",
+    "prettier": "3.9.6",
+    "typescript": "6.0.3",
+    "typescript-eslint": "8.67.0",
+    "vitest": "4.1.10"
+  }
+}
