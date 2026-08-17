@@ -12,7 +12,7 @@ import {
 } from "@/lib/auth";
 import { consumeLoginRateLimit, resetLoginRateLimit } from "@/lib/rate-limit";
 
-const INVALID_CREDENTIALS = "Invalid email or password.";
+const INVALID_CREDENTIALS = "Invalid username or password.";
 const DUMMY_PASSWORD = "not-a-real-account-password";
 
 let dummyPasswordHashPromise: Promise<string> | undefined;
@@ -92,8 +92,10 @@ export async function POST(request: Request) {
       return errorResponse("bad_request", "Invalid login request.", 400);
     }
 
-    const email = parsed.data.email.toLowerCase();
-    const rateLimitSubject = `${email}\u0000${clientAddress(request)}`;
+    const identifier = (
+      parsed.data.username ?? parsed.data.email ?? ""
+    ).toLowerCase();
+    const rateLimitSubject = `${identifier}\u0000${clientAddress(request)}`;
     const rateLimit = await consumeLoginRateLimit(rateLimitSubject);
 
     if (!rateLimit.allowed) {
@@ -107,7 +109,7 @@ export async function POST(request: Request) {
     }
 
     const database = getDatabase();
-    const [user] = await database
+    const matches = await database
       .select({
         id: users.id,
         email: users.email,
@@ -120,9 +122,13 @@ export async function POST(request: Request) {
       })
       .from(users)
       .where(
-        and(sql`lower(${users.email}) = ${email}`, eq(users.isDisabled, false)),
+        and(
+          eq(users.isDisabled, false),
+          sql`(lower(${users.email}) = ${identifier} OR lower(${users.displayName}) = ${identifier})`,
+        ),
       )
-      .limit(1);
+      .limit(2);
+    const user = matches.length === 1 ? matches[0] : undefined;
 
     const passwordHash = user?.passwordHash ?? (await dummyPasswordHash());
     const passwordMatches = await verifyPassword(

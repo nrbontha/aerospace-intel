@@ -777,9 +777,10 @@ export const openApiDocument = {
       LoginRequest: {
         type: "object",
         additionalProperties: false,
-        required: ["email", "password"],
+        required: ["password"],
         properties: {
-          email: { type: "string", format: "email" },
+          username: { type: "string", minLength: 1, maxLength: 200 },
+          email: { type: "string", minLength: 1, maxLength: 200 },
           password: { type: "string", minLength: 12, maxLength: 1000 },
         },
       },

@@ -20,7 +20,7 @@ Required outside tests: `DATABASE_URL`, `SESSION_SECRET`. Production also needs 
 
 Observed production project `aerospace-supplier-intelligence` (independent of Almanac):
 
-- Web: `https://web-production-c1c69.up.railway.app` — `Dockerfile.web`, health `/api/v1/health`, start `npm run start:web` (migrate then Next). Volume `web-volume` at `/var/lib/asi/storage`.
+- Web: `https://aero-intel.up.railway.app` — `Dockerfile.web`, health `/api/v1/health`, start `npm run start:web` (migrate then Next). Volume `web-volume` at `/var/lib/asi/storage`.
 - Worker: `Dockerfile.worker`, health `/health`, start `npm run start --workspace @asi/worker`. No migrations.
 - Database: Railway PostgreSQL plugin image `postgres-ssl:18` (local Compose remains `postgres:17-bookworm`). Same `DATABASE_URL` on web and worker.
 - Bootstrap admin: create inside the web container with `railway ssh -s web -- npm run bootstrap:admin`. Credentials live in gitignored `.env.railway.local`, never in git or image layers.
@@ -107,7 +107,7 @@ Production is the Railway project above. It is **limited availability**, not gen
 
 Observed 2026-08-17T03:55Z. **Do not mix the two ops snapshots.**
 
-Railway production (`https://web-production-c1c69.up.railway.app`):
+Railway production (`https://aero-intel.up.railway.app`):
 
 - Web deployment `0a156e0a` SUCCESS (redeploy of the tested fail-closed tree). Public health/ready 200; admin login 200 with `Origin` equal to `APP_URL`.
 - `RESEARCH_SHARED_STORAGE=false` on web and worker. Research document writes require `RESEARCH_SHARED_STORAGE=true`; `NODE_ENV=production` is not enough.

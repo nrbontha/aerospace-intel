@@ -31,7 +31,7 @@ export function LoginForm({ returnTo }: LoginFormProps) {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
-          email: form.get("email"),
+          username: form.get("username"),
           password: form.get("password"),
         }),
       });
@@ -52,16 +52,15 @@ export function LoginForm({ returnTo }: LoginFormProps) {
   return (
     <form className="login-form" onSubmit={submit} noValidate={false}>
       <div className="login-field">
-        <label className="login-label" htmlFor="email">
-          Email address
+        <label className="login-label" htmlFor="username">
+          Username
         </label>
         <input
           className="login-input"
-          id="email"
-          name="email"
-          type="email"
+          id="username"
+          name="username"
+          type="text"
           autoComplete="username"
-          inputMode="email"
           autoCapitalize="none"
           spellCheck={false}
           required

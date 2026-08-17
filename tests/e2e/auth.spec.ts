@@ -7,7 +7,7 @@ const password =
 
 async function signIn(page: Page): Promise<void> {
   await page.goto("/login");
-  await page.getByLabel("Email address").fill(email);
+  await page.getByLabel("Username").fill(email);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   await page.waitForURL(/\/dashboard$/);
@@ -39,7 +39,7 @@ test.describe("authentication", () => {
     page,
   }) => {
     await page.goto("/login");
-    await page.getByLabel("Email address").fill(email);
+    await page.getByLabel("Username").fill(email);
     await page.getByLabel("Password").fill("definitely-not-the-password");
     await page.getByRole("button", { name: "Sign in" }).click();
     await expect(page.locator("p.login-error")).toHaveText(

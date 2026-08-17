@@ -49,7 +49,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
             Sign in
           </h1>
           <p className="login-description">
-            Use the account provided by your administrator.
+            Sign in with your username.
           </p>
         </header>
         <LoginForm returnTo={safeReturnPath(parameters.next)} />

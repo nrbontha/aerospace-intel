@@ -621,10 +621,19 @@ export const exportSchema = z.strictObject({
   expiresAt: instantSchema.optional(),
   error: apiErrorSchema.optional(),
 });
-export const loginSchema = z.strictObject({
-  email: z.email(),
-  password: z.string().min(12).max(1_000),
-});
+const loginIdentifierSchema = z.string().trim().min(1).max(200);
+export const loginSchema = z
+  .strictObject({
+    username: loginIdentifierSchema.optional(),
+    email: loginIdentifierSchema.optional(),
+    password: z.string().min(12).max(1_000),
+  })
+  .refine(
+    (value) =>
+      (value.username !== undefined && value.username.length > 0) ||
+      (value.email !== undefined && value.email.length > 0),
+    { message: "Username or email is required" },
+  );
 export const userCreateSchema = z.strictObject({
   email: z.email(),
   displayName: z.string().trim().min(1).max(200),
