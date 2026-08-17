@@ -142,18 +142,27 @@ a:hover {
   display: grid;
   min-block-size: calc(100dvh - var(--asi-space-24));
   grid-template-columns: 15rem minmax(0, 1fr);
+  align-items: start;
 }
 
 .asi-shell__rail {
+  position: sticky;
+  inset-block-start: var(--asi-space-24);
+  display: flex;
+  flex-direction: column;
   min-inline-size: 0;
+  min-block-size: calc(100dvh - var(--asi-space-24));
+  max-block-size: calc(100dvh - var(--asi-space-24));
   padding: var(--asi-space-8);
+  overflow: hidden;
   border-inline-end: var(--asi-border-width) solid var(--asi-border);
   background: var(--asi-surface);
 }
 
 .asi-shell__nav {
-  position: sticky;
-  inset-block-start: calc(var(--asi-space-24) + var(--asi-space-8));
+  flex: 1 1 auto;
+  min-block-size: 0;
+  overflow: auto;
 }
 
 .asi-shell__nav-list {
@@ -187,8 +196,9 @@ a:hover {
 
 .asi-shell__account {
   display: grid;
+  flex: 0 0 auto;
   gap: var(--asi-space-1);
-  margin-block-start: var(--asi-space-12);
+  margin-block-start: auto;
   padding-block-start: var(--asi-space-8);
   border-block-start: var(--asi-border-width) solid var(--asi-border);
 }
@@ -456,14 +466,19 @@ a:hover {
   }
 
   .asi-shell__rail {
+    position: static;
+    min-block-size: 0;
+    max-block-size: none;
     padding: var(--asi-space-6) var(--asi-space-8);
+    overflow: visible;
     border-inline-end: 0;
     border-block-end: var(--asi-border-width) solid var(--asi-border);
   }
 
   .asi-shell__nav {
-    position: static;
     display: none;
+    flex: none;
+    overflow: visible;
   }
 
   .asi-shell__nav[data-open="true"] {
