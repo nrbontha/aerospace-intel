@@ -4,11 +4,11 @@
 
 This is a design contract for an independent system. It must not import from, call, share a database or volume with, or reuse credentials from Saucer or Almanac. A heading is not a claim; the observed status below is.
 
-**Observed 2026-08-17T12:21Z — keep local and Railway separate.** P0–P4 are implemented in this tree and have been exercised **locally** (Hitchiner research, review, canonical tracing, scoring, catalog, import/export). P5 is **not** complete: a shared object store and production restore/PITR remain open. Production research writes are **disabled** (`RESEARCH_SHARED_STORAGE=false`) because web and worker volumes do not share bytes. The production worker may be running health-only. Production is limited availability, not generally available. The demo is Postgres catalog data only. See `OPERATIONS.md`.
+**Observed 2026-08-17T12:36Z — keep local and Railway separate.** P0–P4 are implemented in this tree and have been exercised **locally** (Hitchiner research, review, canonical tracing, scoring, catalog, import/export). P5 is **not** complete: a shared object store and production restore/PITR remain open. Production research writes are **disabled** (`RESEARCH_SHARED_STORAGE=false`) because web and worker volumes do not share bytes. The production worker is health-only. Production is limited availability, not generally available. The demo is Postgres catalog data only. See `OPERATIONS.md`.
 
 | Environment | `GET /api/v1/ops/status` | Catalog |
 | --- | --- | --- |
-| Railway production (`831c9b3f` web, `cbe4d8ca` worker health-only) | `drainable: true`, **`alerts: []`**, queue failed 0, `documentCount` 0; `POST /api/v1/research-runs` **409** | demo seed (`totalItems` 13). Local Hitchiner research was not copied. Worker stop/start did not change catalog counts. No research job was enqueued, so document visibility across web/worker volumes was not tested. |
+| Railway production (GitHub `nrbontha/aerospace-intel@main`; worker health-only) | `drainable: true`, **`alerts: []`**, queue failed 0, `documentCount` 0; `POST /api/v1/research-runs` **409** | demo seed (`totalItems` 13). Local Hitchiner research was not copied. Worker stop/start did not change catalog counts. No research job was enqueued, so document visibility across web/worker volumes was not tested. |
 | Local only (`http://127.0.0.1:3000`) | `drainable: true`, **`queue_failed` (1 historical failed job)** | Hitchiner + import probe (`totalItems` 2), `documentCount` 1 |
 
 The local `queue_failed` alert is **not** a Railway observation. Do not advertise planned integrations, replay guarantees, or a shared object store. The production catalog is a demo seed, not operational qualification evidence.
@@ -109,7 +109,7 @@ API, job, tool, and artifact payloads carry schema versions. Producers and consu
 
 **Exit evidence:** restore/restart preserves documents, jobs, and evidence links; security/failure modes have observed verification; operators can diagnose durable failures without sensitive telemetry.
 
-**Observed P5 gap:** local restore rehearsal (`npm run ops:rehearse`) and local security/failure-mode tests exist. Production worker `cbe4d8ca` is health-only (`researchHandlers=false`, `/ready` 503) with `RESEARCH_SHARED_STORAGE=false`. Web and worker still do **not** share one object store. Do not set the flag true on split volumes. Production restore/PITR has not been observed. Do not mark P5 done until those are closed.
+**Observed P5 gap:** local restore rehearsal (`npm run ops:rehearse`) and local security/failure-mode tests exist. The production worker is health-only (`/ready` 503) with `RESEARCH_SHARED_STORAGE=false`. Web and worker still do **not** share one object store. Do not set the flag true on split volumes. Production restore/PITR has not been observed. Do not mark P5 done until those are closed.
 
 ## Reference lessons, not dependencies
 

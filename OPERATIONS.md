@@ -129,15 +129,17 @@ or `railway redeploy --service worker` when the current image is already the one
 
 Production is the Railway project above. It is **limited availability**, not generally available. Do not advertise replay, a shared object store, or planned integrations.
 
-Observed 2026-08-17T12:21Z. **Do not mix the two ops snapshots.**
+Observed 2026-08-17T12:36Z after connecting GitHub `main`. **Do not mix the two ops snapshots.**
 
 Railway production (`https://aero-intel.up.railway.app`):
 
-- Web deployment `831c9b3f` SUCCESS (env-var redeploy after `RESEARCH_SHARED_STORAGE=false`). Public health/ready 200; admin login 200 with `Origin` equal to `APP_URL`. Username or email is accepted at `/login`.
-- Worker deployment `cbe4d8ca` SUCCESS, **Online**, volume `worker-volume` at `/var/lib/asi/storage`. `/health` 200; `/ready` **503** (`database: not_ready`, `queue: not_ready`) because research handlers are not registered. Restart policy `ON_FAILURE`. An intentional `railway down` was exercised; catalog counts did not change.
-- `RESEARCH_SHARED_STORAGE=false` on web and worker. Authenticated `POST /api/v1/research-runs` returns **409** `conflict` (`Research is disabled until shared document storage is configured`). Queue stayed empty across worker stop/start (no job was created).
-- Demo catalog loaded from `scripts/demo-catalog.sql` (idempotent). `GET /api/v1/companies?page=1&pageSize=1` `totalItems` 13; facilities 8. Rows are labeled as demo catalog context, not operational qualification assertions. This is **Postgres catalog data only**; production has `documentCount` 0.
+- GitHub source `nrbontha/aerospace-intel` branch `main` is connected on web and worker. Confirm `RAILWAY_GIT_COMMIT_SHA` against `origin/main`; do not treat a local `railway up` as the source of truth.
+- Public health/ready 200; admin login 200 with `Origin` equal to `APP_URL`. Username or email is accepted at `/login`.
+- Worker is **Online** on `worker-volume` at `/var/lib/asi/storage`. `/health` 200; `/ready` **503** (`database: not_ready`, `queue: not_ready`) because research handlers are not registered. Restart policy `ON_FAILURE`.
+- `RESEARCH_SHARED_STORAGE=false` on web and worker. Authenticated `POST /api/v1/research-runs` returns **409** `conflict` (`Research is disabled until shared document storage is configured`).
+- Demo catalog loaded from `scripts/demo-catalog.sql` (idempotent). Companies `totalItems` 13; facilities 8. Rows are labeled as demo catalog context, not operational qualification assertions. This is **Postgres catalog data only**; production has `documentCount` 0.
 - `GET /api/v1/ops/status`: `drainable: true`, **`alerts: []`**, queue failed 0, `documentCount` 0. Web ops only sees `web-volume`.
+- Persistence verified: Postgres catalog and empty job-queue metadata across worker stop/start, plus that each service volume stays attached. No research job was enqueued, so cross-service document retrieval was not tested and remains unresolved.
 
 Local only (`http://127.0.0.1:3000`, not Railway):
 
