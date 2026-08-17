@@ -21,7 +21,7 @@ Required outside tests: `DATABASE_URL`, `SESSION_SECRET`. Production also needs 
 Observed production project `aerospace-supplier-intelligence` (independent of Almanac):
 
 - Web: `https://aero-intel.up.railway.app` — `Dockerfile.web`, health `/api/v1/health`, start `npm run start:web` (migrate then Next). Volume `web-volume` at `/var/lib/asi/storage`.
-- Worker: `Dockerfile.worker`, health `/health`, start `npm run start --workspace @asi/worker`. Volume `worker-volume` at `/var/lib/asi/storage` (independent of `web-volume`). No migrations. With `RESEARCH_SHARED_STORAGE=false` the process is health-only (`/ready` 503).
+- Worker: `Dockerfile.worker`, health `/health`, start `npm run start --workspace @asi/worker`. Volume `worker-volume` at `/var/lib/asi/storage` (independent of `web-volume`). No migrations. **Stopped** for the stakeholder walkthrough (0 running replicas, GitHub source disconnected, restart policy `NEVER`) so OpenRouter cannot run. With `RESEARCH_SHARED_STORAGE=false` a running worker would still be health-only (`/ready` 503).
 - Database: Railway PostgreSQL plugin image `postgres-ssl:18` (local Compose remains `postgres:17-bookworm`). Same `DATABASE_URL` on web and worker.
 - Bootstrap admin: create inside the web container with `railway ssh -s web -- npm run bootstrap:admin`. Credentials live in gitignored `.env.railway.local`, never in git or image layers.
 - Dockerfile `VOLUME` is rejected by Railway; platform volumes replace it. `.dockerignore` excludes `.env*`, `storage/`, `backups/`, and `node_modules/`.
@@ -105,6 +105,8 @@ Observed locally against the running stack (not a Railway claim):
 
 PostgreSQL holds identities, catalog, jobs, observations, proposals, and audit. Stopping the worker does not delete that data. Observed 2026-08-17T12:21Z: companies `totalItems` 13 and facilities 8 before `railway down -s worker`, while the worker was down, and after worker `cbe4d8ca` came back. Queue counts stayed `created/retry/active/completed/failed = 0` across that cycle because research enqueue was 409.
 
+**Observed 2026-08-17T13:17Z:** the production worker is **stopped** (0 running replicas, GitHub source disconnected, restart policy `NEVER`) so a stakeholder walkthrough cannot incur OpenRouter cost. Catalog and sessions stay on Postgres/web. Do not reconnect GitHub or `railway up` the worker until research is explicitly requested. Reconnect later with `railway service source connect --repo nrbontha/aerospace-intel --branch main --service worker` and restore restart policy `ON_FAILURE`.
+
 Production research writes stay **disabled**. `RESEARCH_SHARED_STORAGE=false` on web and worker. Per-service volumes are not a shared object store. Do not set the flag true until web and worker share one object store; otherwise worker-written `source_documents` bytes land on `worker-volume` while web ops/downloads read `web-volume` (`missing_file`).
 
 The demo is Postgres catalog data only. Stop/start verified Postgres catalog and empty job-queue metadata, plus that each service volume remains attached. No research job was enqueued, so cross-service document retrieval was not tested and remains unresolved.
@@ -115,7 +117,7 @@ Stop (replica goes to 0; Postgres catalog remains):
 railway down -s worker -y
 ```
 
-`railway scale …=0` is invalid (minimum 1 replica) and can redeploy the same image. Restart policy is `ON_FAILURE` so a crash comes back; a `railway down` stays down until you start it again. Do not set `ALWAYS` if you want an intentional stop to stick.
+`railway scale …=0` is invalid (minimum 1 replica) and can redeploy the same image. The walkthrough stop is GitHub disconnect plus restart policy `NEVER`, so a leftover FAILED deployment cannot come back. `railway.worker.json` still documents `ON_FAILURE` for when research is requested again. Do not set `ALWAYS`. Do not reconnect GitHub until then.
 
 Start:
 
@@ -129,13 +131,13 @@ or `railway redeploy --service worker` when the current image is already the one
 
 Production is the Railway project above. It is **limited availability**, not generally available. Do not advertise replay, a shared object store, or planned integrations.
 
-Observed 2026-08-17T12:36Z after connecting GitHub `main`. **Do not mix the two ops snapshots.**
+Observed 2026-08-17T13:17Z. **Do not mix the two ops snapshots.**
 
 Railway production (`https://aero-intel.up.railway.app`):
 
-- GitHub source `nrbontha/aerospace-intel` branch `main` is connected on web and worker. Confirm `RAILWAY_GIT_COMMIT_SHA` against `origin/main`; do not treat a local `railway up` as the source of truth.
-- Public health/ready 200; admin login 200 with `Origin` equal to `APP_URL`. Username or email is accepted at `/login`.
-- Worker is **Online** on `worker-volume` at `/var/lib/asi/storage`. `/health` 200; `/ready` **503** (`database: not_ready`, `queue: not_ready`) because research handlers are not registered. Restart policy `ON_FAILURE`.
+- GitHub source `nrbontha/aerospace-intel` branch `main` is connected on **web only**. The worker source is disconnected so a web deploy cannot start OpenRouter. Confirm web `RAILWAY_GIT_COMMIT_SHA` against `origin/main`.
+- Public health/ready 200; admin login 200 with `Origin` equal to `APP_URL`. Username or email is accepted at `/login`. The account chip includes **Sign out** (`POST /api/v1/auth/logout` with CSRF).
+- Worker is **stopped** (0 running replicas). Restart policy `NEVER`. `worker-volume` remains attached. Do not treat a leftover FAILED historical deployment as a running worker.
 - `RESEARCH_SHARED_STORAGE=false` on web and worker. Authenticated `POST /api/v1/research-runs` returns **409** `conflict` (`Research is disabled until shared document storage is configured`).
 - Demo catalog loaded from `scripts/demo-catalog.sql` (idempotent). Companies `totalItems` 13; facilities 8. Rows are labeled as demo catalog context, not operational qualification assertions. This is **Postgres catalog data only**; production has `documentCount` 0.
 - `GET /api/v1/ops/status`: `drainable: true`, **`alerts: []`**, queue failed 0, `documentCount` 0. Web ops only sees `web-volume`.

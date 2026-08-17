@@ -120,11 +120,21 @@ a:hover {
   white-space: nowrap;
 }
 
+.asi-shell__header-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--asi-space-4);
+  margin-inline-start: auto;
+}
+
+.asi-shell__header-actions .asi-shell__sign-out {
+  margin-block-start: 0;
+}
+
 .asi-shell__nav-toggle {
   display: none;
   inline-size: var(--asi-control-md);
   block-size: var(--asi-control-md);
-  margin-inline-start: auto;
   padding: var(--asi-space-4);
   border: var(--asi-border-width) solid var(--asi-border-strong);
   border-radius: var(--asi-radius-md);
@@ -219,6 +229,22 @@ a:hover {
 }
 
 .asi-shell__account-meta {
+  font-size: var(--asi-text-xs);
+}
+
+.asi-shell__sign-out {
+  display: grid;
+  gap: var(--asi-space-1);
+  margin-block-start: var(--asi-space-4);
+}
+
+.asi-shell__sign-out-button {
+  justify-self: start;
+}
+
+.asi-shell__sign-out-error {
+  margin: 0;
+  color: var(--asi-danger);
   font-size: var(--asi-text-xs);
 }
 

@@ -66,6 +66,20 @@ test.describe("authentication", () => {
     ).toBeVisible();
   });
 
+  test("signs out from the account chip and requires login again", async ({
+    page,
+  }) => {
+    await signIn(page);
+    await page
+      .locator("header")
+      .getByRole("button", { name: "Sign out" })
+      .click();
+    await page.waitForURL(/\/login/);
+    await expect(page.getByRole("button", { name: "Sign in" })).toBeVisible();
+    await page.goto("/dashboard");
+    await page.waitForURL(/\/login/);
+  });
+
   test("mutations without a CSRF header are rejected", async ({ page }) => {
     await signIn(page);
     const response = await page.request.post("/api/v1/research-runs", {

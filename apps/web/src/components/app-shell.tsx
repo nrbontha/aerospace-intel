@@ -7,6 +7,8 @@ import { usePathname } from "next/navigation";
 import { useState } from "react";
 import type { ReactNode } from "react";
 
+import { SignOutButton } from "@/components/sign-out-button";
+
 type ShellUser = Readonly<{
   displayName: string;
   email: string;
@@ -67,20 +69,23 @@ export function AppShell({ children, user }: AppShellProps) {
               Aerospace Supplier Intelligence
             </Link>
           </div>
-          <button
-            aria-controls="primary-navigation"
-            aria-expanded={navigationOpen}
-            aria-label={
-              navigationOpen
-                ? "Close primary navigation"
-                : "Open primary navigation"
-            }
-            className="asi-shell__nav-toggle"
-            onClick={() => setNavigationOpen((open) => !open)}
-            type="button"
-          >
-            <span aria-hidden="true">{navigationOpen ? "×" : "☰"}</span>
-          </button>
+          <div className="asi-shell__header-actions">
+            <SignOutButton />
+            <button
+              aria-controls="primary-navigation"
+              aria-expanded={navigationOpen}
+              aria-label={
+                navigationOpen
+                  ? "Close primary navigation"
+                  : "Open primary navigation"
+              }
+              className="asi-shell__nav-toggle"
+              onClick={() => setNavigationOpen((open) => !open)}
+              type="button"
+            >
+              <span aria-hidden="true">{navigationOpen ? "×" : "☰"}</span>
+            </button>
+          </div>
         </header>
 
         <div className="asi-shell__body">
@@ -118,6 +123,7 @@ export function AppShell({ children, user }: AppShellProps) {
                 {", "}
                 <span>{user.email}</span>
               </p>
+              <SignOutButton />
             </div>
           </aside>
 
