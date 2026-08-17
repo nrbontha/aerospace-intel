@@ -123,7 +123,6 @@ export function AppShell({ children, user }: AppShellProps) {
                 {", "}
                 <span>{user.email}</span>
               </p>
-              <SignOutButton />
             </div>
           </aside>
 

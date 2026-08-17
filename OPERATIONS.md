@@ -136,7 +136,7 @@ Observed 2026-08-17T13:17Z. **Do not mix the two ops snapshots.**
 Railway production (`https://aero-intel.up.railway.app`):
 
 - GitHub source `nrbontha/aerospace-intel` branch `main` is connected on **web only**. The worker source is disconnected so a web deploy cannot start OpenRouter. Confirm web `RAILWAY_GIT_COMMIT_SHA` against `origin/main`.
-- Public health/ready 200; admin login 200 with `Origin` equal to `APP_URL`. Username or email is accepted at `/login`. The account chip includes **Sign out** (`POST /api/v1/auth/logout` with CSRF).
+- Public health/ready 200; admin login 200 with `Origin` equal to `APP_URL`. Username or email is accepted at `/login`. The sticky header has a single **Sign out** control (`POST /api/v1/auth/logout` with CSRF).
 - Worker is **stopped** (0 running replicas). Restart policy `NEVER`. `worker-volume` remains attached. Do not treat a leftover FAILED historical deployment as a running worker.
 - `RESEARCH_SHARED_STORAGE=false` on web and worker. Authenticated `POST /api/v1/research-runs` returns **409** `conflict` (`Research is disabled until shared document storage is configured`).
 - Demo catalog loaded from `scripts/demo-catalog.sql` (idempotent). Companies `totalItems` 13; facilities 8. Rows are labeled as demo catalog context, not operational qualification assertions. This is **Postgres catalog data only**; production has `documentCount` 0.
