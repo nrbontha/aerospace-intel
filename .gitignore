@@ -34,3 +34,9 @@ npm-debug.log*
 .DS_Store
 .vscode/
 .idea/
+
+# Operator backups
+backups/
+
+# Local Railway link (project IDs live in the dashboard, not the repo)
+.railway/

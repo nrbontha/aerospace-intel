@@ -77,19 +77,26 @@ const queueName = z
     "Must be a lowercase queue name of at most 128 characters",
   );
 
+function isLoopbackAppUrl(value: string): boolean {
+  try {
+    const hostname = new URL(value).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
 const serverEnvSchema = z
   .object({
-    NODE_ENV: z
-      .enum(["development", "test", "production"])
-      .default("development"),
+    NODE_ENV: z.enum(["development", "test", "production"]),
     DATABASE_URL: z.preprocess(blankToUndefined, postgresUrl.optional()),
     SESSION_SECRET: optionalTrimmedString(z.string().min(32)),
     BOOTSTRAP_ADMIN_EMAIL: optionalTrimmedString(z.string().email()),
     BOOTSTRAP_ADMIN_PASSWORD: optionalTrimmedString(z.string().min(12)),
     OPENROUTER_API_KEY: optionalTrimmedString(z.string().min(1)),
-    OPENROUTER_MODEL_FAST: modelId.default("openai/gpt-4.1-mini"),
-    OPENROUTER_MODEL_DEEP: modelId.default("anthropic/claude-sonnet-4"),
-    OPENROUTER_MODEL_FALLBACK: modelId.default("google/gemini-2.5-flash"),
+    OPENROUTER_MODEL_FAST: modelId.default("openai/gpt-5.4-mini"),
+    OPENROUTER_MODEL_DEEP: modelId.default("anthropic/claude-sonnet-5"),
+    OPENROUTER_MODEL_FALLBACK: modelId.default("google/gemini-3.7-flash"),
     OPENROUTER_MAX_COST_PER_RUN_USD: positiveNumberWithDefault(2),
     OPENROUTER_MAX_COST_PER_DAY_USD: positiveNumberWithDefault(15),
     RESEARCH_MAX_TOOL_CALLS: positiveIntegerWithDefault(50, 10_000),
@@ -100,6 +107,7 @@ const serverEnvSchema = z
     SESSION_COOKIE_NAME: cookieName.default("asi_session"),
     SESSION_COOKIE_SECURE: optionalBoolean,
     RESEARCH_QUEUE_NAME: queueName.default("research-jobs"),
+    RESEARCH_SHARED_STORAGE: optionalBoolean,
   })
   .superRefine((env, context) => {
     if (env.NODE_ENV !== "test") {
@@ -118,6 +126,15 @@ const serverEnvSchema = z
           path: ["SESSION_SECRET"],
         });
       }
+    }
+
+    if (env.NODE_ENV === "development" && !isLoopbackAppUrl(env.APP_URL)) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "NODE_ENV must be production when APP_URL is not a loopback URL",
+        path: ["NODE_ENV"],
+      });
     }
 
     const hasBootstrapEmail = env.BOOTSTRAP_ADMIN_EMAIL !== undefined;
@@ -161,4 +178,8 @@ export function getPublicEnv(source?: EnvSource): PublicEnv {
       NEXT_PUBLIC_APP_URL: process.env.NEXT_PUBLIC_APP_URL,
     },
   );
+}
+
+export function allowsResearchDocumentWrites(env: ServerEnv): boolean {
+  return env.RESEARCH_SHARED_STORAGE === true;
 }

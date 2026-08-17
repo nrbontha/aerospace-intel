@@ -1,8 +1,6 @@
 import { z } from "zod";
-
-export const apiVersion = "v1" as const;
+export const apiVersion = "v1";
 export const apiVersionSchema = z.literal(apiVersion);
-
 export const roleValues = ["admin", "analyst", "viewer"] as const;
 export const sourceAccessValues = [
   "public",
@@ -107,7 +105,6 @@ export const evidenceExtractionStatusValues = [
   "completed",
   "failed",
 ] as const;
-
 export const roleSchema = z.enum(roleValues);
 export const sourceAccessSchema = z.enum(sourceAccessValues);
 export const sourceIngestionSchema = z.enum(sourceIngestionValues);
@@ -115,61 +112,41 @@ export const companyStatusSchema = z.enum(companyStatusValues);
 export const recordStatusSchema = z.enum(recordStatusValues);
 export const ownershipTypeSchema = z.enum(ownershipTypeValues);
 export const identifierTypeSchema = z.enum(identifierTypeValues);
-export const contactVerificationStatusSchema = z.enum(
-  contactVerificationStatusValues,
-);
+export const contactVerificationStatusSchema = z.enum(contactVerificationStatusValues);
 export const qualificationScarcitySchema = z.enum(qualificationScarcityValues);
-export const observationReviewStatusSchema = z.enum(
-  observationReviewStatusValues,
-);
-export const observationConflictStatusSchema = z.enum(
-  observationConflictStatusValues,
-);
+export const observationReviewStatusSchema = z.enum(observationReviewStatusValues);
+export const observationConflictStatusSchema = z.enum(observationConflictStatusValues);
 export const researchTargetTypeSchema = z.enum(researchTargetTypeValues);
 export const researchRunStatusSchema = z.enum(researchRunStatusValues);
 export const proposalStatusSchema = z.enum(proposalStatusValues);
 export const importStatusSchema = z.enum(importStatusValues);
-export const evidenceExtractionStatusSchema = z.enum(
-  evidenceExtractionStatusValues,
-);
-
-export type Role = z.infer<typeof roleSchema>;
-export type SourceAccess = z.infer<typeof sourceAccessSchema>;
-export type SourceIngestion = z.infer<typeof sourceIngestionSchema>;
-export type CompanyStatus = z.infer<typeof companyStatusSchema>;
-export type RecordStatus = z.infer<typeof recordStatusSchema>;
-export type OwnershipType = z.infer<typeof ownershipTypeSchema>;
-export type IdentifierType = z.infer<typeof identifierTypeSchema>;
-export type ContactVerificationStatus = z.infer<
-  typeof contactVerificationStatusSchema
->;
-export type QualificationScarcity = z.infer<typeof qualificationScarcitySchema>;
-export type ObservationReviewStatus = z.infer<
-  typeof observationReviewStatusSchema
->;
-export type ObservationConflictStatus = z.infer<
-  typeof observationConflictStatusSchema
->;
-export type ResearchTargetType = z.infer<typeof researchTargetTypeSchema>;
-export type ResearchRunStatus = z.infer<typeof researchRunStatusSchema>;
-export type ProposalStatus = z.infer<typeof proposalStatusSchema>;
-export type ImportStatus = z.infer<typeof importStatusSchema>;
-export type EvidenceExtractionStatus = z.infer<
-  typeof evidenceExtractionStatusSchema
->;
-
+export const evidenceExtractionStatusSchema = z.enum(evidenceExtractionStatusValues);
 export const uuidSchema = z.uuid();
 export const dateSchema = z.iso.date();
 export const instantSchema = z.iso.datetime({ offset: true });
 export const confidenceSchema = z.number().min(0).max(1);
 export const scoreSchema = z.number().min(0).max(100);
+export const scoreDimensionSchema = z.strictObject({
+  key: z.string().trim().min(1).max(100),
+  label: z.string().trim().min(1).max(200),
+  value: scoreSchema.nullable(),
+  method: z.string().trim().min(1).max(100),
+});
+export const scorecardSchema = z.strictObject({
+  subjectType: z.string().trim().min(1).max(100),
+  subjectId: z.uuid(),
+  overall: scoreSchema.nullable(),
+  completeness: z.number().min(0).max(1),
+  presentCount: z.number().int().min(0),
+  missingCount: z.number().int().min(0),
+  dimensions: z.array(scoreDimensionSchema).max(50),
+});
 export const countryCodeSchema = z
   .string()
   .trim()
   .toUpperCase()
   .regex(/^[A-Z]{2}$/);
 export const metadataSchema = z.record(z.string().min(1).max(100), z.json());
-
 export const paginatedQuerySchema = z.strictObject({
   page: z.coerce.number().int().min(1).default(1),
   pageSize: z.coerce.number().int().min(1).max(100).default(25),
@@ -203,16 +180,14 @@ export const successEnvelopeSchema = <T extends z.ZodType>(data: T) =>
   z.strictObject({ data, meta: requestMetaSchema.optional() });
 export const paginatedEnvelopeSchema = <T extends z.ZodType>(item: T) =>
   z.strictObject({ data: z.array(item), meta: pageMetaSchema });
-
 const id = z.uuid();
 const name = z.string().trim().min(1).max(300);
 const timestamps = {
   id,
   createdAt: instantSchema,
   updatedAt: instantSchema,
-} as const;
-const nonEmptyUpdate = (value: object) => Object.keys(value).length > 0;
-
+};
+const nonEmptyUpdate = (value: object): boolean => Object.keys(value).length > 0;
 export const entityReferenceSchema = z.strictObject({
   type: researchTargetTypeSchema,
   id,
@@ -230,7 +205,6 @@ export const moneySchema = z.strictObject({
     .toUpperCase()
     .regex(/^[A-Z]{3}$/),
 });
-
 export const companyCreateSchema = z.strictObject({
   legalName: name,
   commonName: name.optional(),
@@ -255,7 +229,17 @@ export const companyListQuerySchema = paginatedQuerySchema.extend({
   ownershipType: ownershipTypeSchema.optional(),
   country: countryCodeSchema.optional(),
 });
-
+export const companyAliasTypeValues = [
+  "name",
+  "trade",
+  "abbreviation",
+  "former",
+] as const;
+export const companyAliasCreateSchema = z.strictObject({
+  alias: z.string().trim().min(1).max(200),
+  aliasType: z.enum(companyAliasTypeValues).default("name"),
+  isPrimary: z.boolean().optional(),
+});
 export const dataSourceCreateSchema = z.strictObject({
   name,
   description: z.string().trim().max(10_000).optional(),
@@ -280,24 +264,20 @@ export const dataSourceListQuerySchema = paginatedQuerySchema.extend({
 });
 export const sourceDocumentCreateSchema = z
   .strictObject({
-    dataSourceId: id,
-    title: z.string().trim().min(1).max(500),
-    originalUrl: z.url().optional(),
-    storageKey: z.string().trim().min(1).max(1_000).optional(),
-    mediaType: z.string().trim().min(1).max(200),
-    contentSha256: z.string().regex(/^[a-f0-9]{64}$/i),
-    retrievedAt: instantSchema,
-    metadata: metadataSchema.default({}),
-  })
-  .refine(
-    (v) => v.originalUrl !== undefined || v.storageKey !== undefined,
-    "An original URL or durable storage key is required",
-  );
+  dataSourceId: id,
+  title: z.string().trim().min(1).max(500),
+  originalUrl: z.url().optional(),
+  storageKey: z.string().trim().min(1).max(1_000).optional(),
+  mediaType: z.string().trim().min(1).max(200),
+  contentSha256: z.string().regex(/^[a-f0-9]{64}$/i),
+  retrievedAt: instantSchema,
+  metadata: metadataSchema.default({}),
+})
+  .refine((v) => v.originalUrl !== undefined || v.storageKey !== undefined, "An original URL or durable storage key is required");
 export const sourceDocumentSchema = z.strictObject({
   ...timestamps,
   ...sourceDocumentCreateSchema.shape,
 });
-
 export const addressSchema = z.strictObject({
   line1: z.string().trim().min(1).max(300),
   line2: z.string().trim().min(1).max(300).optional(),
@@ -308,31 +288,56 @@ export const addressSchema = z.strictObject({
 });
 export const facilityCreateSchema = z
   .strictObject({
-    companyId: id,
-    name,
-    address: addressSchema.optional(),
-    latitude: z.number().min(-90).max(90).optional(),
-    longitude: z.number().min(-180).max(180).optional(),
-    status: recordStatusSchema.default("active"),
-  })
-  .refine(
-    (v) => (v.latitude === undefined) === (v.longitude === undefined),
-    "Latitude and longitude must be supplied together",
-  );
+  companyId: id,
+  name,
+  address: addressSchema.optional(),
+  latitude: z.number().min(-90).max(90).optional(),
+  longitude: z.number().min(-180).max(180).optional(),
+  status: recordStatusSchema.default("active"),
+})
+  .refine((v) => (v.latitude === undefined) === (v.longitude === undefined), "Latitude and longitude must be supplied together");
 export const facilitySchema = z.strictObject({
   ...timestamps,
   ...facilityCreateSchema.shape,
 });
 export const facilityUpdateSchema = z
   .strictObject({
-    companyId: id.optional(),
-    name: name.optional(),
-    address: addressSchema.optional(),
-    latitude: z.number().min(-90).max(90).optional(),
-    longitude: z.number().min(-180).max(180).optional(),
-    status: recordStatusSchema.optional(),
-  })
+  companyId: id.optional(),
+  name: name.optional(),
+  address: addressSchema.optional(),
+  latitude: z.number().min(-90).max(90).optional(),
+  longitude: z.number().min(-180).max(180).optional(),
+  status: recordStatusSchema.optional(),
+})
   .refine(nonEmptyUpdate, "At least one field must be supplied");
+export const facilityListQuerySchema = paginatedQuerySchema.extend({
+  query: z.string().trim().max(200).optional(),
+  status: recordStatusSchema.optional(),
+  companyId: id.optional(),
+  country: countryCodeSchema.optional(),
+});
+export const capabilityListQuerySchema = paginatedQuerySchema.extend({
+  query: z.string().trim().max(200).optional(),
+});
+export const certificationListQuerySchema = paginatedQuerySchema.extend({
+  query: z.string().trim().max(200).optional(),
+  companyId: id.optional(),
+  facilityId: id.optional(),
+  status: recordStatusSchema.optional(),
+});
+
+export const subsystemListQuerySchema = paginatedQuerySchema.extend({
+  query: z.string().trim().max(200).optional(),
+});
+export const customerListQuerySchema = paginatedQuerySchema.extend({
+  query: z.string().trim().max(200).optional(),
+  country: countryCodeSchema.optional(),
+});
+export const mergeListQuerySchema = paginatedQuerySchema.extend({
+  query: z.string().trim().max(200).optional(),
+  companyId: id.optional(),
+  status: z.enum(["applied", "reverted"]).optional(),
+});
 
 export const contactCreateSchema = z.strictObject({
   companyId: id,
@@ -352,7 +357,6 @@ export const contactSchema = z.strictObject({
 export const contactUpdateSchema = contactCreateSchema
   .partial()
   .refine(nonEmptyUpdate, "At least one field must be supplied");
-
 export const platformCreateSchema = z.strictObject({
   name,
   manufacturerCompanyId: id.optional(),
@@ -368,6 +372,10 @@ export const platformSchema = z.strictObject({
 export const platformUpdateSchema = platformCreateSchema
   .partial()
   .refine(nonEmptyUpdate, "At least one field must be supplied");
+export const platformListQuerySchema = paginatedQuerySchema.extend({
+  query: z.string().trim().max(200).optional(),
+  manufacturerCompanyId: id.optional(),
+});
 export const partCreateSchema = z.strictObject({
   partNumber: z.string().trim().min(1).max(200),
   name,
@@ -382,46 +390,53 @@ export const partSchema = z.strictObject({
 export const partUpdateSchema = partCreateSchema
   .partial()
   .refine(nonEmptyUpdate, "At least one field must be supplied");
-
+export const partListQuerySchema = paginatedQuerySchema.extend({
+  query: z.string().trim().max(200).optional(),
+  manufacturerCompanyId: id.optional(),
+  status: recordStatusSchema.optional(),
+});
 export const qualificationCreateSchema = z
   .strictObject({
-    facilityId: id,
-    partId: id,
-    platformId: id.optional(),
-    subsystem: name.optional(),
-    customerCompanyId: id.optional(),
-    validFrom: dateSchema.optional(),
-    validTo: dateSchema.optional(),
-    scarcity: qualificationScarcitySchema.default("not_assessed"),
-    confidence: confidenceSchema.optional(),
-    status: recordStatusSchema.default("active"),
-  })
-  .refine(
-    (v) =>
-      v.validFrom === undefined ||
-      v.validTo === undefined ||
-      v.validFrom <= v.validTo,
-    { message: "validFrom must be on or before validTo", path: ["validTo"] },
-  );
+  facilityId: id,
+  partId: id,
+  platformId: id.optional(),
+  subsystem: name.optional(),
+  customerCompanyId: id.optional(),
+  validFrom: dateSchema.optional(),
+  validTo: dateSchema.optional(),
+  scarcity: qualificationScarcitySchema.default("not_assessed"),
+  confidence: confidenceSchema.optional(),
+  status: recordStatusSchema.default("active"),
+})
+  .refine((v) => v.validFrom === undefined ||
+  v.validTo === undefined ||
+  v.validFrom <= v.validTo, { message: "validFrom must be on or before validTo", path: ["validTo"] });
 export const qualificationSchema = z.strictObject({
   ...timestamps,
   ...qualificationCreateSchema.shape,
 });
 export const qualificationUpdateSchema = z
   .strictObject({
-    facilityId: id.optional(),
-    partId: id.optional(),
-    platformId: id.optional(),
-    subsystem: name.optional(),
-    customerCompanyId: id.optional(),
-    validFrom: dateSchema.optional(),
-    validTo: dateSchema.optional(),
-    scarcity: qualificationScarcitySchema.optional(),
-    confidence: confidenceSchema.optional(),
-    status: recordStatusSchema.optional(),
-  })
+  facilityId: id.optional(),
+  partId: id.optional(),
+  platformId: id.optional(),
+  subsystem: name.optional(),
+  customerCompanyId: id.optional(),
+  validFrom: dateSchema.optional(),
+  validTo: dateSchema.optional(),
+  scarcity: qualificationScarcitySchema.optional(),
+  confidence: confidenceSchema.optional(),
+  status: recordStatusSchema.optional(),
+})
   .refine(nonEmptyUpdate, "At least one field must be supplied");
-
+export const qualificationListQuerySchema = paginatedQuerySchema.extend({
+  query: z.string().trim().max(200).optional(),
+  facilityId: id.optional(),
+  partId: id.optional(),
+  platformId: id.optional(),
+  customerCompanyId: id.optional(),
+  scarcity: qualificationScarcitySchema.optional(),
+});
 export const observationCreateSchema = z.strictObject({
   target: entityReferenceSchema,
   field: z.string().trim().min(1).max(200),
@@ -464,7 +479,6 @@ export const evidenceExtractionSchema = z.strictObject({
   confidence: confidenceSchema,
   notes: z.string().trim().max(5_000).optional(),
 });
-
 export const researchTargetSchema = z.strictObject({
   type: researchTargetTypeSchema,
   id,
@@ -491,7 +505,29 @@ export const researchRunListQuerySchema = paginatedQuerySchema.extend({
   status: researchRunStatusSchema.optional(),
   targetType: researchTargetTypeSchema.optional(),
 });
-
+export const researchDiscoverCreateSchema = z.strictObject({
+  kind: z.literal("discover"),
+  objective: z.string().trim().min(1).max(2_000),
+  targetTypes: z.array(researchTargetTypeSchema).min(1).max(7),
+  seedTerms: z.array(z.string().trim().min(1).max(300)).max(50).optional(),
+  requestedModel: z.string().trim().min(1).max(200).optional(),
+  maxAttempts: z.number().int().min(1).max(10).default(3),
+  maxCostUsd: z.number().min(0).max(10_000).optional(),
+  metadata: metadataSchema.default({}),
+});
+export const researchRefreshCreateSchema = z.strictObject({
+  kind: z.literal("refresh"),
+  target: entityReferenceSchema,
+  staleBefore: instantSchema.optional(),
+  requestedModel: z.string().trim().min(1).max(200).optional(),
+  maxAttempts: z.number().int().min(1).max(10).default(3),
+  maxCostUsd: z.number().min(0).max(10_000).optional(),
+  metadata: metadataSchema.default({}),
+});
+export const importListQuerySchema = paginatedQuerySchema.extend({
+  status: importStatusSchema.optional(),
+  query: z.string().trim().max(200).optional(),
+});
 export const proposalCreateSchema = z.strictObject({
   researchRunId: id,
   observationId: id,
@@ -517,7 +553,20 @@ export const proposalListQuerySchema = paginatedQuerySchema.extend({
   researchRunId: id.optional(),
   targetType: researchTargetTypeSchema.optional(),
 });
-
+const companyMergeReasonSchema = z.string().trim().min(1).max(10_000);
+export const companyMergeCreateSchema = z
+  .strictObject({
+  sourceCompanyId: id,
+  targetCompanyId: id,
+  reason: companyMergeReasonSchema,
+})
+  .refine((value) => value.sourceCompanyId !== value.targetCompanyId, {
+  message: "Source and target companies must differ",
+  path: ["targetCompanyId"],
+});
+export const companyMergeRevertSchema = z.strictObject({
+  reason: companyMergeReasonSchema,
+});
 export const importFormatValues = ["csv", "jsonl", "xlsx"] as const;
 export const importEntityValues = [
   "companies",
@@ -559,6 +608,11 @@ export const exportCreateSchema = z.strictObject({
   format: z.enum(exportFormatValues),
   filters: metadataSchema.default({}),
 });
+export const exportQuerySchema = z.strictObject({
+  entity: z.enum(importEntityValues),
+  format: z.enum(exportFormatValues).default("csv"),
+  query: z.string().trim().max(200).optional(),
+});
 export const exportSchema = z.strictObject({
   ...timestamps,
   ...exportCreateSchema.shape,
@@ -567,7 +621,6 @@ export const exportSchema = z.strictObject({
   expiresAt: instantSchema.optional(),
   error: apiErrorSchema.optional(),
 });
-
 export const loginSchema = z.strictObject({
   email: z.email(),
   password: z.string().min(12).max(1_000),
@@ -580,10 +633,10 @@ export const userCreateSchema = z.strictObject({
 });
 export const userUpdateSchema = z
   .strictObject({
-    displayName: z.string().trim().min(1).max(200).optional(),
-    role: roleSchema.optional(),
-    disabled: z.boolean().optional(),
-  })
+  displayName: z.string().trim().min(1).max(200).optional(),
+  role: roleSchema.optional(),
+  disabled: z.boolean().optional(),
+})
   .refine(nonEmptyUpdate, "At least one field must be supplied");
 export const userSchema = z.strictObject({
   ...timestamps,
@@ -592,6 +645,23 @@ export const userSchema = z.strictObject({
   role: roleSchema,
   disabled: z.boolean(),
 });
+
+export type Role = z.infer<typeof roleSchema>;
+export type SourceAccess = z.infer<typeof sourceAccessSchema>;
+export type SourceIngestion = z.infer<typeof sourceIngestionSchema>;
+export type CompanyStatus = z.infer<typeof companyStatusSchema>;
+export type RecordStatus = z.infer<typeof recordStatusSchema>;
+export type OwnershipType = z.infer<typeof ownershipTypeSchema>;
+export type IdentifierType = z.infer<typeof identifierTypeSchema>;
+export type ContactVerificationStatus = z.infer<typeof contactVerificationStatusSchema>;
+export type QualificationScarcity = z.infer<typeof qualificationScarcitySchema>;
+export type ObservationReviewStatus = z.infer<typeof observationReviewStatusSchema>;
+export type ObservationConflictStatus = z.infer<typeof observationConflictStatusSchema>;
+export type ResearchTargetType = z.infer<typeof researchTargetTypeSchema>;
+export type ResearchRunStatus = z.infer<typeof researchRunStatusSchema>;
+export type ProposalStatus = z.infer<typeof proposalStatusSchema>;
+export type ImportStatus = z.infer<typeof importStatusSchema>;
+export type EvidenceExtractionStatus = z.infer<typeof evidenceExtractionStatusSchema>;
 
 export type PaginatedQuery = z.infer<typeof paginatedQuerySchema>;
 export type PageMeta = z.infer<typeof pageMetaSchema>;
@@ -630,19 +700,25 @@ export type ResearchRunCreate = z.infer<typeof researchRunCreateSchema>;
 export type ResearchRun = z.infer<typeof researchRunSchema>;
 export type ProposalCreate = z.infer<typeof proposalCreateSchema>;
 export type Proposal = z.infer<typeof proposalSchema>;
+export type CompanyMergeCreate = z.infer<typeof companyMergeCreateSchema>;
+export type CompanyMergeRevert = z.infer<typeof companyMergeRevertSchema>;
 export type ImportCreate = z.infer<typeof importCreateSchema>;
 export type Import = z.infer<typeof importSchema>;
 export type ExportCreate = z.infer<typeof exportCreateSchema>;
 export type Export = z.infer<typeof exportSchema>;
 export type UserCreate = z.infer<typeof userCreateSchema>;
 export type User = z.infer<typeof userSchema>;
-
 export type ApiErrorCode = z.infer<typeof apiErrorSchema.shape.code>;
 export type RequestMeta = z.infer<typeof requestMetaSchema>;
 export type Money = z.infer<typeof moneySchema>;
 export type Address = z.infer<typeof addressSchema>;
 export type CompanyUpdate = z.infer<typeof companyUpdateSchema>;
 export type CompanyListQuery = z.infer<typeof companyListQuerySchema>;
+export type CompanyAliasCreate = z.infer<typeof companyAliasCreateSchema>;
+export type CompanyAliasType = (typeof companyAliasTypeValues)[number];
+export type SubsystemListQuery = z.infer<typeof subsystemListQuerySchema>;
+export type CustomerListQuery = z.infer<typeof customerListQuerySchema>;
+export type MergeListQuery = z.infer<typeof mergeListQuerySchema>;
 export type DataSourceUpdate = z.infer<typeof dataSourceUpdateSchema>;
 export type DataSourceListQuery = z.infer<typeof dataSourceListQuerySchema>;
 export type FacilityUpdate = z.infer<typeof facilityUpdateSchema>;
@@ -678,4 +754,4 @@ export const v1Schemas = {
   export: exportSchema,
   user: userSchema,
   errorEnvelope: errorEnvelopeSchema,
-} as const;
+};

@@ -15,6 +15,7 @@ import {
   TableRow,
 } from "@asi/ui";
 import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { OpsStatusPanel } from "@/components/ops-status-panel";
 
 const roles: readonly Role[] = ["admin", "analyst", "viewer"];
 const csrfCookieName = "asi_session_csrf";
@@ -329,6 +330,7 @@ export default function AdminPage() {
 
   return (
     <>
+      <OpsStatusPanel />
       <header className="asi-page-header">
         <div>
           <p className="asi-page-kicker">Administration</p>

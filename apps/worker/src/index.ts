@@ -1,9 +1,18 @@
 import { pathToFileURL } from "node:url";
 
-import { getServerEnv } from "@asi/config";
+import { allowsResearchDocumentWrites, getServerEnv } from "@asi/config";
 import { closeDatabase } from "@asi/database/client";
+import { OpenRouterClient } from "@asi/research";
 
 import { startHealthServer, type HealthServer } from "./health.js";
+import {
+  createCompanyResearchHandler,
+  createDiscoverResearchHandler,
+  createPartResearchHandler,
+  createPlatformResearchHandler,
+  createRefreshResearchHandler,
+  createSourceResearchHandler,
+} from "./handlers/index.js";
 import {
   createWorkerQueue,
   type QueueLogger,
@@ -145,12 +154,67 @@ async function stopComponents(
 
 export async function startWorker(): Promise<WorkerRuntime> {
   const env = getServerEnv();
+  if (!allowsResearchDocumentWrites(env)) {
+    log("warn", "research.handlers.disabled", {
+      reason: "shared_storage_required",
+    });
+    const healthServer = await startHealthServer(env.PORT, {
+      isQueueReady: () => false,
+    });
+    log("info", "worker.started", {
+      healthPort: env.PORT,
+      researchHandlers: false,
+    });
+    let stopPromise: Promise<void> | undefined;
+    return {
+      stop(): Promise<void> {
+        stopPromise ??= (async () => {
+          log("info", "worker.stopping");
+          await stopComponents(healthServer, undefined);
+          log("info", "worker.stopped");
+        })();
+        return stopPromise;
+      },
+    };
+  }
+
   const databaseUrl = env.DATABASE_URL;
   if (databaseUrl === undefined) {
     throw new Error("DATABASE_URL is required to start the worker");
   }
 
-  const handlers = Object.freeze({}) satisfies ResearchJobHandlerRegistry;
+  const openRouterApiKey = env.OPENROUTER_API_KEY;
+  if (openRouterApiKey === undefined) {
+    throw new Error("OPENROUTER_API_KEY is required to start the worker");
+  }
+
+  const openRouterClient = new OpenRouterClient(openRouterApiKey);
+  const shared = {
+    client: openRouterClient,
+    logger: log,
+    maxToolCalls: env.RESEARCH_MAX_TOOL_CALLS,
+    models: {
+      deep: env.OPENROUTER_MODEL_DEEP,
+      fallback: env.OPENROUTER_MODEL_FALLBACK,
+      fast: env.OPENROUTER_MODEL_FAST,
+    },
+  } as const;
+  const handlers = Object.freeze({
+    "research.company.v1": createCompanyResearchHandler({
+      ...shared,
+      maxCostPerDayUsd: env.OPENROUTER_MAX_COST_PER_DAY_USD,
+      maxCostPerRunUsd: env.OPENROUTER_MAX_COST_PER_RUN_USD,
+    }),
+    "research.source.v1": createSourceResearchHandler({
+      ...shared,
+      maxCostPerDayUsd: env.OPENROUTER_MAX_COST_PER_DAY_USD,
+      maxCostPerRunUsd: env.OPENROUTER_MAX_COST_PER_RUN_USD,
+    }),
+    "research.platform.v1": createPlatformResearchHandler(shared),
+    "research.part.v1": createPartResearchHandler(shared),
+    "research.discover.v1": createDiscoverResearchHandler(shared),
+    "research.refresh.v1": createRefreshResearchHandler(shared),
+  }) satisfies ResearchJobHandlerRegistry;
   let healthServer: HealthServer | undefined;
   let queue: WorkerQueue | undefined;
 

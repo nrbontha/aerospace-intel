@@ -5,7 +5,9 @@
     "dockerfilePath": "Dockerfile.worker"
   },
   "deploy": {
-    "startCommand": "exec npm run start --workspace @asi/worker",
+    "startCommand": "npm run start --workspace @asi/worker",
+    "healthcheckPath": "/health",
+    "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 10
   }

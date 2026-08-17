@@ -37,3 +37,37 @@ export function jsonError(
 
   return NextResponse.json({ error }, { status });
 }
+
+
+export function jsonValue(value: unknown): unknown {
+  if (value instanceof Date) return value.toISOString();
+  if (typeof value === "bigint") return value.toString();
+  if (typeof value === "number" && !Number.isFinite(value)) return null;
+  if (Array.isArray(value)) return value.map(jsonValue);
+  if (typeof value === "object" && value !== null) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, child]) => [key, jsonValue(child)]),
+    );
+  }
+  return value;
+}
+
+export function jsonPage<T>(
+  records: T[],
+  page: number,
+  pageSize: number,
+  total: number,
+): Response {
+  return NextResponse.json(
+    {
+      data: records.map(jsonValue),
+      meta: {
+        page,
+        pageSize,
+        totalItems: total,
+        totalPages: Math.ceil(total / pageSize) || 0,
+      },
+    },
+    { headers: { "Cache-Control": "private, no-store" } },
+  );
+}

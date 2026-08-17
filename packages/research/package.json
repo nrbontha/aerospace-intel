@@ -20,6 +20,41 @@
       "types": "./src/tools.ts",
       "import": "./dist/tools.js",
       "default": "./dist/tools.js"
+    },
+    "./openrouter": {
+      "types": "./src/openrouter.ts",
+      "import": "./dist/openrouter.js",
+      "default": "./dist/openrouter.js"
+    },
+    "./safe-fetch": {
+      "types": "./src/safe-fetch.ts",
+      "import": "./dist/safe-fetch.js",
+      "default": "./dist/safe-fetch.js"
+    },
+    "./source-workflow": {
+      "types": "./src/source-workflow.ts",
+      "import": "./dist/source-workflow.js",
+      "default": "./dist/source-workflow.js"
+    },
+    "./company-workflow": {
+      "types": "./src/company-workflow.ts",
+      "import": "./dist/company-workflow.js",
+      "default": "./dist/company-workflow.js"
+    },
+    "./scoring": {
+      "types": "./src/scoring.ts",
+      "import": "./dist/scoring.js",
+      "default": "./dist/scoring.js"
+    },
+    "./subject-workflow": {
+      "types": "./src/subject-workflow.ts",
+      "import": "./dist/subject-workflow.js",
+      "default": "./dist/subject-workflow.js"
+    },
+    "./discover-workflow": {
+      "types": "./src/discover-workflow.ts",
+      "import": "./dist/discover-workflow.js",
+      "default": "./dist/discover-workflow.js"
     }
   },
   "files": [
@@ -36,6 +71,7 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@types/node": "22.20.1",
     "typescript": "6.0.3",
     "vitest": "4.1.10"
   }

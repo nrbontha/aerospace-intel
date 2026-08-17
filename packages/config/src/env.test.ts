@@ -1,15 +1,30 @@
 import { describe, expect, it } from "vitest";
 
-import { getPublicEnv, getServerEnv } from "./index.js";
+import {
+  allowsResearchDocumentWrites,
+  getPublicEnv,
+  getServerEnv,
+} from "./index.js";
+
+const requiredRuntime = {
+  DATABASE_URL: "postgresql://asi:asi@127.0.0.1:54329/asi",
+  SESSION_SECRET: "x".repeat(32),
+} as const;
+
+const unsetResearchRuntime = {
+  ...requiredRuntime,
+  NODE_ENV: undefined,
+  RESEARCH_SHARED_STORAGE: undefined,
+} as const;
 
 describe("getServerEnv", () => {
   it("applies bounded research and runtime defaults in tests", () => {
     const env = getServerEnv({ NODE_ENV: "test" });
 
     expect(env).toMatchObject({
-      OPENROUTER_MODEL_FAST: "openai/gpt-4.1-mini",
-      OPENROUTER_MODEL_DEEP: "anthropic/claude-sonnet-4",
-      OPENROUTER_MODEL_FALLBACK: "google/gemini-2.5-flash",
+      OPENROUTER_MODEL_FAST: "openai/gpt-5.4-mini",
+      OPENROUTER_MODEL_DEEP: "anthropic/claude-sonnet-5",
+      OPENROUTER_MODEL_FALLBACK: "google/gemini-3.7-flash",
       OPENROUTER_MAX_COST_PER_RUN_USD: 2,
       OPENROUTER_MAX_COST_PER_DAY_USD: 15,
       RESEARCH_MAX_TOOL_CALLS: 50,
@@ -21,6 +36,23 @@ describe("getServerEnv", () => {
       SESSION_COOKIE_SECURE: false,
       RESEARCH_QUEUE_NAME: "research-jobs",
     });
+  });
+
+  it("rejects { NODE_ENV: undefined, RESEARCH_SHARED_STORAGE: undefined }", () => {
+    expect(() => getServerEnv(unsetResearchRuntime)).toThrow(/NODE_ENV/);
+    expect(() =>
+      getServerEnv({ ...requiredRuntime, NODE_ENV: "" }),
+    ).toThrow(/NODE_ENV/);
+  });
+
+  it("requires production NODE_ENV when APP_URL is not loopback", () => {
+    expect(() =>
+      getServerEnv({
+        ...requiredRuntime,
+        NODE_ENV: "development",
+        APP_URL: "https://example.up.railway.app",
+      }),
+    ).toThrow(/NODE_ENV must be production/);
   });
 
   it.each([
@@ -47,6 +79,74 @@ describe("getServerEnv", () => {
         ...bootstrapEnv,
       }),
     ).toThrow(/must be provided together/);
+  });
+});
+
+describe("allowsResearchDocumentWrites", () => {
+  it("does not open writes for { NODE_ENV: undefined, RESEARCH_SHARED_STORAGE: undefined }", () => {
+    expect(() =>
+      allowsResearchDocumentWrites(getServerEnv(unsetResearchRuntime)),
+    ).toThrow(/NODE_ENV/);
+  });
+
+  it("requires RESEARCH_SHARED_STORAGE=true even for development and test", () => {
+    expect(
+      allowsResearchDocumentWrites(getServerEnv({ NODE_ENV: "test" })),
+    ).toBe(false);
+    expect(
+      allowsResearchDocumentWrites(
+        getServerEnv({
+          ...requiredRuntime,
+          NODE_ENV: "development",
+        }),
+      ),
+    ).toBe(false);
+    expect(
+      allowsResearchDocumentWrites(
+        getServerEnv({
+          NODE_ENV: "test",
+          RESEARCH_SHARED_STORAGE: "true",
+        }),
+      ),
+    ).toBe(true);
+  });
+
+  it("blocks production unless RESEARCH_SHARED_STORAGE is true", () => {
+    const production = {
+      ...requiredRuntime,
+      NODE_ENV: "production",
+    } as const;
+
+    expect(allowsResearchDocumentWrites(getServerEnv(production))).toBe(false);
+    expect(
+      allowsResearchDocumentWrites(
+        getServerEnv({ ...production, RESEARCH_SHARED_STORAGE: "false" }),
+      ),
+    ).toBe(false);
+    expect(
+      allowsResearchDocumentWrites(
+        getServerEnv({ ...production, RESEARCH_SHARED_STORAGE: "true" }),
+      ),
+    ).toBe(true);
+  });
+
+  it("blocks a hosted APP_URL without shared storage even if research is requested", () => {
+    const hosted = getServerEnv({
+      ...requiredRuntime,
+      NODE_ENV: "production",
+      APP_URL: "https://example.up.railway.app",
+    });
+    expect(allowsResearchDocumentWrites(hosted)).toBe(false);
+    expect(
+      allowsResearchDocumentWrites(
+        getServerEnv({
+          ...requiredRuntime,
+          NODE_ENV: "production",
+          APP_URL: "https://example.up.railway.app",
+          RESEARCH_SHARED_STORAGE: "true",
+        }),
+      ),
+    ).toBe(true);
   });
 });
 

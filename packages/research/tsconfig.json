@@ -6,6 +6,8 @@
     "composite": true,
     "declaration": true,
     "declarationMap": true,
+    "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": ["node"],
     "noEmit": false
   },
   "include": ["src/**/*.ts"]

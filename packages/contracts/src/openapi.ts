@@ -73,6 +73,17 @@ export const openApiDocument = {
         },
       },
     },
+    "/api/v1/health/ready": {
+      get: {
+        operationId: "getReadiness",
+        tags: ["Health"],
+        security: [],
+        responses: {
+          "200": ok("HealthEnvelope"),
+          "503": ok("ErrorEnvelope", "Service unavailable"),
+        },
+      },
+    },
     "/api/v1/auth/login": {
       post: {
         operationId: "login",
@@ -98,6 +109,23 @@ export const openApiDocument = {
         },
       },
     },
+    "/api/v1/auth/me": {
+      get: {
+        operationId: "getCurrentUser",
+        tags: ["Auth"],
+        responses: { "200": ok("UserEnvelope"), ...errors },
+      },
+    },
+    "/api/v1/openapi": {
+      get: {
+        operationId: "getOpenApi",
+        tags: ["Health"],
+        responses: {
+          "200": { description: "OpenAPI 3.1 document", content: json },
+          ...errors,
+        },
+      },
+    },
     "/api/v1/companies": {
       get: {
         operationId: "listCompanies",
@@ -108,6 +136,7 @@ export const openApiDocument = {
           {
             name: "query",
             in: "query",
+            description: "Matches legal name, display name, and aliases.",
             schema: { type: "string", maxLength: 200 },
           },
           {
@@ -118,32 +147,23 @@ export const openApiDocument = {
         ],
         responses: { "200": ok("CompanyListEnvelope"), ...errors },
       },
-      post: {
-        operationId: "createCompany",
-        tags: ["Companies"],
-        parameters: [csrf],
-        requestBody: body("CompanyCreate"),
-        responses: {
-          "201": ok("CompanyEnvelope", "Created"),
-          ...errors,
-          "409": { $ref: "#/components/responses/Conflict" },
-        },
-      },
     },
     "/api/v1/companies/{companyId}": {
       get: {
         operationId: "getCompany",
         tags: ["Companies"],
         parameters: [idParameter("companyId")],
-        responses: { "200": ok("CompanyEnvelope"), ...errors },
+        responses: { "200": ok("CompanySuccessEnvelope"), ...errors },
       },
-      patch: {
-        operationId: "updateCompany",
+    },
+    "/api/v1/companies/{companyId}/aliases": {
+      post: {
+        operationId: "createCompanyAlias",
         tags: ["Companies"],
         parameters: [idParameter("companyId"), csrf],
-        requestBody: body("CompanyUpdate"),
+        requestBody: body("CompanyAliasCreate"),
         responses: {
-          "200": ok("CompanyEnvelope"),
+          "201": ok("CompanyAliasEnvelope", "Created"),
           ...errors,
           "409": { $ref: "#/components/responses/Conflict" },
         },
@@ -151,48 +171,27 @@ export const openApiDocument = {
     },
     "/api/v1/sources": {
       get: {
-        operationId: "listDataSources",
+        operationId: "listSources",
         tags: ["Sources"],
         parameters: [
           { $ref: "#/components/parameters/Page" },
           { $ref: "#/components/parameters/PageSize" },
-          {
-            name: "access",
-            in: "query",
-            schema: { $ref: "#/components/schemas/SourceAccess" },
-          },
-          {
-            name: "ingestionMethod",
-            in: "query",
-            schema: { $ref: "#/components/schemas/SourceIngestion" },
-          },
         ],
         responses: { "200": ok("DataSourceListEnvelope"), ...errors },
       },
       post: {
-        operationId: "createDataSource",
+        operationId: "createSource",
         tags: ["Sources"],
         parameters: [csrf],
         requestBody: body("DataSourceCreate"),
-        responses: {
-          "201": ok("DataSourceEnvelope", "Created"),
-          ...errors,
-          "409": { $ref: "#/components/responses/Conflict" },
-        },
+        responses: { "201": ok("DataSourceEnvelope", "Created"), ...errors },
       },
     },
     "/api/v1/sources/{sourceId}": {
       get: {
-        operationId: "getDataSource",
+        operationId: "getSource",
         tags: ["Sources"],
         parameters: [idParameter("sourceId")],
-        responses: { "200": ok("DataSourceEnvelope"), ...errors },
-      },
-      patch: {
-        operationId: "updateDataSource",
-        tags: ["Sources"],
-        parameters: [idParameter("sourceId"), csrf],
-        requestBody: body("DataSourceUpdate"),
         responses: { "200": ok("DataSourceEnvelope"), ...errors },
       },
     },
@@ -203,11 +202,6 @@ export const openApiDocument = {
         parameters: [
           { $ref: "#/components/parameters/Page" },
           { $ref: "#/components/parameters/PageSize" },
-          {
-            name: "status",
-            in: "query",
-            schema: { $ref: "#/components/schemas/ResearchRunStatus" },
-          },
         ],
         responses: { "200": ok("ResearchRunListEnvelope"), ...errors },
       },
@@ -225,6 +219,21 @@ export const openApiDocument = {
         tags: ["Research"],
         parameters: [idParameter("researchRunId")],
         responses: { "200": ok("ResearchRunEnvelope"), ...errors },
+      },
+    },
+    "/api/v1/research-runs/{researchRunId}/events": {
+      get: {
+        operationId: "streamResearchRun",
+        tags: ["Research"],
+        parameters: [idParameter("researchRunId")],
+        responses: {
+          "200": {
+            description:
+              "Server-sent snapshots of persisted research-run state",
+            content: { "text/event-stream": {} },
+          },
+          ...errors,
+        },
       },
     },
     "/api/v1/research-runs/{researchRunId}/cancel": {
@@ -254,12 +263,17 @@ export const openApiDocument = {
         ],
         responses: { "200": ok("ProposalListEnvelope"), ...errors },
       },
+    },
+    "/api/v1/proposals/bulk": {
       post: {
-        operationId: "createProposal",
+        operationId: "bulkReviewProposals",
         tags: ["Proposals"],
         parameters: [csrf],
-        requestBody: body("ProposalCreate"),
-        responses: { "201": ok("ProposalEnvelope", "Created"), ...errors },
+        responses: {
+          "200": ok("ProposalListEnvelope"),
+          ...errors,
+          "409": { $ref: "#/components/responses/Conflict" },
+        },
       },
     },
     "/api/v1/proposals/{proposalId}": {
@@ -269,23 +283,8 @@ export const openApiDocument = {
         parameters: [idParameter("proposalId")],
         responses: { "200": ok("ProposalEnvelope"), ...errors },
       },
-    },
-    "/api/v1/proposals/{proposalId}/accept": {
-      post: {
-        operationId: "acceptProposal",
-        tags: ["Proposals"],
-        parameters: [idParameter("proposalId"), csrf],
-        requestBody: body("ProposalDecision"),
-        responses: {
-          "200": ok("ProposalEnvelope"),
-          ...errors,
-          "409": { $ref: "#/components/responses/Conflict" },
-        },
-      },
-    },
-    "/api/v1/proposals/{proposalId}/reject": {
-      post: {
-        operationId: "rejectProposal",
+      patch: {
+        operationId: "reviewProposal",
         tags: ["Proposals"],
         parameters: [idParameter("proposalId"), csrf],
         requestBody: body("ProposalDecision"),
@@ -310,8 +309,7 @@ export const openApiDocument = {
         operationId: "createImport",
         tags: ["Imports"],
         parameters: [csrf],
-        requestBody: body("ImportCreate"),
-        responses: { "202": ok("ImportEnvelope", "Queued"), ...errors },
+        responses: { "200": ok("ImportEnvelope"), ...errors },
       },
     },
     "/api/v1/imports/{importId}": {
@@ -324,28 +322,57 @@ export const openApiDocument = {
     },
     "/api/v1/exports": {
       get: {
-        operationId: "listExports",
+        operationId: "exportCatalog",
         tags: ["Exports"],
         parameters: [
-          { $ref: "#/components/parameters/Page" },
-          { $ref: "#/components/parameters/PageSize" },
+          {
+            name: "entity",
+            in: "query",
+            required: true,
+            schema: {
+              type: "string",
+              enum: [
+                "companies",
+                "facilities",
+                "contacts",
+                "platforms",
+                "parts",
+                "qualifications",
+                "data_sources",
+              ],
+            },
+          },
+          {
+            name: "format",
+            in: "query",
+            schema: { type: "string", enum: ["csv", "jsonl"] },
+          },
         ],
-        responses: { "200": ok("ExportListEnvelope"), ...errors },
+        responses: {
+          "200": {
+            description: "Immediate CSV or JSONL download",
+            content: {
+              "text/csv": {},
+              "application/x-ndjson": {},
+            },
+          },
+          ...errors,
+        },
       },
       post: {
-        operationId: "createExport",
+        operationId: "exportCatalogWithCsrf",
         tags: ["Exports"],
         parameters: [csrf],
-        requestBody: body("ExportCreate"),
-        responses: { "202": ok("ExportEnvelope", "Queued"), ...errors },
-      },
-    },
-    "/api/v1/exports/{exportId}": {
-      get: {
-        operationId: "getExport",
-        tags: ["Exports"],
-        parameters: [idParameter("exportId")],
-        responses: { "200": ok("ExportEnvelope"), ...errors },
+        responses: {
+          "200": {
+            description: "Immediate CSV or JSONL download",
+            content: {
+              "text/csv": {},
+              "application/x-ndjson": {},
+            },
+          },
+          ...errors,
+        },
       },
     },
     "/api/v1/admin/users": {
@@ -362,28 +389,21 @@ export const openApiDocument = {
       post: {
         operationId: "createUser",
         tags: ["Admin"],
-        description: "Admin role required.",
         parameters: [csrf],
         requestBody: body("UserCreate"),
-        responses: {
-          "201": ok("UserEnvelope", "Created"),
-          ...errors,
-          "409": { $ref: "#/components/responses/Conflict" },
-        },
+        responses: { "201": ok("UserEnvelope", "Created"), ...errors },
       },
     },
     "/api/v1/admin/users/{userId}": {
       get: {
         operationId: "getUser",
         tags: ["Admin"],
-        description: "Admin role required.",
         parameters: [idParameter("userId")],
         responses: { "200": ok("UserEnvelope"), ...errors },
       },
       patch: {
         operationId: "updateUser",
         tags: ["Admin"],
-        description: "Admin role required.",
         parameters: [idParameter("userId"), csrf],
         requestBody: body("UserUpdate"),
         responses: {
@@ -391,6 +411,221 @@ export const openApiDocument = {
           ...errors,
           "409": { $ref: "#/components/responses/Conflict" },
         },
+      },
+    },
+    "/api/v1/admin/users/{userId}/reset-password": {
+      post: {
+        operationId: "resetUserPassword",
+        tags: ["Admin"],
+        parameters: [idParameter("userId"), csrf],
+        requestBody: {
+          required: true,
+          content: {
+            "application/json": {
+              schema: {
+                type: "object",
+                additionalProperties: false,
+                required: ["password"],
+                properties: {
+                  password: { type: "string", minLength: 12, maxLength: 1000 },
+                },
+              },
+            },
+          },
+        },
+        responses: {
+          "200": { description: "Password reset", content: json },
+          ...errors,
+        },
+      },
+    },
+    "/api/v1/admin/users/{userId}/sessions": {
+      delete: {
+        operationId: "revokeUserSessions",
+        tags: ["Admin"],
+        parameters: [idParameter("userId"), csrf],
+        responses: {
+          "200": { description: "Active sessions revoked", content: json },
+          ...errors,
+        },
+      },
+    },
+    "/api/v1/facilities": {
+      get: {
+        operationId: "listFacilities",
+        tags: ["Catalog"],
+        responses: { "200": { description: "Facility list", content: json }, ...errors },
+      },
+    },
+    "/api/v1/facilities/{facilityId}": {
+      get: {
+        operationId: "getFacility",
+        tags: ["Catalog"],
+        parameters: [idParameter("facilityId")],
+        responses: { "200": { description: "Facility detail", content: json }, ...errors },
+      },
+    },
+    "/api/v1/platforms": {
+      get: {
+        operationId: "listPlatforms",
+        tags: ["Catalog"],
+        responses: { "200": { description: "Platform list", content: json }, ...errors },
+      },
+    },
+    "/api/v1/platforms/{platformId}": {
+      get: {
+        operationId: "getPlatform",
+        tags: ["Catalog"],
+        parameters: [idParameter("platformId")],
+        responses: { "200": { description: "Platform detail including variants", content: json }, ...errors },
+      },
+    },
+    "/api/v1/parts": {
+      get: {
+        operationId: "listParts",
+        tags: ["Catalog"],
+        responses: { "200": { description: "Part list", content: json }, ...errors },
+      },
+    },
+    "/api/v1/parts/{partId}": {
+      get: {
+        operationId: "getPart",
+        tags: ["Catalog"],
+        parameters: [idParameter("partId")],
+        responses: { "200": { description: "Part detail", content: json }, ...errors },
+      },
+    },
+    "/api/v1/subsystems": {
+      get: {
+        operationId: "listSubsystems",
+        tags: ["Catalog"],
+        responses: { "200": { description: "Subsystem list", content: json }, ...errors },
+      },
+    },
+    "/api/v1/subsystems/{subsystemId}": {
+      get: {
+        operationId: "getSubsystem",
+        tags: ["Catalog"],
+        parameters: [idParameter("subsystemId")],
+        responses: { "200": { description: "Subsystem detail", content: json }, ...errors },
+      },
+    },
+    "/api/v1/customers": {
+      get: {
+        operationId: "listCustomers",
+        tags: ["Catalog"],
+        responses: { "200": { description: "Customer-role company list", content: json }, ...errors },
+      },
+    },
+    "/api/v1/customers/{customerId}": {
+      get: {
+        operationId: "getCustomer",
+        tags: ["Catalog"],
+        parameters: [idParameter("customerId")],
+        responses: { "200": { description: "Customer-role company detail", content: json }, ...errors },
+      },
+    },
+    "/api/v1/qualifications": {
+      get: {
+        operationId: "listQualifications",
+        tags: ["Catalog"],
+        responses: { "200": { description: "Qualification list", content: json }, ...errors },
+      },
+    },
+    "/api/v1/qualifications/{qualificationId}": {
+      get: {
+        operationId: "getQualification",
+        tags: ["Catalog"],
+        parameters: [idParameter("qualificationId")],
+        responses: { "200": { description: "Qualification detail", content: json }, ...errors },
+      },
+    },
+    "/api/v1/capabilities": {
+      get: {
+        operationId: "listCapabilities",
+        tags: ["Catalog"],
+        responses: { "200": { description: "Capability list", content: json }, ...errors },
+      },
+    },
+    "/api/v1/capabilities/{capabilityId}": {
+      get: {
+        operationId: "getCapability",
+        tags: ["Catalog"],
+        parameters: [idParameter("capabilityId")],
+        responses: { "200": { description: "Capability detail", content: json }, ...errors },
+      },
+    },
+    "/api/v1/certifications": {
+      get: {
+        operationId: "listCertifications",
+        tags: ["Catalog"],
+        responses: { "200": { description: "Certification list", content: json }, ...errors },
+      },
+    },
+    "/api/v1/certifications/{certificationId}": {
+      get: {
+        operationId: "getCertification",
+        tags: ["Catalog"],
+        parameters: [idParameter("certificationId")],
+        responses: { "200": { description: "Certification detail", content: json }, ...errors },
+      },
+    },
+    "/api/v1/analytics/dashboard": {
+      get: {
+        operationId: "getDashboardMetrics",
+        tags: ["Analytics"],
+        responses: { "200": { description: "Dashboard coverage metrics", content: json }, ...errors },
+      },
+    },
+    "/api/v1/analytics/series": {
+      get: {
+        operationId: "getDashboardSeries",
+        tags: ["Analytics"],
+        responses: { "200": { description: "Daily research and spend series", content: json }, ...errors },
+      },
+    },
+    "/api/v1/analytics/scores": {
+      get: {
+        operationId: "getScores",
+        tags: ["Analytics"],
+        responses: { "200": { description: "Supplier or source scorecard", content: json }, ...errors },
+      },
+    },
+    "/api/v1/merges": {
+      get: {
+        operationId: "listMerges",
+        tags: ["Merges"],
+        responses: { "200": { description: "Company merge events", content: json }, ...errors },
+      },
+      post: {
+        operationId: "mergeCompanies",
+        tags: ["Merges"],
+        parameters: [csrf],
+        responses: {
+          "200": { description: "Merge applied", content: json },
+          ...errors,
+          "409": { $ref: "#/components/responses/Conflict" },
+        },
+      },
+    },
+    "/api/v1/merges/{mergeId}/revert": {
+      post: {
+        operationId: "revertMerge",
+        tags: ["Merges"],
+        parameters: [idParameter("mergeId"), csrf],
+        responses: {
+          "200": { description: "Merge reverted", content: json },
+          ...errors,
+          "409": { $ref: "#/components/responses/Conflict" },
+        },
+      },
+    },
+    "/api/v1/ops/status": {
+      get: {
+        operationId: "getOpsStatus",
+        tags: ["Ops"],
+        description: "Admin role required.",
+        responses: { "200": { description: "Queue drain and storage reconciliation", content: json }, ...errors },
       },
     },
   },
@@ -645,6 +880,35 @@ export const openApiDocument = {
             },
           },
         ],
+      },
+      CompanyAliasCreate: {
+        type: "object",
+        additionalProperties: false,
+        required: ["alias"],
+        properties: {
+          alias: { type: "string", minLength: 1, maxLength: 200 },
+          aliasType: {
+            type: "string",
+            enum: ["name", "trade", "abbreviation", "former"],
+          },
+          isPrimary: { type: "boolean" },
+        },
+      },
+      CompanyAlias: {
+        type: "object",
+        additionalProperties: false,
+        required: ["id", "companyId", "alias", "aliasType", "isPrimary", "createdAt"],
+        properties: {
+          id: { $ref: "#/components/schemas/Uuid" },
+          companyId: { $ref: "#/components/schemas/Uuid" },
+          alias: { type: "string", minLength: 1, maxLength: 200 },
+          aliasType: {
+            type: "string",
+            enum: ["name", "trade", "abbreviation", "former"],
+          },
+          isPrimary: { type: "boolean" },
+          createdAt: { $ref: "#/components/schemas/Instant" },
+        },
       },
       DataSourceCreate: {
         type: "object",
@@ -958,6 +1222,11 @@ export const openApiDocument = {
         type: "object",
         required: ["data"],
         properties: { data: { $ref: "#/components/schemas/Company" } },
+      },
+      CompanyAliasEnvelope: {
+        type: "object",
+        required: ["data"],
+        properties: { data: { $ref: "#/components/schemas/CompanyAlias" } },
       },
       DataSourceEnvelope: {
         type: "object",

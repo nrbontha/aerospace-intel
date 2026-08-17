@@ -5,8 +5,7 @@
     "dockerfilePath": "Dockerfile.web"
   },
   "deploy": {
-    "preDeployCommand": "npm run db:migrate",
-    "startCommand": "exec npm run start --workspace @asi/web -- --hostname 0.0.0.0 --port \"$PORT\"",
+    "startCommand": "npm run start:web",
     "healthcheckPath": "/api/v1/health",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",

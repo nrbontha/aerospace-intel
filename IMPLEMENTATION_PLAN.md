@@ -2,9 +2,16 @@
 
 ## Status and fixed sequence
 
-This is a design contract for a new system. Everything below is **planned or in progress** until its exit evidence is observed; a heading is not a claim that a feature exists. The independent system must not import from, call, share a database or volume with, or reuse credentials from Saucer or Almanac.
+This is a design contract for an independent system. It must not import from, call, share a database or volume with, or reuse credentials from Saucer or Almanac. A heading is not a claim; the observed status below is.
 
-Implementation proceeds P0 through P5. Later phases may be designed early but cannot be presented as available before their dependencies are complete.
+**Observed 2026-08-17 — keep local and Railway separate.** P0–P4 are implemented in this tree and have been exercised **locally** (Hitchiner research, review, canonical tracing, scoring, catalog, import/export). P5 is **not** complete: shared document storage, a running production worker, and production restore/PITR are still open. Production is limited availability, not generally available. See `OPERATIONS.md`.
+
+| Environment | `GET /api/v1/ops/status` | Catalog |
+| --- | --- | --- |
+| Railway production (`0a156e0a`) | `drainable: true`, **`alerts: []`**, queue failed 0, `documentCount` 0 | empty (`totalItems` 0). Hitchiner was not copied. |
+| Local only (`http://127.0.0.1:3000`) | `drainable: true`, **`queue_failed` (1 historical failed job)** | Hitchiner + import probe (`totalItems` 2), `documentCount` 1 |
+
+The local `queue_failed` alert is **not** a Railway observation. Do not advertise planned integrations, replay guarantees, a populated production catalog, or shared worker storage.
 
 ## Fixed platform
 
@@ -101,6 +108,8 @@ API, job, tool, and artifact payloads carry schema versions. Producers and consu
 6. Roll out with explicit availability and known limitations; never advertise planned integrations or replay guarantees.
 
 **Exit evidence:** restore/restart preserves documents, jobs, and evidence links; security/failure modes have observed verification; operators can diagnose durable failures without sensitive telemetry.
+
+**Observed P5 gap:** local restore rehearsal (`npm run ops:rehearse`) and local security/failure-mode tests exist. Production does **not** yet meet this exit: the worker is stopped, web/worker do not share durable document storage, and production restore/PITR has not been observed. Do not mark P5 done until those are closed.
 
 ## Reference lessons, not dependencies
 

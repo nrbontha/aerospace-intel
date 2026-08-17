@@ -25,7 +25,13 @@
     "db:generate": "npm run db:generate --workspace @asi/database",
     "db:migrate": "npm run db:migrate --workspace @asi/database",
     "db:seed": "npm run db:seed --workspace @asi/database",
-    "bootstrap:admin": "npm run bootstrap:admin --workspace @asi/web"
+    "bootstrap:admin": "npm run bootstrap:admin --workspace @asi/web",
+    "ops:backup": "bash scripts/backup.sh",
+    "ops:restore": "bash scripts/restore.sh",
+    "ops:rehearse": "bash scripts/restore-rehearsal.sh",
+    "ops:status": "bash -c 'set -a; [ -f .env.local ] && . ./.env.local; set +a; exec npx tsx scripts/ops-status.ts'",
+    "start:web": "npm run db:migrate && npm run start --workspace @asi/web -- --hostname 0.0.0.0 --port ${PORT:-3000}",
+    "start:worker": "npm run start --workspace @asi/worker"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",

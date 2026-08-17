@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "main": "./dist/index.js",
+  "types": "./src/index.ts",
   "engines": {
     "node": ">=22.12.0"
   },

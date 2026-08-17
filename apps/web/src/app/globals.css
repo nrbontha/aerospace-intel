@@ -484,3 +484,35 @@ a:hover {
     transition: none;
   }
 }
+
+
+.asi-chart {
+  min-block-size: 15rem;
+}
+
+.asi-chart-table {
+  margin-block-start: var(--asi-space-12);
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--asi-text-sm);
+}
+
+.asi-chart-table th,
+.asi-chart-table td {
+  border-block-end: var(--asi-border-width) solid var(--asi-border);
+  padding: var(--asi-space-3) var(--asi-space-4);
+  text-align: start;
+}
+
+.asi-timeline {
+  display: grid;
+  gap: var(--asi-space-6);
+  margin: 0;
+  padding-inline-start: var(--asi-space-12);
+}
+
+.asi-timeline time {
+  display: block;
+  color: var(--asi-text-muted);
+  font-size: var(--asi-text-sm);
+}
