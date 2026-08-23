@@ -33,7 +33,13 @@ import {
 
 import type { Database } from "@asi/database";
 
-import type { CandidateDto } from "@asi/contracts";
+import {
+  resolveEffectiveTier,
+  type CandidateDto,
+  type CandidateStatusValue,
+  type EffectiveTier,
+  type TierOverride,
+} from "@asi/contracts";
 
 /**
  * Orchestration glue between the canonical catalog and the axial scoring
@@ -73,6 +79,23 @@ export function routingQueueToStatus(
     default:
       return "queued_research";
   }
+}
+
+/**
+ * Effective tier under the Targets-tab precedence (REDESIGN_PLAN §2.1):
+ * a human tier_override always wins; otherwise the tier is derived from the
+ * engine routing status. The engine mapping itself lives in @asi/contracts
+ * (engineStatusToTier) so the SQL ?tier= filter and DTO shaping stay in
+ * lockstep with this function.
+ */
+export function resolveTier(
+  candidate: {
+    readonly status: CandidateStatusValue;
+    readonly tierOverride: TierOverride | null;
+  },
+  routedStatus?: CandidateStatusValue,
+): EffectiveTier {
+  return resolveEffectiveTier(routedStatus ?? candidate.status, candidate.tierOverride);
 }
 
 // ---------------------------------------------------------------------------

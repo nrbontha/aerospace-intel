@@ -251,7 +251,13 @@ async function insertChildren(
   const childDepth = parent.depth + 1;
   const eligible = childDepth <= maxDepth ? proposals : [];
   if (eligible.length === 0) return 0;
-
+  // Campaign-path invariant: expansion only runs on campaign-owned items.
+  if (parent.campaignId === null) {
+    throw new Error(
+      "frontier expansion reached a frontier item without a campaign owner",
+    );
+  }
+  const parentCampaignId = parent.campaignId;
   const values = eligible.map((proposal) => ({
     campaignId: parent.campaignId,
     itemType: proposal.itemType,
@@ -263,7 +269,7 @@ async function insertChildren(
     depth: childDepth,
     status: "pending" as const,
     idempotencyKey: frontierIdempotencyKey(
-      parent.campaignId,
+      parentCampaignId,
       proposal.itemType,
       proposal.normalizedValue,
     ),
@@ -279,6 +285,11 @@ async function insertChildren(
 }
 
 function toItemView(item: FrontierItem): FrontierItemView {
+  // Campaign runner only claims campaign-owned rows; agent-owned items
+  // (migration 0003) never enter this path.
+  if (item.campaignId === null) {
+    throw new Error("frontier item without a campaign owner reached the campaign runner");
+  }
   return {
     id: item.id,
     campaignId: item.campaignId,

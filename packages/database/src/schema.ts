@@ -1,4 +1,6 @@
 import {
+  agentStatusValues,
+  agentTypeValues,
   buildToPrintRiskValues,
   campaignStatusValues,
   candidateStatusValues,
@@ -33,6 +35,9 @@ import {
   snapshotMemberMatchStatusValues,
   sourceAccessValues,
   sourceIngestionValues,
+  tierOverrideValues,
+  tierSourceValues,
+  tickOutcomeValues,
 } from "@asi/contracts";
 import { sql } from "drizzle-orm";
 import {
@@ -175,6 +180,14 @@ export const frontierItemStatus = pgEnum(
   frontierItemStatusValues,
 );
 export const reviewStatus = pgEnum("review_status", reviewStatusValues);
+
+export const agentType = pgEnum("agent_type", agentTypeValues);
+export const agentStatus = pgEnum("agent_status", agentStatusValues);
+export const tickOutcome = pgEnum("tick_outcome", tickOutcomeValues);
+// Enum name carries the _t suffix because tier_override is also a column on
+// candidates; the type itself excludes null (null = no human override).
+export const tierOverrideT = pgEnum("tier_override_t", tierOverrideValues);
+export const tierSource = pgEnum("tier_source", tierSourceValues);
 
 export const users = pgTable(
   "users",
@@ -1745,6 +1758,10 @@ export const candidates = pgTable(
       precision: 6,
       scale: 2,
     }),
+    // Tier system (REDESIGN_PLAN §2.1): null tier_override = engine owns the
+    // tier (derived from status); a human override pins it until cleared.
+    tierOverride: tierOverrideT("tier_override"),
+    tierSource: tierSource("tier_source").notNull().default("engine"),
     createdAt: ct(),
     updatedAt: ut(),
   },
@@ -1993,9 +2010,14 @@ export const frontierItems = pgTable(
   "frontier_items",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    campaignId: uuid("campaign_id")
-      .notNull()
-      .references(() => researchCampaigns.id, { onDelete: "cascade" }),
+    // Exactly one owner: a campaign (legacy bounded experiment) or an
+    // autonomous agent (continuous layer) — enforced by frontier_owner_check.
+    campaignId: uuid("campaign_id").references(() => researchCampaigns.id, {
+      onDelete: "cascade",
+    }),
+    agentId: uuid("agent_id").references(() => researchAgents.id, {
+      onDelete: "set null",
+    }),
     itemType: frontierItemType("item_type").notNull(),
     normalizedValue: text("normalized_value").notNull(),
     parentItemId: uuid("parent_item_id").references(
@@ -2034,11 +2056,16 @@ export const frontierItems = pgTable(
       t.nextAttemptAt,
     ),
     index("frontier_items_parent_idx").on(t.parentItemId),
+    index("frontier_items_agent_idx").on(t.agentId),
     check("frontier_items_depth_chk", sql`${t.depth} >= 0`),
     check("frontier_items_attempt_count_chk", sql`${t.attemptCount} >= 0`),
     check(
       "frontier_items_estimated_cost_chk",
       sql`${t.estimatedCostUsd} >= 0`,
+    ),
+    check(
+      "frontier_owner_check",
+      sql`${t.campaignId} IS NOT NULL OR ${t.agentId} IS NOT NULL`,
     ),
   ],
 );
@@ -2104,3 +2131,113 @@ export type ResearchCampaign = SelectRow<typeof researchCampaigns>;
 export type NewResearchCampaign = InsertRow<typeof researchCampaigns>;
 export type FrontierItem = SelectRow<typeof frontierItems>;
 export type NewFrontierItem = InsertRow<typeof frontierItems>;
+
+// ---------------------------------------------------------------------------
+// Autonomous research agents (REDESIGN_PLAN §1, migration 0003) — additive.
+// Postgres is the agent's long-horizon memory: registry row + bounded tick
+// journal. Lease columns implement crash-safe takeover by any supervisor
+// instance; budgets mirror research_campaigns conventions.
+// ---------------------------------------------------------------------------
+
+export const researchAgents = pgTable(
+  "research_agents",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    /** Stable registry slug, e.g. 'discover-usaspending'. */
+    key: text("key").notNull(),
+    name: text("name").notNull(),
+    agentType: agentType("agent_type").notNull(),
+    goal: text("goal").notNull(),
+    seedScope: jsonb("seed_scope")
+      .$type<{
+        sources?: string[];
+        platforms?: string[];
+        geographies?: string[];
+        candidateFilters?: Record<string, unknown>;
+      }>()
+      .notNull()
+      .default({}),
+    policyVersion: text("policy_version"),
+    budgetSharePct: numeric("budget_share_pct", { precision: 5, scale: 2 }),
+    dailyBudgetUsd: numeric("daily_budget_usd", { precision: 10, scale: 2 }),
+    cadenceSeconds: integer("cadence_seconds").notNull().default(900),
+    status: agentStatus("status").notNull().default("idle"),
+    lastTickAt: timestamp("last_tick_at", { withTimezone: true }),
+    nextTickAt: timestamp("next_tick_at", { withTimezone: true }),
+    heartbeatAt: timestamp("heartbeat_at", { withTimezone: true }),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    leasedBy: text("leased_by"),
+    consecutiveFailures: integer("consecutive_failures").notNull().default(0),
+    spendTodayUsd: numeric("spend_today_usd", { precision: 10, scale: 2 })
+      .notNull()
+      .default("0"),
+    config: jsonb("config")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    createdBy: uuid("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: ct(),
+    updatedAt: ut(),
+  },
+  (t) => [
+    uniqueIndex("research_agents_key_uidx").on(t.key),
+    // Matches the supervisor due-query:
+    // WHERE status='running' AND (next_tick_at IS NULL OR next_tick_at <= now()).
+    index("research_agents_status_next_tick_idx").on(t.status, t.nextTickAt),
+    check(
+      "research_agents_budget_share_chk",
+      sql`${t.budgetSharePct} IS NULL OR ${t.budgetSharePct} BETWEEN 0 AND 100`,
+    ),
+    check(
+      "research_agents_daily_budget_chk",
+      sql`${t.dailyBudgetUsd} IS NULL OR ${t.dailyBudgetUsd} >= 0`,
+    ),
+    check("research_agents_cadence_chk", sql`${t.cadenceSeconds} > 0`),
+    check(
+      "research_agents_consecutive_failures_chk",
+      sql`${t.consecutiveFailures} >= 0`,
+    ),
+    check("research_agents_spend_today_chk", sql`${t.spendTodayUsd} >= 0`),
+  ],
+);
+
+/** Bounded per-agent tick journal (scheduled cleanup prunes old rows). */
+export const agentTicks = pgTable(
+  "agent_ticks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    agentId: uuid("agent_id")
+      .notNull()
+      .references(() => researchAgents.id, { onDelete: "cascade" }),
+    startedAt: timestamp("started_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    outcome: tickOutcome("outcome").notNull(),
+    plan: jsonb("plan")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    actionsExecuted: integer("actions_executed").notNull().default(0),
+    findings: jsonb("findings")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    costUsd: numeric("cost_usd", { precision: 10, scale: 6 })
+      .notNull()
+      .default("0"),
+    error: text("error"),
+  },
+  (t) => [
+    index("agent_ticks_agent_started_idx").on(t.agentId, t.startedAt),
+    check("agent_ticks_actions_executed_chk", sql`${t.actionsExecuted} >= 0`),
+    check("agent_ticks_cost_chk", sql`${t.costUsd} >= 0`),
+  ],
+);
+
+export type ResearchAgent = SelectRow<typeof researchAgents>;
+export type NewResearchAgent = InsertRow<typeof researchAgents>;
+export type AgentTick = SelectRow<typeof agentTicks>;
+export type NewAgentTick = InsertRow<typeof agentTicks>;

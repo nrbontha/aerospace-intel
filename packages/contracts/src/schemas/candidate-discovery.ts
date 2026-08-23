@@ -96,6 +96,26 @@ export const frontierItemStatusValues = [
   "blocked",
 ] as const;
 
+export const tierOverrideValues = [
+  "high_interest",
+  "evaluate",
+  "low_interest",
+  "watchlist",
+] as const;
+export const tierSourceValues = ["engine", "human"] as const;
+// Full effective-tier vocabulary: the four human-settable tiers plus the two
+// agent-driven states (researching / needs_research) that only the engine
+// route can produce (REDESIGN_PLAN §2.1).
+export const effectiveTierValues = [
+  ...tierOverrideValues,
+  "researching",
+  "needs_research",
+] as const;
+
+export const tierOverrideSchema = z.enum(tierOverrideValues);
+export const tierSourceSchema = z.enum(tierSourceValues);
+export const effectiveTierSchema = z.enum(effectiveTierValues);
+
 export const candidateStatusSchema = z.enum(candidateStatusValues);
 export const noveltyStatusSchema = z.enum(noveltyStatusValues);
 export const scoreAxisSchema = z.enum(scoreAxisValues);
@@ -154,6 +174,9 @@ export const candidateDtoSchema = z.strictObject({
   partnerReviewPriority: z.number().min(0).max(100).nullable(),
   createdAt: instantSchema,
   updatedAt: instantSchema,
+  tierOverride: tierOverrideSchema.nullable(),
+  tierSource: tierSourceSchema,
+  effectiveTier: effectiveTierSchema,
 });
 
 export const candidateListQuerySchema = paginatedQuerySchema.extend({
@@ -167,6 +190,7 @@ export const candidateListQuerySchema = paginatedQuerySchema.extend({
   maxConfidence: z.number().min(-1).max(101).optional(),
   minActionability: z.number().min(-1).max(101).optional(),
   maxActionability: z.number().min(-1).max(101).optional(),
+  tier: effectiveTierSchema.optional(),
 });
 
 export const scoreRecordDtoSchema = z.strictObject({
@@ -438,6 +462,48 @@ export const frontierItemListQuerySchema = paginatedQuerySchema.extend({
   parentItemId: uuidSchema.optional(),
   maxDepth: z.number().int().min(0).optional(),
 });
+
+// ---------------------------------------------------------------------------
+// Tier engine (REDESIGN_PLAN §2.1): engine-proposed, human-overridden.
+//
+// The engine tier is a pure function of the candidate routing status; a human
+// override (tier_override) always wins. shortlist joins partner_review in
+// high_interest ("you owe this a look") and archived — off the active
+// pipeline like rejected — lands in low_interest; hold shares watchlist per
+// the spec table.
+// ---------------------------------------------------------------------------
+
+export type CandidateStatusValue = (typeof candidateStatusValues)[number];
+export type EffectiveTier = (typeof effectiveTierValues)[number];
+export type TierOverride = (typeof tierOverrideValues)[number];
+
+export const engineStatusToTier: Record<CandidateStatusValue, EffectiveTier> = {
+  partner_review: "high_interest",
+  shortlist: "high_interest",
+  research_ready: "evaluate",
+  in_research: "researching",
+  queued_research: "needs_research",
+  rejected: "low_interest",
+  archived: "low_interest",
+  watchlist: "watchlist",
+  hold: "watchlist",
+};
+
+/** Precedence: human tier_override > engine route. */
+export function resolveEffectiveTier(
+  status: CandidateStatusValue,
+  override: TierOverride | null,
+): EffectiveTier {
+  return override ?? engineStatusToTier[status];
+}
+
+/** Investment feedback journal entry written whenever a human sets a tier. */
+export const tierToInvestmentAction: Record<TierOverride, string> = {
+  high_interest: "strong_fit",
+  evaluate: "needs_more_research",
+  low_interest: "reject",
+  watchlist: "hold",
+};
 
 // ---------------------------------------------------------------------------
 // Types

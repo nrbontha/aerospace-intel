@@ -1,7 +1,12 @@
 import { inArray, sql, type SQL } from "drizzle-orm";
 
-import type { CandidateDto, CandidateListQuery, ScoreRecordDto } from "@asi/contracts";
-
+import {
+  engineStatusToTier,
+  type CandidateDto,
+  type CandidateListQuery,
+  type EffectiveTier,
+  type ScoreRecordDto,
+} from "@asi/contracts";
 import type { Database } from "../client.js";
 import { candidates, candidateScores, featureSnapshots } from "../schema.js";
 import { toCandidateDto, toScoreRecordDto } from "./storage.js";
@@ -15,6 +20,16 @@ import { toCandidateDto, toScoreRecordDto } from "./storage.js";
 function instant(value: Date | string): string {
   return value instanceof Date ? value.toISOString() : new Date(value).toISOString();
 }
+
+// SQL mirror of engineStatusToTier + tier_override precedence, generated FROM
+// the shared mapping record so the ?tier= filter can never drift from
+// resolveEffectiveTier. COALESCE: human override first, else engine route.
+const effectiveTierSql = sql`COALESCE(c.tier_override::text, CASE c.status::text ${sql.join(
+  (
+    Object.entries(engineStatusToTier) as [string, EffectiveTier][]
+  ).map(([status, tier]) => sql`WHEN ${status} THEN ${tier}`),
+  sql` `,
+)} END)`;
 
 export interface CandidateListPage {
   records: CandidateDto[];
@@ -42,6 +57,9 @@ export async function queryCandidates(
   if (filters.status !== undefined) conditions.push(sql`c.status = ${filters.status}`);
   if (filters.noveltyStatus !== undefined) {
     conditions.push(sql`c.novelty_status = ${filters.noveltyStatus}`);
+  }
+  if (filters.tier !== undefined) {
+    conditions.push(sql`${effectiveTierSql} = ${filters.tier}`);
   }
   for (const [key, value] of Object.entries(filters)) {
     const axis = AXIS_FILTER_KEYS[key];

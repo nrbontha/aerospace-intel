@@ -1,6 +1,10 @@
 import { and, eq, sql } from "drizzle-orm";
-
-import type { CandidateDto, ScoreRecordDto } from "@asi/contracts";
+import type {
+  CandidateDto,
+  ScoreRecordDto,
+  TierOverride,
+} from "@asi/contracts";
+import { resolveEffectiveTier, tierToInvestmentAction } from "@asi/contracts";
 
 import type { Database } from "../client.js";
 import {
@@ -8,6 +12,7 @@ import {
   candidates,
   candidateScores,
   featureSnapshots,
+  feedback,
   scoringPrograms,
   type Candidate,
   type CandidateScore,
@@ -172,6 +177,9 @@ export async function upsertCandidate(
         values.researchPriority === null ? null : values.researchPriority.toFixed(2),
       partnerReviewPriority:
         values.partnerReviewPriority === null ? null : values.partnerReviewPriority.toFixed(2),
+      // New candidates start on the engine-owned tier derived from routing.
+      tierOverride: null,
+      tierSource: "engine",
     })
     .onConflictDoUpdate({
       target: candidates.companyId,
@@ -182,6 +190,12 @@ export async function upsertCandidate(
         currentScores: sql`excluded.current_scores`,
         researchPriority: sql`excluded.research_priority`,
         partnerReviewPriority: sql`excluded.partner_review_priority`,
+        // Engine re-routing owns the tier ONLY while it is still
+        // engine-sourced; a human override (tier_source='human') survives
+        // every re-promotion — same rule as analyst-set statuses above.
+        tierOverride: sql`${candidates.tierOverride}`,
+        tierSource: sql`CASE WHEN ${candidates.tierSource} = 'human'
+          THEN ${candidates.tierSource} ELSE 'engine' END`,
       },
     })
     .returning();
@@ -340,7 +354,84 @@ export function toCandidateDto(row: Candidate): CandidateDto {
     partnerReviewPriority: numericToNumber(row.partnerReviewPriority),
     createdAt: instant(row.createdAt),
     updatedAt: instant(row.updatedAt),
+    tierOverride: row.tierOverride,
+    tierSource: row.tierSource,
+    effectiveTier: resolveEffectiveTier(row.status, row.tierOverride),
   };
+}
+
+/**
+ * Human tier override (REDESIGN_PLAN §2.1). Writes the override + flips
+ * tier_source to 'human' (engine re-routing never clobbers it), records the
+ * corresponding investment feedback journal entry, and lands a
+ * 'candidate.tier_overridden' audit event — all in one transaction.
+ */
+export async function setHumanTier(
+  db: Database,
+  input: {
+    candidateId: string;
+    tier: TierOverride;
+    actorId: string;
+    note?: string;
+  },
+): Promise<Candidate> {
+  return db.transaction(async (tx) => {
+    const current = await tx
+      .select()
+      .from(candidates)
+      .where(eq(candidates.id, input.candidateId))
+      .limit(1);
+    const before = current[0];
+    if (before === undefined) {
+      throw new Error(`candidate ${input.candidateId} not found`);
+    }
+
+    const rows = await tx
+      .update(candidates)
+      .set({ tierOverride: input.tier, tierSource: "human" })
+      .where(eq(candidates.id, input.candidateId))
+      .returning();
+    const row = rows[0];
+    if (row === undefined) {
+      throw new Error(`candidate ${input.candidateId} update returned no row`);
+    }
+
+    const action = tierToInvestmentAction[input.tier];
+    const feedbackRows = await tx
+      .insert(feedback)
+      .values({
+        channel: "investment",
+        action,
+        companyId: before.companyId,
+        candidateId: row.id,
+        reason: input.note ?? null,
+        payload: {
+          tierOverride: input.tier,
+          previousTierOverride: before.tierOverride,
+          previousTierSource: before.tierSource,
+        },
+        notes: input.note ?? null,
+        actor: input.actorId,
+      })
+      .returning({ id: feedback.id });
+    const feedbackRow = feedbackRows[0];
+
+    await tx.insert(auditEvents).values({
+      actorUserId: input.actorId,
+      action: "candidate.tier_overridden",
+      entityType: "candidate",
+      entityId: row.id,
+      before: {
+        status: before.status,
+        tierOverride: before.tierOverride,
+        tierSource: before.tierSource,
+      },
+      after: { tierOverride: row.tierOverride, tierSource: row.tierSource },
+      ...(feedbackRow === undefined ? {} : { metadata: { feedbackId: feedbackRow.id } }),
+    });
+
+    return row;
+  });
 }
 
 export function toScoreRecordDto(row: CandidateScore): ScoreRecordDto {

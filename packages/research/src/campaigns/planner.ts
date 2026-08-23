@@ -338,6 +338,10 @@ export async function listCampaigns(input: ListCampaignsInput): Promise<{
 }
 
 function serializeFrontierItem(row: FrontierItem): FrontierItemDto {
+  // Planner listings are campaign-scoped, so rows always carry a campaign.
+  if (row.campaignId === null) {
+    throw new Error("frontier item without a campaign owner reached the planner");
+  }
   return {
     id: row.id,
     campaignId: row.campaignId,
