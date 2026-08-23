@@ -50,6 +50,7 @@ type SourceRecord = Readonly<{
   ingestionMethod: SourceIngestion;
   status: string;
   linkedCompanyCount: number;
+  documentCount: number;
   createdAt: string;
   updatedAt: string;
 }>;
@@ -79,6 +80,22 @@ function companyCount(source: SourceRecord): number {
     source.linkedCompanyCount > 0
     ? Math.floor(source.linkedCompanyCount)
     : 0;
+}
+function documentCount(source: SourceRecord): number {
+  return Number.isFinite(source.documentCount) && source.documentCount > 0
+    ? Math.floor(source.documentCount)
+    : 0;
+}
+/** A source is unmined when nothing has been linked from it yet. */
+function isUnmined(source: SourceRecord): boolean {
+  return companyCount(source) === 0 && documentCount(source) === 0;
+}
+/** Imported sources record their model-processing policy in the notes text. */
+function modelProcessingLabel(source: SourceRecord): string | null {
+  const match = /Model processing:\s*([^\n.]+)/i.exec(source.description ?? "");
+  if (match === null) return null;
+  const label = match[1]?.trim() ?? "";
+  return label === "" ? null : label;
 }
 function errorMessage(payload: unknown, fallback: string): string {
   if (typeof payload !== "object" || payload === null || !("error" in payload))
@@ -128,6 +145,7 @@ export function DataSourceExplorer() {
   const access = searchParams.get("access") ?? "";
   const ingestion = searchParams.get("ingestion") ?? "";
   const companies = searchParams.get("companies") ?? "";
+  const unminedOnly = searchParams.get("unmined") === "1";
   const [searchInput, setSearchInput] = useState(query);
   const [sources, setSources] = useState<SourceRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -186,14 +204,16 @@ export function DataSourceExplorer() {
     return () => controller.abort();
   }, [access, ingestion, query, reloadKey]);
 
-  const visible = useMemo(
-    () =>
-      companies === "zero"
-        ? sources.filter((source) => companyCount(source) === 0)
-        : sources,
-    [companies, sources],
+  const visible = useMemo(() => {
+    let filtered = sources;
+    if (companies === "zero")
+      filtered = filtered.filter((source) => companyCount(source) === 0);
+    if (unminedOnly) filtered = filtered.filter(isUnmined);
+    return filtered;
+  }, [companies, sources, unminedOnly]);
+  const hasFilters = Boolean(
+    query || access || ingestion || companies || unminedOnly,
   );
-  const hasFilters = Boolean(query || access || ingestion || companies);
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     replaceFilters({ q: searchInput.trim() });
@@ -282,6 +302,28 @@ export function DataSourceExplorer() {
               <option value="zero">Zero linked companies</option>
             </Select>
           </div>
+          <div className="admin-field">
+            <label className="admin-field__label" htmlFor="source-unmined">
+              Unmined
+            </label>
+            <label
+              style={{
+                alignItems: "center",
+                display: "inline-flex",
+                gap: "var(--asi-space-2)",
+              }}
+            >
+              <input
+                checked={unminedOnly}
+                id="source-unmined"
+                onChange={(event) =>
+                  replaceFilters({ unmined: event.target.checked ? "1" : "" })
+                }
+                type="checkbox"
+              />
+              Zero companies and documents
+            </label>
+          </div>
           <div className="admin-actions">
             <Button type="submit">Apply search</Button>
             {hasFilters ? (
@@ -350,13 +392,15 @@ export function DataSourceExplorer() {
           <Table>
             <TableCaption>
               Showing {visible.length} source{visible.length === 1 ? "" : "s"}
-              {companies === "zero" ? " with zero company links" : ""}.
+              {companies === "zero" ? " with zero company links" : ""}
+              {unminedOnly ? " that are unmined" : ""}.
             </TableCaption>
             <TableHeader>
               <TableRow>
                 <TableHead>Source</TableHead>
                 <TableHead>Access</TableHead>
                 <TableHead>Ingestion</TableHead>
+                <TableHead>Model processing</TableHead>
                 <TableHead>Status</TableHead>
                 <TableHead numeric>Companies</TableHead>
                 <TableHead>Updated</TableHead>
@@ -374,7 +418,13 @@ export function DataSourceExplorer() {
                         <span>{source.description}</span>
                       ) : null}
                       {source.homepageUrl ? (
-                        <span>{source.homepageUrl}</span>
+                        <a
+                          href={source.homepageUrl}
+                          rel="noopener noreferrer"
+                          target="_blank"
+                        >
+                          {source.homepageUrl}
+                        </a>
                       ) : null}
                     </div>
                   </TableCell>
@@ -384,7 +434,23 @@ export function DataSourceExplorer() {
                     </Badge>
                   </TableCell>
                   <TableCell>
-                    {sourceIngestionLabel(source.ingestionMethod)}
+                    <Badge tone="info">
+                      {sourceIngestionLabel(source.ingestionMethod)}
+                    </Badge>
+                  </TableCell>
+                  <TableCell>
+                    {modelProcessingLabel(source) === null ? (
+                      "—"
+                    ) : (
+                      <Badge
+                        tone={modelProcessingLabel(source)
+                          ?.startsWith("disabled")
+                          ? "danger"
+                          : "success"}
+                      >
+                        Model processing: {modelProcessingLabel(source)}
+                      </Badge>
+                    )}
                   </TableCell>
                   <TableCell>
                     <Badge>{source.status}</Badge>

@@ -32,6 +32,8 @@ const navigation: readonly NavigationItem[] = [
   { href: "/merges", label: "Merges" },
   { href: "/facilities", label: "Facilities" },
   { href: "/data-sources", label: "Data Sources" },
+  { href: "/golden-set", label: "Golden Set" },
+  { href: "/known-universe", label: "Known Universe" },
   { href: "/platforms", label: "Platforms" },
   { href: "/parts", label: "Parts" },
   { href: "/subsystems", label: "Subsystems" },

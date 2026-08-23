@@ -1,6 +1,7 @@
 import type { ReactNode } from "react";
 
 import { AppShell } from "@/components/app-shell";
+import { ThemeToggle } from "@/components/theme-toggle";
 import { requireUser } from "@/lib/auth";
 
 export default async function ProtectedAppLayout({
@@ -8,5 +9,10 @@ export default async function ProtectedAppLayout({
 }: Readonly<{ children: ReactNode }>) {
   const user = await requireUser();
 
-  return <AppShell user={user}>{children}</AppShell>;
+  return (
+    <>
+      <AppShell user={user}>{children}</AppShell>
+      <ThemeToggle />
+    </>
+  );
 }
