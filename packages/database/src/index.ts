@@ -12,3 +12,5 @@ export * from "./exports.js";
 export * from "./ops.js";
 export * from "./search.js";
 export * from "./import-parsers/index.js";
+export * from "./snapshots/index.js";
+export * from "./golden/index.js";
