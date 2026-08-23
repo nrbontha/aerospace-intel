@@ -15,10 +15,16 @@ const password =
   process.env.ASI_E2E_PASSWORD ?? "local-development-admin-password-change-me";
 
 async function signIn(page: Page): Promise<void> {
-  await page.goto("/login");
-  await page.getByLabel("Username").fill(email);
-  await page.getByLabel("Password").fill(password);
-  await page.getByRole("button", { name: "Sign in" }).click();
+  // Sign in through the audited API so session cookies land directly in the
+  // browser context, then land on the Targets table. Immune to
+  // client-hydration races on the login form.
+  const response = await page.request.post("/api/v1/auth/login", {
+    data: { username: email, password },
+  });
+  if (!response.ok()) {
+    throw new Error(`Sign-in failed (${response.status()})`);
+  }
+  await page.goto("/feed");
 }
 
 test.describe("target feed", () => {

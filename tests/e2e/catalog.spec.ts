@@ -8,11 +8,17 @@ const password =
 test("company search and source catalog are reachable after login", async ({
   page,
 }) => {
-  await page.goto("/login");
-  await page.getByLabel("Username").fill(email);
-  await page.getByLabel("Password").fill(password);
-  await page.getByRole("button", { name: "Sign in" }).click();
-  await page.waitForURL(/\/(dashboard|feed)$/);
+  // Sign in through the audited API — immune to client-hydration races on
+  // the login form.
+  const response = await page.request.post("/api/v1/auth/login", {
+    data: {
+      username: process.env.ASI_E2E_EMAIL ?? "admin@local.test",
+      password:
+        process.env.ASI_E2E_PASSWORD ??
+        "local-development-admin-password-change-me",
+    },
+  });
+  expect(response.ok()).toBe(true);
 
   await page.goto("/companies");
   await page.getByLabel("Search known companies").fill("Hitchiner");
@@ -22,7 +28,8 @@ test("company search and source catalog are reachable after login", async ({
   ).toBeVisible();
 
   await page.goto("/data-sources");
+  await expect(page).toHaveURL(/\/universe\?tab=sources$/);
   await expect(
-    page.getByRole("heading", { name: /data sources/i }),
+    page.getByRole("heading", { name: "Sources", exact: true }),
   ).toBeVisible();
 });

@@ -11,7 +11,7 @@ async function signIn(page: Page): Promise<boolean> {
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
   try {
-    await page.waitForURL(/\/dashboard$/, { timeout: 10_000 });
+    await page.waitForURL(/\/(dashboard|feed)$/, { timeout: 10_000 });
     return true;
   } catch {
     return false;

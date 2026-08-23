@@ -27,28 +27,15 @@ type NavigationItem = Readonly<{
 }>;
 
 const navigation: readonly NavigationItem[] = [
-  { href: "/feed", label: "Target Feed" },
+  { href: "/feed", label: "Targets" },
   { href: "/research", label: "Research" },
   { href: "/universe", label: "Universe" },
-  { href: "/companies", label: "Companies" },
-  { href: "/merges", label: "Merges" },
-  { href: "/facilities", label: "Facilities" },
-  { href: "/data-sources", label: "Data Sources" },
-  { href: "/golden-set", label: "Golden Set" },
-  { href: "/known-universe", label: "Known Universe" },
-  { href: "/campaigns", label: "Campaigns" },
-  { href: "/platforms", label: "Platforms" },
-  { href: "/parts", label: "Parts" },
-  { href: "/subsystems", label: "Subsystems" },
-  { href: "/customers", label: "Customers" },
-  { href: "/qualifications", label: "Qualifications" },
-  { href: "/capabilities", label: "Capabilities" },
-  { href: "/certifications", label: "Certifications" },
-  { href: "/research-queue", label: "Research Queue" },
-  { href: "/research-runs", label: "Research Runs" },
+];
+
+const adminNavigation: readonly NavigationItem[] = [
   { href: "/experiments", label: "Experiments" },
   { href: "/imports", label: "Imports" },
-  { href: "/admin", label: "Admin", adminOnly: true },
+  { href: "/admin", label: "Users & access", adminOnly: true },
 ];
 
 function isCurrentDestination(pathname: string, href: string): boolean {
@@ -61,6 +48,12 @@ export function AppShell({ children, user }: AppShellProps) {
   const visibleNavigation = navigation.filter(
     (item) => !item.adminOnly || user.role === "admin",
   );
+  const visibleAdminNavigation = adminNavigation.filter(
+    (item) => !item.adminOnly || user.role === "admin",
+  );
+  const adminActive = visibleAdminNavigation.some((item) =>
+    isCurrentDestination(pathname, item.href),
+  );
 
   return (
     <>
@@ -71,7 +64,7 @@ export function AppShell({ children, user }: AppShellProps) {
         <header className="asi-shell__header">
           <div className="asi-shell__identity">
             <p className="asi-shell__eyebrow">Evidence operations</p>
-            <Link className="asi-shell__product" href="/dashboard">
+            <Link className="asi-shell__product" href="/feed">
               Aerospace Supplier Intelligence
             </Link>
           </div>
@@ -119,6 +112,39 @@ export function AppShell({ children, user }: AppShellProps) {
                     </li>
                   );
                 })}
+                {visibleAdminNavigation.length > 0 ? (
+                  <li>
+                    <details className="asi-shell__nav-group">
+                      <summary
+                        aria-current={adminActive ? "true" : undefined}
+                        className="asi-shell__nav-link"
+                      >
+                        Admin
+                      </summary>
+                      <ul className="asi-shell__nav-list">
+                        {visibleAdminNavigation.map((item) => {
+                          const current = isCurrentDestination(
+                            pathname,
+                            item.href,
+                          );
+
+                          return (
+                            <li key={item.href}>
+                              <Link
+                                aria-current={current ? "page" : undefined}
+                                className="asi-shell__nav-link"
+                                href={item.href}
+                                onClick={() => setNavigationOpen(false)}
+                              >
+                                {item.label}
+                              </Link>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </details>
+                  </li>
+                ) : null}
               </ul>
             </nav>
 

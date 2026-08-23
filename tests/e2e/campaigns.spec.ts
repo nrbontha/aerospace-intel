@@ -1,34 +1,74 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type APIRequestContext, type Page } from "@playwright/test";
+
+/**
+ * Campaigns after the nav collapse (REDESIGN_PLAN §3/§5): the /campaigns list
+ * page is retired (redirects to /research, whose campaigns strip lists them)
+ * but campaign detail — frontier curation and lifecycle — stays live at
+ * /campaigns/[id]. Drafts are created through the audited API.
+ */
 
 const email = process.env.ASI_E2E_EMAIL ?? "admin@local.test";
 const password =
   process.env.ASI_E2E_PASSWORD ?? "local-development-admin-password-change-me";
 
 async function signIn(page: Page): Promise<boolean> {
-  await page.goto("/login");
-  await page.getByLabel("Username").fill(email);
-  await page.getByLabel("Password").fill(password);
-  const loginResponse = page.waitForResponse((response) =>
-    response.url().includes("/api/v1/auth/login"),
-  );
-  await page.getByRole("button", { name: "Sign in" }).click();
-  const response = await loginResponse.catch(() => undefined);
-  if (response === undefined || !response.ok()) return false;
-  // The app lands on /dashboard or / depending on build; confirm the
-  // session cookie actually grants access to a protected page.
-  await page.goto("/campaigns");
-  try {
-    await page
-      .getByRole("heading", { name: "Campaigns", exact: true })
-      .waitFor({ timeout: 10_000 });
-    return true;
-  } catch {
-    return false;
+  // Sign in through the audited API so session cookies land directly in the
+  // browser context — immune to client-hydration races on /login.
+  const response = await page.request.post("/api/v1/auth/login", {
+    data: { username: email, password },
+  });
+  if (!response.ok()) return false;
+  await page.goto("/feed");
+  return true;
+}
+
+async function createCampaignDraft(
+  page: Page,
+  name: string,
+): Promise<{ status: number; body: string }> {
+  const origin = new URL(
+    process.env.PLAYWRIGHT_BASE_URL ?? "http://localhost:3000",
+  ).origin;
+  const state = await page.request.storageState();
+  const csrf = state.cookies.find((cookie) => cookie.name.endsWith("_csrf"))
+    ?.value;
+  const response = await page.request.post("/api/v1/campaigns", {
+    headers: {
+      "content-type": "application/json",
+      origin,
+      ...(csrf !== undefined ? { "x-csrf-token": csrf } : {}),
+    },
+    data: {
+      name,
+      seeds: {
+        sources: ["usaspending"],
+        platforms: [],
+        capabilities: [],
+        geography: [],
+      },
+    },
+  });
+  return { status: response.status(), body: await response.text() };
+}
+
+function campaignIdOf(body: unknown): string | undefined {
+  if (typeof body !== "object" || body === null || !("data" in body)) {
+    return undefined;
   }
+  const data: unknown = body.data;
+  if (
+    typeof data === "object" &&
+    data !== null &&
+    "id" in data &&
+    typeof data.id === "string"
+  ) {
+    return data.id;
+  }
+  return undefined;
 }
 
 test.describe("campaigns", () => {
-  test("create campaign, see draft badge, empty frontier, start after manual item", async ({
+  test("create draft via API, see it in the research strip, run it", async ({
     page,
   }) => {
     const signedIn = await signIn(page);
@@ -41,27 +81,30 @@ test.describe("campaigns", () => {
 
     const campaignName = `E2E campaign ${Date.now()}`;
 
+    // Retired list route lands on the Research control plane.
     await page.goto("/campaigns");
+    await expect(page).toHaveURL(/\/research$/);
     await expect(
-      page.getByRole("heading", { name: "Campaigns", exact: true }),
+      page.getByRole("heading", { name: "Research", exact: true }),
     ).toBeVisible();
 
-    // Create a draft via the drawer.
-    await page.getByRole("button", { name: "New campaign" }).click();
-    const drawer = page.getByRole("dialog", { name: /new research campaign/i });
-    await drawer.getByLabel("Name").fill(campaignName);
-    const seeds = drawer.getByLabel(/Seeds \(JSON\)/);
-    await expect(seeds).toHaveValue(/"sources"/);
-    await seeds.fill('{"sources":["usaspending"],"platforms":[],"capabilities":[],"geography":[]}');
-    await drawer.getByRole("button", { name: "Create draft" }).click();
-    await expect(
-      drawer.getByText(new RegExp(`"${campaignName}" created as a draft|created as a draft`)),
-    ).toBeVisible();
-    // A fresh draft has an empty frontier, so Start is disabled here.
-    await expect(drawer.getByRole("button", { name: "Start now" })).toBeDisabled();
-    await drawer.getByRole("link", { name: "Open campaign" }).click();
+    // Create a draft through the audited campaigns API.
+    const created = await createCampaignDraft(page, campaignName);
+    expect(created.status, `campaign create failed: ${created.body}`).toBe(201);
+    const campaignId = campaignIdOf(JSON.parse(created.body) as unknown);
+    if (campaignId === undefined) {
+      throw new Error(`No id in create response: ${created.body}`);
+    }
 
-    // Detail renders honestly with an empty frontier.
+    // The research campaigns strip lists the new draft.
+    await page.goto("/research");
+    const strip = page.getByTestId("campaigns-strip");
+    await expect(strip).toBeVisible();
+    await expect(
+      strip.getByRole("link", { name: campaignName }),
+    ).toBeVisible();
+
+    await page.goto(`/campaigns/${campaignId}`);
     await expect(
       page.getByRole("heading", { name: campaignName }),
     ).toBeVisible();

@@ -1,20 +1,9 @@
-import { DashboardCharts } from "@/components/dashboard-charts";
-import { DashboardMetrics } from "@/components/dashboard-metrics";
+import { redirect } from "next/navigation";
 
-export default function DashboardPage() {
-  return (
-    <>
-      <header className="asi-page-header">
-        <p className="asi-page-kicker">Intelligence operations</p>
-        <h1 className="asi-page-title">Dashboard</h1>
-        <p className="asi-page-description">
-          Database-backed coverage, review workload, and research execution at a
-          glance. Counts update as sources are mined and proposals reviewed.
-        </p>
-      </header>
-
-      <DashboardMetrics />
-      <DashboardCharts />
-    </>
-  );
+/**
+ * Dashboard dissolved into the Targets table (REDESIGN_PLAN §2/§5): the tiered
+ * feed is the continuously-updated operational surface.
+ */
+export default function DashboardPage(): never {
+  redirect("/feed");
 }
