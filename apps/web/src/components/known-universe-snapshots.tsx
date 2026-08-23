@@ -94,10 +94,12 @@ function NoveltyResult(props: { result: NoveltySearchResult }) {
               "0.25rem solid var(--asi-success)",
           }}
         >
-          <strong>NOVEL</strong>
+          <strong>No match in active snapshots</strong>
           <p className="asi-page-description">
-            No member of any active snapshot and no canonical company matches{" "}
-            “{result.query.q ?? result.query.domain}”.
+            No match in active snapshots (name/domain substring search) for{" "}
+            “{result.query.q ?? result.query.domain}”. This is not proof of
+            absence from the known universe — variant names, aliases, or
+            differently-spelled domains would not match.
           </p>
         </div>
       ) : null}
@@ -112,7 +114,12 @@ function NoveltyResult(props: { result: NoveltySearchResult }) {
           <ul style={{ marginBlockStart: "var(--asi-space-4)" }}>
             {members.map((member) => (
               <li key={member.memberId}>
-                <code>{member.snapshotKey}</code> · {member.rawName}
+                <code>{member.snapshotKey}</code>
+                {member.snapshotEffectiveDate !== null
+                  ? ` · effective ${member.snapshotEffectiveDate}`
+                  : ""}
+                {" · "}
+                {member.rawName}
                 <Badge style={{ marginInlineStart: "var(--asi-space-2)" }} tone={matchTone(member.matchStatus)}>
                   {member.matchStatus}
                 </Badge>

@@ -1,9 +1,10 @@
-import { eq, ilike, or } from "drizzle-orm";
+import { eq, ilike, or, sql } from "drizzle-orm";
 
 import { getDatabase } from "./client.js";
 import { stringifyCsv } from "./csv.js";
 import { searchContains } from "./search.js";
 import {
+  candidates,
   companies,
   contacts,
   dataSources,
@@ -20,7 +21,9 @@ export type ExportEntity =
   | "platforms"
   | "parts"
   | "qualifications"
-  | "data_sources";
+  | "data_sources"
+  | "candidates";
+
 export type ExportFormat = "csv" | "jsonl";
 
 const EXPORT_LIMIT = 10_000;
@@ -227,6 +230,52 @@ export async function exportRecords(input: {
       })
       .from(facilityQualifications)
       .limit(EXPORT_LIMIT)) as Record<string, unknown>[];
+  } else if (input.entity === "candidates") {
+    headers = [
+      "id",
+      "companyId",
+      "companyName",
+      "companyDomain",
+      "status",
+      "noveltyStatus",
+      "currentScores",
+      "researchPriority",
+      "partnerReviewPriority",
+      "createdAt",
+    ];
+    const primaryDomain = sql<string | null>`(
+      SELECT lower(d.domain) FROM company_domains d
+      WHERE d.company_id = ${candidates.companyId}
+      ORDER BY d.is_primary DESC LIMIT 1
+    )`;
+    const where = pattern
+      ? or(
+          ilike(companies.displayName, pattern),
+          ilike(companies.legalName, pattern),
+        )
+      : undefined;
+    const raw = await db
+      .select({
+        id: candidates.id,
+        companyId: candidates.companyId,
+        companyName: companies.displayName,
+        companyDomain: primaryDomain,
+        status: candidates.status,
+        noveltyStatus: candidates.noveltyStatus,
+        currentScores: candidates.currentScores,
+        researchPriority: candidates.researchPriority,
+        partnerReviewPriority: candidates.partnerReviewPriority,
+        createdAt: candidates.createdAt,
+      })
+      .from(candidates)
+      .innerJoin(companies, eq(companies.id, candidates.companyId))
+      .where(where)
+      .orderBy(sql`${candidates.createdAt} DESC`)
+      .limit(EXPORT_LIMIT);
+    rows = raw.map((row) => ({
+      ...row,
+      currentScores: JSON.stringify(row.currentScores ?? {}),
+    })) as Record<string, unknown>[];
   } else {
     headers = ["id", "name", "baseUrl", "access", "ingestion", "publisher", "createdAt"];
     const where = pattern ? ilike(dataSources.name, pattern) : undefined;

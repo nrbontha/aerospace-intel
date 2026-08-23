@@ -603,13 +603,14 @@ export const exportStatusValues = [
   "failed",
   "expired",
 ] as const;
+export const exportEntityValues = [...importEntityValues, "candidates"] as const;
 export const exportCreateSchema = z.strictObject({
-  entity: z.enum(importEntityValues),
+  entity: z.enum(exportEntityValues),
   format: z.enum(exportFormatValues),
   filters: metadataSchema.default({}),
 });
 export const exportQuerySchema = z.strictObject({
-  entity: z.enum(importEntityValues),
+  entity: z.enum(exportEntityValues),
   format: z.enum(exportFormatValues).default("csv"),
   query: z.string().trim().max(200).optional(),
 });

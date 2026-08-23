@@ -7,9 +7,10 @@ import {
   createKnownUniverseSnapshot,
   getDatabase,
   knownUniverseSnapshots,
-  parseGoldenSetTargets,
-  parseGrataData,
-  parsePipeline,
+  parseGoldenSetTargetsFromWorkbook,
+  parseGrataDataFromWorkbook,
+  parsePipelineFromWorkbook,
+  readWorkbook,
   sha256Hex,
   SnapshotKeyConflictError,
 } from "@asi/database";
@@ -20,6 +21,11 @@ import { z } from "zod";
 import { jsonError, jsonPage, jsonSuccess, jsonValue } from "@/lib/api";
 import { requireRole, requireUser, verifyCsrfRequest } from "@/lib/auth";
 import { handleCatalogRouteError } from "@/lib/catalog-api";
+import {
+  MAX_SNAPSHOT_UPLOAD_BYTES,
+  MAX_SNAPSHOT_UPLOAD_ROWS,
+  validateWorkbookUpload,
+} from "@/lib/snapshot-upload-guard";
 
 export const dynamic = "force-dynamic";
 
@@ -54,12 +60,19 @@ interface SnapshotMemberUpload {
   rawPayload: Record<string, unknown>;
 }
 
+/** SheetJS bounded-read options applied to every snapshot upload. */
+const WORKBOOK_READ_LIMITS = {
+  maxSheets: 32,
+  sheetRows: MAX_SNAPSHOT_UPLOAD_ROWS + 10,
+} as const;
+
 function membersFromWorkbook(
   sourceType: (typeof snapshotSourceTypeSchema)["options"][number],
   bytes: Uint8Array,
 ): SnapshotMemberUpload[] | null {
+  const wb = readWorkbook(bytes, WORKBOOK_READ_LIMITS);
   if (sourceType === "golden_set_workbook") {
-    return parseGoldenSetTargets(bytes).companies.map(
+    return parseGoldenSetTargetsFromWorkbook(wb).companies.map(
       (company) => ({
         rawName: company.name,
         rawDomain: company.domain,
@@ -69,7 +82,7 @@ function membersFromWorkbook(
     );
   }
   if (sourceType === "grata_enrichment") {
-    return parseGrataData(bytes).map((row) => ({
+    return parseGrataDataFromWorkbook(wb).map((row) => ({
       rawName: row.name,
       rawDomain: row.domain,
       sourceRow: row.workbookRow,
@@ -77,7 +90,7 @@ function membersFromWorkbook(
     }));
   }
   if (sourceType === "preliminary_pipeline") {
-    return parsePipeline(bytes).rows.map((row) => ({
+    return parsePipelineFromWorkbook(wb).rows.map((row) => ({
       rawName: row.companyName,
       rawDomain: typeof row.domain === "string" ? row.domain : null,
       sourceRow: row.workbookRow,
@@ -175,6 +188,21 @@ export async function POST(request: NextRequest): Promise<Response> {
   try {
     const actor = await requireRole("analyst", "admin");
     await verifyCsrfRequest(request);
+
+    // Enforce the size cap BEFORE formData() buffers the whole body. The
+    // multipart framing adds a small constant overhead; allow for it.
+    const declaredLength = Number(request.headers.get("content-length") ?? "0");
+    if (
+      Number.isFinite(declaredLength) &&
+      declaredLength > MAX_SNAPSHOT_UPLOAD_BYTES + 64 * 1024
+    ) {
+      return jsonError(
+        "validation_failed",
+        `Upload body exceeds the ${MAX_SNAPSHOT_UPLOAD_BYTES} byte limit`,
+        413,
+      );
+    }
+
     const form = await request.formData();
     const file = form.get("file");
     const parsedForm = uploadFormSchema.safeParse({
@@ -197,6 +225,14 @@ export async function POST(request: NextRequest): Promise<Response> {
     if (!(file instanceof File)) {
       return jsonError("validation_failed", "An xlsx workbook file is required", 400);
     }
+    const guard = validateWorkbookUpload({
+      name: file.name,
+      size: file.size,
+      type: file.type,
+    });
+    if (!guard.ok) {
+      return jsonError(guard.code, guard.message, guard.status);
+    }
     const bytes = new Uint8Array(await file.arrayBuffer());
     let members: SnapshotMemberUpload[];
     try {
@@ -211,6 +247,13 @@ export async function POST(request: NextRequest): Promise<Response> {
       members = parsed;
     } catch {
       return jsonError("validation_failed", "File is not a valid xlsx workbook", 400);
+    }
+    if (members.length > MAX_SNAPSHOT_UPLOAD_ROWS) {
+      return jsonError(
+        "validation_failed",
+        `Workbook exceeds the ${MAX_SNAPSHOT_UPLOAD_ROWS} row limit (${members.length} rows)`,
+        422,
+      );
     }
     if (members.length === 0) {
       return jsonError(

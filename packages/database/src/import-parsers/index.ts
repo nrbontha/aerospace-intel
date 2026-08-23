@@ -10,6 +10,7 @@ export {
   parseDatabaseSourcesFromWorkbook,
 } from "./database-sources.js";
 export { parsePipeline, parsePipelineFromWorkbook } from "./pipeline.js";
+export { readWorkbook, type WorkbookReadLimits } from "./internal.js";
 export {
   excelSerialToIso,
   type Cell,

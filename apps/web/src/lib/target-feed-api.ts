@@ -139,12 +139,14 @@ export async function getCandidateDetail(
   return envelope.data;
 }
 
-/** Manual status change. The API only accepts archived/rejected/hold/shortlist. */
+/** Manual status change. The API accepts the bookkeeping targets plus
+ * queued_research ("Needs More Research"); research-lifecycle routing
+ * (in_research, research_ready, partner_review) stays engine-owned. */
 export async function updateCandidateStatus(
   candidateId: string,
   status: Extract<
     CandidateStatus,
-    "archived" | "rejected" | "hold" | "shortlist"
+    "archived" | "rejected" | "hold" | "shortlist" | "queued_research"
   >,
 ): Promise<Readonly<{ id: string; status: CandidateStatus }>> {
   const envelope = await apiJson<

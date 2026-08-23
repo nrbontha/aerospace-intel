@@ -339,6 +339,7 @@ export const openApiDocument = {
                 "parts",
                 "qualifications",
                 "data_sources",
+                "candidates",
               ],
             },
           },

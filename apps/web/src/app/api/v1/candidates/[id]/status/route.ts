@@ -11,16 +11,19 @@ export const dynamic = "force-dynamic";
 type RouteContext = { params: Promise<{ id: string }> };
 
 /**
- * Loose transition policy: any current status may move to one of the four
- * human bookkeeping states. Research-lifecycle statuses (queued_research,
- * in_research, research_ready, partner_review) are engine-routed and are
- * deliberately NOT settable by hand.
+ * Loose transition policy: any current status may move to one of these
+ * targets. `queued_research` is the analyst's "Needs More Research" lever:
+ * it returns a candidate to the research queue. NOTE: research-lifecycle
+ * routing still wins on the next promotion cycle — a manual queued_research
+ * persists only until the engine re-routes, unless preserved by the existing
+ * human-status logic (audit-noted changes).
  */
 const MANUAL_TARGET_STATUSES: readonly string[] = [
   "archived",
   "rejected",
   "hold",
   "shortlist",
+  "queued_research",
 ];
 
 function handleRouteError(error: unknown): Response {

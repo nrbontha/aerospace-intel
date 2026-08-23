@@ -72,6 +72,7 @@ export type NoveltyMemberHit = Readonly<{
   memberId: string;
   snapshotId: string;
   snapshotKey: string;
+  snapshotEffectiveDate: string | null;
   rawName: string;
   normalizedDomain: string | null;
   matchStatus: string;

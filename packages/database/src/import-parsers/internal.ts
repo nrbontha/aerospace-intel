@@ -103,11 +103,39 @@ export function buildPayload(
   return payload;
 }
 
+/** Bounded read options. When omitted, `readWorkbook` behaves exactly as
+ * before (no dense mode, no row/sheet caps). */
+export type WorkbookReadLimits = {
+  /** Reject workbooks declaring more than this many sheets. */
+  maxSheets?: number;
+  /** Cap parsed rows per sheet (SheetJS `sheetRows`); excess rows are
+   * dropped by the parser rather than buffered. */
+  sheetRows?: number;
+};
+
 /** Read workbook bytes with raw (non-date-coerced) cells; input is copied
- * into a plain Uint8Array so pooled Buffers / views never leak through. */
-export function readWorkbook(bytes: ArrayBuffer | Uint8Array): XLSX.WorkBook {
+ * into a plain Uint8Array so pooled Buffers / views never leak through.
+ * Pass `limits` to bound parse memory (dense mode + per-sheet row cap +
+ * sheet-count check). */
+export function readWorkbook(
+  bytes: ArrayBuffer | Uint8Array,
+  limits?: WorkbookReadLimits,
+): XLSX.WorkBook {
   const data = bytes instanceof Uint8Array ? new Uint8Array(bytes) : new Uint8Array(bytes);
-  return XLSX.read(data, { type: "array", cellDates: false });
+  const wb = limits === undefined
+    ? XLSX.read(data, { type: "array", cellDates: false })
+    : XLSX.read(data, {
+        type: "array",
+        cellDates: false,
+        dense: true,
+        ...(limits.sheetRows === undefined ? {} : { sheetRows: limits.sheetRows }),
+      });
+  if (limits?.maxSheets !== undefined && wb.SheetNames.length > limits.maxSheets) {
+    throw new Error(
+      `Workbook declares ${wb.SheetNames.length} sheets; at most ${limits.maxSheets} allowed`,
+    );
+  }
+  return wb;
 }
 
 /** Bounds-safe cell access: out-of-range reads become null. */

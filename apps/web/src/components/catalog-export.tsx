@@ -11,7 +11,8 @@ type CatalogExportProps = Readonly<{
     | "platforms"
     | "parts"
     | "qualifications"
-    | "data_sources";
+    | "data_sources"
+    | "candidates";
   query?: string;
 }>;
 

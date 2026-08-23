@@ -18,6 +18,7 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { CatalogExport } from "@/components/catalog-export";
 import {
   AxisChip,
   NoveltyBadge,
@@ -33,11 +34,17 @@ import {
   type CompanyIdentity,
 } from "@/lib/target-feed-api";
 
+/**
+ * Manual status targets. `queued_research` is the analyst's
+ * "Needs More Research" lever: it sends the candidate back to the research
+ * queue. NOTE: the engine re-routes statuses on the next promotion cycle,
+ * so a manual queued_research persists only until then unless the analyst
+ * records an audit note (the human-status preservation logic keys off it).
+ */
 type ManualStatus = Extract<
   CandidateStatus,
-  "archived" | "rejected" | "hold" | "shortlist"
+  "archived" | "rejected" | "hold" | "shortlist" | "queued_research"
 >;
-
 const STATUS_FILTER_OPTIONS: readonly CandidateStatus[] = [
   "queued_research",
   "in_research",
@@ -56,20 +63,24 @@ const NOVELTY_OPTIONS: readonly NoveltyStatus[] = [
   "confirmed_known_company",
   "unable_to_assess",
 ];
-
-/** The status API only accepts these four manual targets. */
+/** Manual status targets offered in the feed/profile status menus. */
 const MANUAL_STATUS_OPTIONS: readonly ManualStatus[] = [
   "shortlist",
   "hold",
   "rejected",
+  "queued_research",
   "archived",
 ];
 
+// queued_research records no investment feedback — it is a research-queue
+// request, not an investment decision; the audit note on the transition
+// carries the reasoning.
 const FEEDBACK_ACTION_BY_STATUS: Record<ManualStatus, "shortlist" | "hold" | "reject" | null> =
   {
     shortlist: "shortlist",
     hold: "hold",
     rejected: "reject",
+    queued_research: null,
     archived: null,
   };
 
@@ -341,7 +352,9 @@ export function RowStatusMenu({
           >
             {MANUAL_STATUS_OPTIONS.map((status) => (
               <option key={status} value={status}>
-                {humanLabel(status)}
+                {status === "queued_research"
+                  ? "Needs more research"
+                  : humanLabel(status)}
               </option>
             ))}
             <option disabled value="watchlist">
@@ -349,13 +362,28 @@ export function RowStatusMenu({
             </option>
           </Select>
         </label>
+        {draftStatus === "queued_research" ? (
+          <p className="asi-page-description" role="note">
+            Sends the candidate back to the research queue. The engine may
+            re-route it on the next promotion cycle; record a note so your
+            reasoning stays on the audit trail.
+          </p>
+        ) : null}
         <label className="admin-field">
-          <span className="admin-field__label">Audit note</span>
+          <span className="admin-field__label">
+            {draftStatus === "queued_research"
+              ? "What needs more research? (recommended)"
+              : "Audit note"}
+          </span>
           <Input
             maxLength={2000}
             value={note}
             onChange={(event) => setNote(event.target.value)}
-            placeholder="Why this status changed (recorded as investment feedback)"
+            placeholder={
+              draftStatus === "queued_research"
+                ? "e.g. Ownership picture unclear — re-run research after filings update"
+                : "Why this status changed (recorded as investment feedback)"
+            }
           />
         </label>
         <div className="admin-actions">
@@ -612,6 +640,9 @@ export function TargetFeed({ queue = false }: { queue?: boolean }) {
             ) : null}
           </div>
         </form>
+        <div className="admin-actions">
+          <CatalogExport entity="candidates" />
+        </div>
       </div>
 
       {error !== null ? (
