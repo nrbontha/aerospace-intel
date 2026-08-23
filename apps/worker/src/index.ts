@@ -6,6 +6,7 @@ import { OpenRouterClient } from "@asi/research";
 
 import { startHealthServer, type HealthServer } from "./health.js";
 import {
+  createCampaignProcessHandler,
   createCompanyResearchHandler,
   createDiscoverResearchHandler,
   createPartResearchHandler,
@@ -200,6 +201,10 @@ export async function startWorker(): Promise<WorkerRuntime> {
     },
   } as const;
   const handlers = Object.freeze({
+    "campaign-process.v1": createCampaignProcessHandler({
+      queueName: env.RESEARCH_QUEUE_NAME,
+      logger: log,
+    }),
     "research.company.v1": createCompanyResearchHandler({
       ...shared,
       maxCostPerDayUsd: env.OPENROUTER_MAX_COST_PER_DAY_USD,

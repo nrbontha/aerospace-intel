@@ -11,6 +11,11 @@
       "import": "./dist/index.js",
       "default": "./dist/index.js"
     },
+    "./scoring-axial": {
+      "types": "./src/scoring-axial/index.ts",
+      "import": "./dist/scoring-axial/index.js",
+      "default": "./dist/scoring-axial/index.js"
+    },
     "./jobs": {
       "types": "./src/jobs.ts",
       "import": "./dist/jobs.js",
@@ -68,6 +73,7 @@
   "dependencies": {
     "@asi/config": "*",
     "@asi/contracts": "*",
+    "@asi/database": "*",
     "zod": "4.4.3"
   },
   "devDependencies": {
