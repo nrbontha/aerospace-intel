@@ -327,6 +327,8 @@ export async function promoteProgram(
   id: string,
   rationale: string,
   actorUserId?: string | null,
+  /** Extra audit metadata (e.g. promotion-gate evidence). */
+  auditMetadata: Record<string, unknown> = {},
 ): Promise<ScoringProgramDto> {
   return db.transaction(async (tx): Promise<ScoringProgramDto> => {
     const target = await loadProgramForUpdate(tx, id);
@@ -370,6 +372,7 @@ export async function promoteProgram(
         archivedChampionIds: previousChampions
           .filter((c) => c.id !== target.id)
           .map((c) => c.id),
+        ...auditMetadata,
       },
     });
     return toProgramDto(updated, true);
@@ -431,4 +434,116 @@ export async function rejectProgram(
     });
     return toProgramDto(updated, false);
   });
+}
+// ---------------------------------------------------------------------------
+// Promotion gate (evaluated over the append-only journal record)
+// ---------------------------------------------------------------------------
+
+/** Minimum primary-metric gain over the current champion to count as real. */
+export const PROMOTION_GATE_EPSILON = 0.02;
+
+/** One serialized entry of a scorer run's `result.entries` (run-scorer shape). */
+export interface PromotionGateRunEntry {
+  readonly programId: string | null;
+  readonly name: string;
+  readonly role: "champion" | "challenger";
+  readonly axis?: string;
+  readonly rank?: number | null;
+  readonly strongVsNegativeSeparation?: number | null;
+  readonly vetoAudit?: { readonly passed?: boolean } | null;
+  readonly leakedFields?: readonly string[];
+}
+
+export interface PromotionGateEvaluation {
+  readonly allowed: boolean;
+  /** Human-readable failure reasons; empty when allowed. */
+  readonly reasons: readonly string[];
+  /** Metric evidence recorded on the promotion audit event. */
+  readonly metricSnapshot: {
+    readonly challengerMetric: number | null;
+    readonly championMetric: number | null;
+    readonly gain: number | null;
+  } | null;
+}
+
+/**
+ * Decide whether `programId` may be promoted based on the stored experiment
+ * run: the program must be an evaluated challenger of the run whose entry is
+ * veto-audit clean, leakage clean, and improves the primary metric beyond
+ * epsilon over the same-axis champion baseline recorded in the SAME run.
+ * Legacy runs without per-entry axis data fail closed.
+ */
+export function evaluatePromotionGate(
+  run: ExperimentRunDto | null,
+  programId: string,
+): PromotionGateEvaluation {
+  if (run === null) {
+    return {
+      allowed: false,
+      reasons: ["experiment run not found"],
+      metricSnapshot: null,
+    };
+  }
+  const result: unknown = run.result;
+  const rawEntries =
+    result !== null && typeof result === "object" && "entries" in result
+      ? result.entries
+      : undefined;
+  // jsonb written by run-scorer's serializedEntries; every read below is
+  // optional-chained/guarded, so a malformed row fails closed.
+  const entries: readonly PromotionGateRunEntry[] = Array.isArray(rawEntries)
+    ? (rawEntries as readonly PromotionGateRunEntry[])
+    : [];
+  if (entries.length === 0) {
+    return {
+      allowed: false,
+      reasons: ["run result has no evaluated program entries"],
+      metricSnapshot: null,
+    };
+  }
+  const challenger = entries.find(
+    (entry) => entry.role === "challenger" && entry.programId === programId,
+  );
+  if (challenger === undefined) {
+    return {
+      allowed: false,
+      reasons: [`program ${programId} is not a challenger evaluated by this run`],
+      metricSnapshot: null,
+    };
+  }
+  const reasons: string[] = [];
+  if (challenger.axis === undefined) {
+    reasons.push("run entry predates per-axis attribution (legacy run)");
+  }
+  const championBaseline =
+    challenger.axis === undefined
+      ? undefined
+      : entries.find(
+          (entry) => entry.role === "champion" && entry.axis === challenger.axis,
+        );
+  if (challenger.axis !== undefined && championBaseline === undefined) {
+    reasons.push(`no ${challenger.axis} champion baseline in the run`);
+  }
+  if (challenger.vetoAudit?.passed !== true) {
+    reasons.push("veto audit is not clean");
+  }
+  if ((challenger.leakedFields ?? []).length > 0) {
+    reasons.push(`leaked fields: ${challenger.leakedFields!.join(",")}`);
+  }
+  const challengerMetric = challenger.strongVsNegativeSeparation ?? null;
+  const championMetric = championBaseline?.strongVsNegativeSeparation ?? null;
+  const gain =
+    challengerMetric !== null && championMetric !== null
+      ? challengerMetric - championMetric
+      : null;
+  if (gain === null || !(gain > PROMOTION_GATE_EPSILON)) {
+    reasons.push(
+      `primary metric gain ${gain === null ? "unknown" : gain.toFixed(4)} not beyond epsilon ${PROMOTION_GATE_EPSILON}`,
+    );
+  }
+  return {
+    allowed: reasons.length === 0,
+    reasons,
+    metricSnapshot: { challengerMetric, championMetric, gain },
+  };
 }

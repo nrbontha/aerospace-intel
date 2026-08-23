@@ -2,6 +2,8 @@ export * from "./company-workflow.js";
 export * from "./jobs.js";
 export * from "./openrouter.js";
 export * from "./safe-fetch.js";
+export * from "./untrusted-source.js";
+export * from "./source-access.js";
 export * from "./scoring.js";
 export * from "./source-workflow.js";
 export * from "./tools.js";

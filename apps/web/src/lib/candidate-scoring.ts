@@ -6,21 +6,21 @@ import {
   FEATURE_SCHEMA_VERSION,
   computeConfidence,
   computeNovelty,
-  complexityScore,
   evaluateProgram,
   extractFeatureVector,
+  getChampionProgramOrFallback,
   partnerReviewPriority,
   researchPriority,
   routeCandidate,
   type FeatureVector,
   type ProgramEvaluation,
+  type ResolvedChampionProgram,
 } from "@asi/research/scoring-axial";
 
 import {
   activeSnapshotMatchVerdicts,
   appendScoreRows,
   buildFeatureRecordInput,
-  ensureChampionPrograms,
   ensureFeatureSnapshot,
   getCandidateById,
   latestAxisScores,
@@ -29,7 +29,6 @@ import {
   toCandidateDto,
   upsertCandidate,
   type CandidateUpsertValues,
-  type ChampionSeed,
 } from "@asi/database";
 
 import type { Database } from "@asi/database";
@@ -43,25 +42,6 @@ import type { CandidateDto } from "@asi/contracts";
  * persists everything with provenance via the @asi/database storage layer.
  */
 
-const FIT_PROGRAM_NAME = "default-fit-v1";
-const ACTIONABILITY_PROGRAM_NAME = "default-actionability-v1";
-
-const CHAMPION_SEEDS: ChampionSeed[] = [
-  {
-    name: FIT_PROGRAM_NAME,
-    version: DEFAULT_FIT_PROGRAM.version,
-    axis: "fit",
-    program: DEFAULT_FIT_PROGRAM as unknown as Record<string, unknown>,
-    complexity: complexityScore(DEFAULT_FIT_PROGRAM),
-  },
-  {
-    name: ACTIONABILITY_PROGRAM_NAME,
-    version: DEFAULT_ACTIONABILITY_PROGRAM.version,
-    axis: "actionability",
-    program: DEFAULT_ACTIONABILITY_PROGRAM as unknown as Record<string, unknown>,
-    complexity: complexityScore(DEFAULT_ACTIONABILITY_PROGRAM),
-  },
-];
 
 function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") return JSON.stringify(value);
@@ -222,6 +202,9 @@ export interface ComputedAxes {
   partnerReviewPriority: number | null;
   routedStatus: CandidateUpsertValues["routedStatus"];
   contentSha256: string;
+  /** scoring_programs.id backing each axis; null = shipped default fallback. */
+  fitScoringProgramId: string | null;
+  actionabilityScoringProgramId: string | null;
 }
 
 /**
@@ -231,12 +214,27 @@ export interface ComputedAxes {
 export function computeCandidateAxes(
   state: Awaited<ReturnType<typeof loadCanonicalCompanyState>>,
   verdictStatuses: Array<"exact" | "probable" | "possible" | "none">,
+  /**
+   * Champion programs resolved from scoring_programs. Defaults to the
+   * shipped defaults — production callers MUST resolve via
+   * getChampionProgramOrFallback so Lab promotions take effect.
+   */
+  champions?: {
+    readonly fit: ResolvedChampionProgram;
+    readonly actionability: ResolvedChampionProgram;
+  },
 ): ComputedAxes {
   const featureVector = extractFeatureVector(buildFeatureRecordInput(state));
   const contentSha256 = sha256OfFeatures(featureVector);
 
-  const fitEvaluation = evaluateProgram(DEFAULT_FIT_PROGRAM, featureVector);
-  const actionabilityEvaluation = evaluateProgram(DEFAULT_ACTIONABILITY_PROGRAM, featureVector);
+  const fitEvaluation = evaluateProgram(
+    champions?.fit.program ?? DEFAULT_FIT_PROGRAM,
+    featureVector,
+  );
+  const actionabilityEvaluation = evaluateProgram(
+    champions?.actionability.program ?? DEFAULT_ACTIONABILITY_PROGRAM,
+    featureVector,
+  );
 
   const novelty = computeNovelty(featureVector, { matchStatusesBySnapshot: verdictStatuses });
   const confidence = computeConfidence({
@@ -302,6 +300,8 @@ export function computeCandidateAxes(
     partnerReviewPriority: prp,
     routedStatus: routingQueueToStatus(decision.queue),
     contentSha256,
+    fitScoringProgramId: champions?.fit.scoringProgramId ?? null,
+    actionabilityScoringProgramId: champions?.actionability.scoringProgramId ?? null,
   };
 }
 
@@ -322,14 +322,19 @@ async function promoteByCompanyId(
     domain: state.domains[0]?.domain ?? null,
     displayName: state.company.displayName,
   });
+  // Resolve the LIVE champions (Lab promotions) with shipped-default fallback.
+  const [fitChampion, actionabilityChampion] = await Promise.all([
+    getChampionProgramOrFallback(db, "fit"),
+    getChampionProgramOrFallback(db, "actionability"),
+  ]);
   const axes = computeCandidateAxes(
     state,
     verdicts.map((verdict) => verdict.status),
+    { fit: fitChampion, actionability: actionabilityChampion },
   );
   const snapshotIds = verdicts.map((verdict) => verdict.snapshotId);
 
   const result = await db.transaction(async (tx) => {
-    const programIds = await ensureChampionPrograms(tx, CHAMPION_SEEDS);
     await ensureFeatureSnapshot(tx, {
       companyId,
       schemaVersion: FEATURE_SCHEMA_VERSION,
@@ -357,18 +362,28 @@ async function promoteByCompanyId(
         latestFeatureSnapshotForCompany(tx, companyId),
       ]);
       const sameFeatures = latestSnapshot?.contentSha256 === axes.contentSha256;
-      const sameValues = (["fit", "novelty", "confidence", "actionability"] as const).every(
-        (axis) =>
-          (latestScores[axis]?.value ?? undefined) === (axes.currentScores[axis] ?? undefined),
+      const sameValues = (
+        [
+          ["fit", axes.fitScoringProgramId],
+          ["novelty", null],
+          ["confidence", null],
+          ["actionability", axes.actionabilityScoringProgramId],
+        ] as const
+      ).every(
+        ([axis, programId]) =>
+          (latestScores[axis]?.value ?? undefined) ===
+            (axes.currentScores[axis] ?? undefined) &&
+          (latestScores[axis]?.scoringProgramId ?? null) === programId,
       );
-      appended = !(sameFeatures && sameValues && latestScores.fit !== undefined);
+      appended = !(sameFeatures && sameValues);
     }
     if (appended) {
       await appendScoreRows(tx, candidateRow.id, [
         {
           axis: "fit",
           value: axes.currentScores.fit,
-          scoringProgramId: programIds[FIT_PROGRAM_NAME] ?? null,
+          // Null when the shipped-default fallback was used (no champion row).
+          scoringProgramId: fitChampion.scoringProgramId,
           featureSchemaVersion: FEATURE_SCHEMA_VERSION,
           details: {
             contributions: axes.fitEvaluation.contributions,
@@ -379,7 +394,7 @@ async function promoteByCompanyId(
         {
           axis: "actionability",
           value: axes.currentScores.actionability,
-          scoringProgramId: programIds[ACTIONABILITY_PROGRAM_NAME] ?? null,
+          scoringProgramId: actionabilityChampion.scoringProgramId,
           featureSchemaVersion: FEATURE_SCHEMA_VERSION,
           details: {
             contributions: axes.actionabilityEvaluation.contributions,

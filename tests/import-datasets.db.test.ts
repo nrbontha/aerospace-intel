@@ -30,7 +30,9 @@ import {
 import { runMigrations } from "../packages/database/src/migrate.js";
 
 const execFileAsync = promisify(execFile);
-const DB_TESTS_ENABLED = process.env.ASI_DB_TESTS === "1";
+const DB_TESTS_ENABLED =
+  process.env.ASI_DB_TESTS === "1" &&
+  Boolean(process.env.DATABASE_URL);
 const repoPath = (suffix: string) => path.join(process.cwd(), suffix);
 
 function loadDatabaseUrl(): void {
@@ -161,8 +163,16 @@ describe.skipIf(!DB_TESTS_ENABLED)("dataset imports (DB)", () => {
     expect(payload["Priority"]).toBe("1");
     expect(JSON.stringify(payload)).toContain("Cathy Caris");
 
-    // Pipeline rows are members only — no leads were created from them.
-    expect(await countRows(sql`SELECT count(*)::int AS c FROM leads`)).toBe(0);
+    // Pipeline rows are members only — none of them may appear as leads.
+    // (The shared dev database legitimately holds campaign leads from other
+    // sources, so the assertion is scoped to pipeline member names.)
+    expect(
+      await countRows(sql`
+        SELECT count(*)::int AS c FROM leads l
+        JOIN known_universe_members m ON lower(m.normalized_name) = lower(l.raw_name)
+        JOIN known_universe_snapshots s ON s.id = m.snapshot_id
+        WHERE s.key = 'preliminary-pipeline-v01'`),
+    ).toBe(0);
   });
 
   it("imports the five nominated database sources with honest access states", async () => {

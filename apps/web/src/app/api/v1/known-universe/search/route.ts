@@ -29,6 +29,7 @@ type MemberHitRow = {
   member_id: string;
   snapshot_id: string;
   snapshot_key: string;
+  snapshot_effective_date: string | null;
   raw_name: string;
   normalized_domain: string | null;
   match_status: string;
@@ -79,6 +80,7 @@ export async function GET(request: NextRequest): Promise<Response> {
       memberId: row.member_id,
       snapshotId: row.snapshot_id,
       snapshotKey: row.snapshot_key,
+      snapshotEffectiveDate: row.snapshot_effective_date,
       rawName: row.raw_name,
       normalizedDomain: row.normalized_domain,
       matchStatus: row.match_status,
@@ -115,6 +117,7 @@ function sqlMembers(input: {
 }) {
   return sql`
     SELECT m.id AS member_id, s.id AS snapshot_id, s.key AS snapshot_key,
+           s.effective_date::text AS snapshot_effective_date,
            m.raw_name, m.normalized_domain, m.match_status::text AS match_status
     FROM known_universe_members m
     JOIN known_universe_snapshots s ON s.id = m.snapshot_id

@@ -67,6 +67,11 @@ export function createPlatformResearchHandler(options: {
           fetchUrl: manufacturer?.websiteUrl ?? null,
           knownFacts: [],
         },
+        linkedSources:
+          manufacturer?.linkedSources.map((source) => ({
+            homepageUrl: source.homepageUrl,
+            access: source.access,
+          })) ?? [],
       });
       const artifacts = await recordSubjectResearchArtifacts({
         researchRunId: payload.researchRunId,

@@ -143,7 +143,10 @@ type CompanyRow = {
   display_name: string;
   legal_name: string;
   website_url: string | null;
+  description: string | null;
 };
+
+type CapabilitySignalRow = { text: string };
 
 /**
  * Assemble the canonical company state consumed by buildFeatureRecordInput.
@@ -155,14 +158,26 @@ export async function loadCanonicalCompanyState(
   companyId: string,
 ): Promise<CanonicalCompanyState> {
   const companyRows = await db.execute<CompanyRow>(sql`
-    SELECT id, display_name, legal_name, website_url FROM companies WHERE id = ${companyId}
+    SELECT id, display_name, legal_name, website_url, description
+    FROM companies WHERE id = ${companyId}
   `);
   const company = companyRows.rows[0];
   if (company === undefined) {
     throw new Error(`Company ${companyId} not found`);
   }
 
-  const [domains, identifiers, revenue, employees, ownership, certs, platforms, golden] =
+  const [
+    domains,
+    identifiers,
+    revenue,
+    employees,
+    ownership,
+    certs,
+    platforms,
+    golden,
+    observationSignals,
+    companyCapabilityNames,
+  ] =
     await Promise.all([
       db.execute<{ domain: string; is_primary: boolean; verified_at: Date | null }>(sql`
         SELECT domain, is_primary, verified_at FROM company_domains
@@ -208,6 +223,20 @@ export async function loadCanonicalCompanyState(
         WHERE company_id = ${companyId}
         ORDER BY created_at DESC LIMIT 1
       `),
+      db.execute<CapabilitySignalRow>(sql`
+        SELECT value::text AS text FROM observations
+        WHERE subject_type = 'company' AND subject_id = ${companyId}
+          AND field_key IN ('capability', 'description')
+          AND review_status <> 'rejected'
+        ORDER BY created_at DESC LIMIT 50
+      `),
+      db.execute<CapabilitySignalRow>(sql`
+        SELECT DISTINCT c.name AS text
+        FROM company_capabilities cc
+        JOIN capabilities c ON c.id = cc.capability_id
+        WHERE cc.company_id = ${companyId} AND cc.status = 'active'
+        LIMIT 20
+      `),
     ]);
 
   const revenueRow = revenue.rows[0];
@@ -220,6 +249,7 @@ export async function loadCanonicalCompanyState(
       displayName: company.display_name,
       legalName: company.legal_name,
       websiteUrl: company.website_url,
+      description: company.description,
     },
     domains: domains.rows.map((d) => ({
       domain: d.domain,
@@ -244,8 +274,12 @@ export async function loadCanonicalCompanyState(
             countUpper: employeeRow.employee_count_upper,
           },
     ownership: ownershipRow ?? null,
-    certificationStandards: certs.rows.map((c) => c.standard),
     platformNames: platforms.rows.map((p) => p.name),
+    certificationStandards: certs.rows.map((c) => c.standard),
+    capabilitySignals: [
+      ...observationSignals.rows.map((row) => row.text),
+      ...companyCapabilityNames.rows.map((row) => row.text),
+    ],
     goldenBuildToPrintRisk: golden.rows[0]?.build_to_print_risk ?? null,
     evidenceCounts: await companyEvidenceSummary(db, companyId),
   };

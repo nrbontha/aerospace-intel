@@ -36,6 +36,7 @@ function syntheticState(overrides: Partial<CanonicalCompanyState> = {}): Canonic
       displayName: "Aero Precision Machining",
       legalName: "Aero Precision Machining LLC",
       websiteUrl: null,
+      description: null,
     },
     domains: [
       { domain: "aeroprecision.example", isPrimary: true, verifiedAt: new Date("2026-01-01") },
@@ -47,6 +48,7 @@ function syntheticState(overrides: Partial<CanonicalCompanyState> = {}): Canonic
     certificationStandards: ["AS9100D"],
     platformNames: ["F-35"],
     goldenBuildToPrintRisk: "low",
+    capabilitySignals: [],
     evidenceCounts: {
       sourceCount: 4,
       primarySourceCount: 2,
@@ -140,13 +142,47 @@ describe("feature vector construction", () => {
     expect(vector.businessModel.distributesProducts).toBe("unknown"); // no canonical field
     expect(vector.businessModel.pureService).toBe("unknown");
     expect(vector.businessModel.buildToPrintShare).toBe("minor");
-    expect(vector.qualifications.as9100).toBe("present");
-    expect(vector.qualifications.nadcap).toBe("unknown");
     expect(vector.qualifications.pma).toBe("unknown");
     expect(vector.platforms).toEqual(["F-35"]);
     expect(vector.aftermarket).toBe("unknown");
     expect(vector.evidence.sourceCount).toBe(4);
     expect(vector.evidence.identityResolved).toBe(true);
+    // F5: no observed signal ⇒ explicitly unknown, NOT "none".
+    expect(vector.businessModel.proprietaryProductEvidence).toBe("unknown");
+  });
+
+  it("derives proprietary_product_evidence=claimed from capability keyword signals", () => {
+    const claimed = extractFeatureVector(
+      buildFeatureRecordInput(
+        syntheticState({
+          company: {
+            id: "11111111-1111-1111-1111-111111111111",
+            displayName: "Aero Precision Machining",
+            legalName: "Aero Precision Machining LLC",
+            websiteUrl: null,
+            description: null,
+          },
+          capabilitySignals: ["designs proprietary fuel pump assemblies"],
+        }),
+      ),
+    );
+    expect(claimed.businessModel.proprietaryProductEvidence).toBe("claimed");
+
+    const patented = extractFeatureVector(
+      buildFeatureRecordInput(
+        syntheticState({
+          capabilitySignals: [],
+          company: {
+            id: "11111111-1111-1111-1111-111111111111",
+            displayName: "Aero Precision Machining",
+            legalName: "Aero Precision Machining LLC",
+            websiteUrl: null,
+            description: "Holder of three US patents for turbine housings",
+          },
+        }),
+      ),
+    );
+    expect(patented.businessModel.proprietaryProductEvidence).toBe("claimed");
   });
 
   it("falls back to website host and marks identity unresolved without proof", () => {

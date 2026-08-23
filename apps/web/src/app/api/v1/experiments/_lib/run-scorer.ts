@@ -199,3 +199,56 @@ export async function runGoldenSetEvaluation(
   };
 }
 
+export interface KeepPromotionEntry {
+  readonly programId?: string | null;
+  readonly role?: string;
+  readonly axis?: string;
+  readonly rank?: number | null;
+}
+
+export type KeepPromotionSelection =
+  | { readonly ok: true; readonly programId: string; readonly axis: ProgramAxis }
+  | { readonly ok: false; readonly reason: string };
+
+/**
+ * Which challenger a keep-decision may promote.
+ *
+ * ONLY programs evaluated by THIS run are eligible (they must appear as
+ * challenger entries in the stored result), and keep applies solely to the
+ * top-ranked challenger of the run's single evaluated axis — every other
+ * axis' challenger requires its own run and decision. Runs that mixed axes,
+ * or legacy runs without per-entry axis attribution, promote nothing
+ * (fail closed).
+ */
+export function selectKeepPromotion(
+  entries: readonly KeepPromotionEntry[],
+): KeepPromotionSelection {
+  const challengers = entries.filter(
+    (entry) => entry.role === "challenger" && entry.programId != null,
+  );
+  if (challengers.length === 0) {
+    return { ok: false, reason: "run evaluated no registered challengers" };
+  }
+  const axes = new Set(
+    challengers.map((entry) => entry.axis).filter((axis): axis is string => axis != null),
+  );
+  if (axes.size !== 1) {
+    return {
+      ok: false,
+      reason:
+        axes.size === 0
+          ? "run entries lack axis attribution (legacy run); promote explicitly instead"
+          : `run mixed ${axes.size} axes; each axis requires its own decision`,
+    };
+  }
+  const axis = [...axes][0]! as ProgramAxis;
+  const ranked = challengers
+    .filter((entry) => entry.axis === axis && entry.rank != null)
+    .sort((a, b) => (a.rank ?? Number.MAX_SAFE_INTEGER) - (b.rank ?? Number.MAX_SAFE_INTEGER));
+  const winner = ranked[0];
+  if (winner === undefined || winner.programId == null) {
+    return { ok: false, reason: `no ranked ${axis} challenger in this run` };
+  }
+  return { ok: true, programId: winner.programId, axis };
+}
+

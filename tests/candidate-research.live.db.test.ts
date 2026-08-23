@@ -32,7 +32,9 @@ if (existsSync(envFile)) {
 process.env.DATABASE_URL ??=
   "postgres://asi:local-development-only@localhost:55440/aerospace_supplier_intelligence";
 
-const DB_TESTS_ENABLED = process.env.ASI_DB_TESTS === "1";
+const DB_TESTS_ENABLED =
+  process.env.ASI_DB_TESTS === "1" &&
+  Boolean(process.env.DATABASE_URL);
 const d = describe.skipIf(!DB_TESTS_ENABLED);
 
 import {

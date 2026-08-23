@@ -4,6 +4,7 @@ export * from "./axes.js";
 export * from "./priorities.js";
 export * from "./evaluate.js";
 export * from "./promote.js";
+export * from "./champion.js";
 export * from "./mutate.js";
 export * from "./diagnostics.js";
 export * from "./fixtures/index.js";

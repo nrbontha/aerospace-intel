@@ -299,7 +299,7 @@ export async function processCandidateResearch(
     researchRunId: payload.researchRunId,
     result: {
       status: "completed",
-      sourceDocuments: [outcome.sourceDocument],
+      sourceDocuments: [...outcome.sourceDocuments],
       facts: [...outcome.facts],
       telemetry: {
         promptVersion: "candidate-research.v1",
@@ -324,12 +324,12 @@ export async function processCandidateResearch(
           evidence: artifacts.evidenceIds.length,
           observations: artifacts.observationIds.length,
           proposals: artifacts.proposalIds.length,
-          sourceDocuments: 1,
+          sourceDocuments: artifacts.sourceDocumentIds.length,
         },
         dataSourceId: artifacts.dataSourceId,
         fetchedUrls: outcome.fetchedUrls,
         modelUsageIds: artifacts.modelUsageIds,
-        sourceDocumentId: artifacts.sourceDocumentId,
+        sourceDocumentIds: artifacts.sourceDocumentIds,
       },
     },
     progressPercent: 100,

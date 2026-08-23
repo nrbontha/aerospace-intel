@@ -41,6 +41,7 @@ export const BUILD_TO_PRINT_SHARE_VALUES = [
 ] as const;
 export const PROPRIETARY_EVIDENCE_VALUES = [
   "none",
+  "unknown",
   "claimed",
   "demonstrated",
   "patented",
@@ -327,12 +328,12 @@ export function extractFeatureVector(
         "build_to_print_share",
         BUILD_TO_PRINT_SHARE_VALUES,
       ),
-      // This enum has no 'unknown' member by design: 'none' IS its null
-      // state ("no proprietary-product evidence on file").
+      // 'unknown' is the null state ("no evidence either way"); the explicit
+      // 'none' value means observed evidence OF ABSENCE (pure build-to-print).
       proprietaryProductEvidence: requireEnum(
         rawRecord.proprietary_product_evidence ??
           rawRecord.proprietaryProductEvidence ??
-          "none",
+          "unknown",
         "proprietary_product_evidence",
         PROPRIETARY_EVIDENCE_VALUES,
       ),

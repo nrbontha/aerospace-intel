@@ -535,22 +535,22 @@ export async function recordSourceResearchArtifacts(
 
 interface CompanyResearchCompletedResult {
   readonly status: "completed";
-  readonly sourceDocuments: readonly [
-    {
-      readonly canonicalUrl: string;
-      readonly title: string;
-      readonly mimeType: string;
-      readonly byteLength: number;
-      readonly contentSha256: string;
-      readonly retrievedAt: string;
-      readonly metadata: Record<string, unknown>;
-    },
-  ];
+  readonly sourceDocuments: readonly {
+    readonly canonicalUrl: string;
+    readonly title: string;
+    readonly mimeType: string;
+    readonly byteLength: number;
+    readonly contentSha256: string;
+    readonly retrievedAt: string;
+    readonly metadata: Record<string, unknown>;
+  }[];
   readonly facts: readonly {
     readonly fieldKey: string;
     readonly value: unknown;
     readonly evidenceExcerpt: string;
     readonly confidence: number;
+    /** finalUrl of the document the excerpt came from (homepage when absent). */
+    readonly sourceUrl?: string;
   }[];
   readonly telemetry: {
     readonly promptVersion: string;
@@ -583,6 +583,7 @@ export interface RecordCompanyResearchArtifactsInput {
 export interface RecordedCompanyResearchArtifacts {
   readonly dataSourceId: string;
   readonly sourceDocumentId: string;
+  readonly sourceDocumentIds: readonly string[];
   readonly evidenceIds: readonly string[];
   readonly observationIds: readonly string[];
   readonly proposalIds: readonly string[];
@@ -595,6 +596,9 @@ export async function recordCompanyResearchArtifacts(
 ): Promise<RecordedCompanyResearchArtifacts> {
   const outputSha256 = digest(canonicalJson(input.result));
   const document = input.result.sourceDocuments[0];
+  if (document === undefined) {
+    throw new Error("Unable to persist company research: no source documents");
+  }
   return getDatabase().transaction(async (tx) => {
     const [company] = await tx
       .select({
@@ -637,9 +641,13 @@ export async function recordCompanyResearchArtifacts(
         .where(
           and(
             eq(researchProposals.researchRunId, input.researchRunId),
-            eq(evidence.sourceDocumentId, duplicate.id),
+            sql`${evidence.metadata}->>'researchRunId' = ${input.researchRunId}`,
           ),
         );
+      const duplicateDocumentIds = await tx
+        .selectDistinct({ id: evidence.sourceDocumentId })
+        .from(evidence)
+        .where(sql`${evidence.metadata}->>'researchRunId' = ${input.researchRunId}`);
       const models = await tx
         .select({ id: modelUsage.id })
         .from(modelUsage)
@@ -651,6 +659,9 @@ export async function recordCompanyResearchArtifacts(
       return {
         dataSourceId: duplicate.dataSourceId,
         sourceDocumentId: duplicate.id,
+        sourceDocumentIds: duplicateDocumentIds
+          .map((row) => row.id)
+          .filter((id): id is string => id !== null),
         evidenceIds: rows.map((row) => row.evidenceId),
         observationIds: rows.map((row) => row.observationId),
         proposalIds: rows.map((row) => row.proposalId),
@@ -774,45 +785,71 @@ export async function recordCompanyResearchArtifacts(
       .select({ id: modelUsage.id })
       .from(modelUsage)
       .where(eq(modelUsage.researchRunId, input.researchRunId));
-    const [insertedDocument] = await tx
-      .insert(sourceDocuments)
-      .values({
-        dataSourceId,
-        canonicalUrl: document.canonicalUrl,
-        title: document.title,
-        documentType: "web_page",
-        retrievedAt: new Date(document.retrievedAt),
-        contentSha256: document.contentSha256,
-        mimeType: document.mimeType,
-        byteLength: document.byteLength,
-        metadata: {
-          ...document.metadata,
-          promptVersion: input.result.telemetry.promptVersion,
-          researchRunId: input.researchRunId,
-          sourceOutputSha256: outputSha256,
-        },
-      })
-      .onConflictDoNothing()
-      .returning({ id: sourceDocuments.id });
-    const storedDocument =
-      insertedDocument ??
-      (
+    // Persist EVERY fetched document (homepage + subpages) as its own
+    // source_documents row so per-document evidence attribution is possible.
+    const documentIdsByNormalizedUrl = new Map<string, string>();
+    const storedDocumentIds: string[] = [];
+    let homepageDocumentId: string | null = null;
+    for (const [index, doc] of input.result.sourceDocuments.entries()) {
+      // Dedupe on the content hash FIRST: replayed results (or results whose
+      // whole-result digest drifted, e.g. fresh timestamps) must reuse the
+      // existing row instead of inserting a duplicate.
+      let stored =
+        (
+          await tx
+            .select({ id: sourceDocuments.id })
+            .from(sourceDocuments)
+            .where(eq(sourceDocuments.contentSha256, doc.contentSha256))
+            .limit(1)
+        )[0] ??
+        (
+          await tx
+            .insert(sourceDocuments)
+            .values({
+              dataSourceId,
+              canonicalUrl: doc.canonicalUrl,
+              title: doc.title,
+              documentType: "web_page",
+              retrievedAt: new Date(doc.retrievedAt),
+              contentSha256: doc.contentSha256,
+              mimeType: doc.mimeType,
+              byteLength: doc.byteLength,
+              metadata: {
+                ...doc.metadata,
+                promptVersion: input.result.telemetry.promptVersion,
+                researchRunId: input.researchRunId,
+                sourceOutputSha256: outputSha256,
+                ...(index === 0 ? {} : { homepageCanonicalUrl: document.canonicalUrl }),
+              },
+            })
+            .onConflictDoNothing()
+            .returning({ id: sourceDocuments.id })
+        )[0];
+      stored ??= (
         await tx
           .select({ id: sourceDocuments.id })
           .from(sourceDocuments)
-          .where(eq(sourceDocuments.contentSha256, document.contentSha256))
+          .where(eq(sourceDocuments.contentSha256, doc.contentSha256))
           .limit(1)
       )[0];
-    if (!storedDocument) throw new Error("Unable to persist source document");
+      if (!stored) throw new Error("Unable to persist source document");
 
-    await tx
-      .insert(sourceDocumentLinks)
-      .values({
-        sourceDocumentId: storedDocument.id,
-        companyId: company.id,
-        relationship: "subject",
-      })
-      .onConflictDoNothing();
+      await tx
+        .insert(sourceDocumentLinks)
+        .values({
+          sourceDocumentId: stored.id,
+          companyId: company.id,
+          relationship: "subject",
+        })
+        .onConflictDoNothing();
+
+      documentIdsByNormalizedUrl.set(normalizeComparableHttpUrl(doc.canonicalUrl), stored.id);
+      storedDocumentIds.push(stored.id);
+      if (index === 0) homepageDocumentId = stored.id;
+    }
+    if (homepageDocumentId === null) homepageDocumentId = storedDocumentIds[0] ?? null;
+    if (homepageDocumentId === null) throw new Error("Unable to persist source document");
+    const homepageLocator = document.canonicalUrl;
 
     const existing = await tx
       .select({
@@ -846,13 +883,23 @@ export async function recordCompanyResearchArtifacts(
       if (existingKeys.has(key)) continue;
       existingKeys.add(key);
 
+      // Attribute the excerpt to the document it was verified against; fall
+      // back to the homepage with an explicit locator note when the fact
+      // predates per-document attribution (or its URL no longer resolves).
+      const factDocId =
+        (fact.sourceUrl === undefined
+          ? undefined
+          : documentIdsByNormalizedUrl.get(normalizeComparableHttpUrl(fact.sourceUrl))) ??
+        homepageDocumentId;
+      const fallbackAttribution = fact.sourceUrl === undefined ||
+        !documentIdsByNormalizedUrl.has(normalizeComparableHttpUrl(fact.sourceUrl));
       const [evidenceRow] = await tx
         .insert(evidence)
         .values({
-          sourceDocumentId: storedDocument.id,
+          sourceDocumentId: factDocId,
           extractionStatus: "completed",
           quote: fact.evidenceExcerpt,
-          locator: document.canonicalUrl,
+          locator: fallbackAttribution ? `${homepageLocator} (homepage)` : fact.sourceUrl!,
           extractionMethod: "company_research_model",
           contentSha256: digest(fact.evidenceExcerpt),
           metadata: {
@@ -905,7 +952,8 @@ export async function recordCompanyResearchArtifacts(
       .where(eq(researchToolCalls.researchRunId, input.researchRunId));
     return {
       dataSourceId,
-      sourceDocumentId: storedDocument.id,
+      sourceDocumentId: homepageDocumentId,
+      sourceDocumentIds: storedDocumentIds,
       evidenceIds,
       observationIds,
       proposalIds,

@@ -103,6 +103,21 @@ export function mapBuildToPrintRisk(risk: string): BuildToPrintShare {
 
 export type QualificationStatus = "present" | "claimed" | "absent" | "unknown";
 
+/**
+ * Observed capability/description text → engine proprietary-product evidence.
+ * Keyword hit (patent / proprietary / PMA / parts manufacturer approval)
+ * means the company CLAIMS proprietary products; anything else stays
+ * explicitly unknown. Never returns "none" — that value is reserved for
+ * observed evidence of absence, which canonical text cannot establish here.
+ */
+export function mapProprietaryProductEvidence(
+  signals: readonly string[],
+): "claimed" | "unknown" {
+  const pattern =
+    /\bpatent(?:ed|s|ing)?\b|\bproprietary\b|\bpma\b|parts manufacturer approval/iu;
+  return signals.some((signal) => pattern.test(signal)) ? "claimed" : "unknown";
+}
+
 /** A certification row on file means present; no row is NOT evidence of absence. */
 export function certificationStatus(
   standards: readonly string[],
@@ -117,6 +132,7 @@ export interface CanonicalCompanyState {
     displayName: string;
     legalName: string;
     websiteUrl: string | null;
+    description: string | null;
   };
   domains: { domain: string; isPrimary: boolean; verifiedAt: Date | null }[];
   identifiers: { type: string; value: string }[];
@@ -126,6 +142,12 @@ export interface CanonicalCompanyState {
   certificationStandards: string[];
   platformNames: string[];
   goldenBuildToPrintRisk: string | null;
+  /**
+   * Free-text capability signals observed by research (capability /
+   * description observations plus linked capability names) — scanned for
+   * proprietary-product evidence keywords.
+   */
+  capabilitySignals: readonly string[];
   evidenceCounts: {
     sourceCount: number;
     primarySourceCount: number;
@@ -177,7 +199,12 @@ export function buildFeatureRecordInput(state: CanonicalCompanyState): Record<st
       state.goldenBuildToPrintRisk === null
         ? "unknown"
         : mapBuildToPrintRisk(state.goldenBuildToPrintRisk),
-    proprietary_product_evidence: "none",
+    // 'claimed' only when accepted/observed text actually mentions proprietary
+    // products, patents, or PMA; absence of evidence is 'unknown', NOT 'none'.
+    proprietary_product_evidence: mapProprietaryProductEvidence([
+      ...(state.company.description === null ? [] : [state.company.description]),
+      ...state.capabilitySignals,
+    ]),
     qualifications: {
       as9100: certificationStatus(standards, /as\s*9100/i),
       nadcap: certificationStatus(standards, /nadcap/i),

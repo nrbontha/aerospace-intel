@@ -183,6 +183,11 @@ export function createRefreshResearchHandler(options: {
             fetchUrl: manufacturer?.websiteUrl ?? null,
             knownFacts: [],
           },
+          linkedSources:
+            manufacturer?.linkedSources.map((source) => ({
+              homepageUrl: source.homepageUrl,
+              access: source.access,
+            })) ?? [],
         });
         await recordSubjectResearchArtifacts({
           researchRunId: payload.researchRunId,

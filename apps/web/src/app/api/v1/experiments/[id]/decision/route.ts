@@ -8,6 +8,7 @@ import {
   recordExperimentAudit,
   recordExperimentRun,
 } from "@asi/database";
+import { selectKeepPromotion } from "@/app/api/v1/experiments/_lib/run-scorer";
 import { type NextRequest } from "next/server";
 
 import { jsonError, jsonSuccess, jsonValue } from "@/lib/api";
@@ -22,13 +23,6 @@ const decisionSchema = z.strictObject({
   keep: z.boolean(),
   rationale: z.string().trim().min(1).max(10_000),
 });
-
-interface RunScorerResultEntry {
-  readonly programId: string | null;
-  readonly role: "champion" | "challenger";
-  readonly rank: number | null;
-  readonly name: string;
-}
 
 function handleRouteError(error: unknown): Response {
   if (error instanceof AuthorizationError) {
@@ -81,25 +75,24 @@ export async function POST(
       return jsonError("not_found", "Experiment run not found", 404);
     }
 
-    // Best-ranked challenger in the decided run's result, if any.
+    // Keep promotes ONLY the top-ranked challenger of the run's own evaluated
+    // axis (see selectKeepPromotion); everything else requires its own run.
     const entries = Array.isArray(
       (parent.result as { entries?: unknown }).entries,
     )
-      ? ((parent.result as { entries: RunScorerResultEntry[] }).entries ?? [])
+      ? ((parent.result as { entries: Parameters<typeof selectKeepPromotion>[0] }).entries ?? [])
       : [];
-    const challenger = entries
-      .filter((entry) => entry.role === "challenger" && entry.programId !== null)
-      .sort((a, b) => (a.rank ?? Number.MAX_SAFE_INTEGER) - (b.rank ?? Number.MAX_SAFE_INTEGER))[0];
+    const selection = selectKeepPromotion(entries);
 
     let promotedProgramId: string | null = null;
-    if (parsed.data.keep && challenger !== undefined && challenger.programId !== null) {
+    if (parsed.data.keep && selection.ok) {
       await promoteProgram(
         db,
-        challenger.programId,
+        selection.programId,
         `keep decision on run ${parent.id}: ${parsed.data.rationale}`,
         user.id,
       );
-      promotedProgramId = challenger.programId;
+      promotedProgramId = selection.programId;
     }
 
     const decision = await recordExperimentRun(
@@ -113,6 +106,9 @@ export async function POST(
           decidedRunId: parent.id,
           keep: parsed.data.keep,
           promotedProgramId,
+          ...(parsed.data.keep && !selection.ok
+            ? { promotionSkippedReason: selection.reason }
+            : {}),
         },
         keep: parsed.data.keep,
         decision: parsed.data.rationale,
