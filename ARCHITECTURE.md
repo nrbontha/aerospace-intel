@@ -102,6 +102,22 @@ Only transient 429/5xx/network/timeout failures are retryable. Retries honor `Re
 
 Fetched and model text is untrusted evidence, never instructions. It cannot modify system policy, tool permissions, budgets, or secrets. Research produces observations/proposals, never direct canonical writes.
 
+## Agent runtime
+
+Continuous research agents (`research_agents`/`agent_ticks`, migration `0003_agent_runtime.sql`) run beside the queued campaign workflow above. The LLM proposes; deterministic code verifies and executes.
+
+**Supervisor** (`apps/worker/src/supervisor/supervisor.ts`): one long-lived loop inside the worker process, started at `apps/worker/src/index.ts` unless `AGENT_SUPERVISOR_ENABLED=false`. Constants: poll every 5s, lease 90s, heartbeat every 15s during a tick, tick wall time 60s, max 4 concurrent agents. Due `running` agents are claimed with `FOR UPDATE SKIP LOCKED` plus a stale-lease predicate (`packages/database/src/agents/registry.ts`), so a crashed worker's lease is reclaimed by any live instance without human intervention. Failures back off exponentially (15m × 2^n, capped at 24h) in `packages/database/src/agents/ticks.ts`; graceful stop aborts in-flight ticks and journals them `preempted` without a failure penalty.
+
+**Tick lifecycle**: journal row → heartbeats → registered type handler bounded by wall time → outcome journalled (`executed`/`done`/`stuck`/`budget_exhausted`/`error`/`preempted`) → cadence or backoff sets `next_tick_at` → lease released. Every persisted fact still flows through the existing provenance chain (observations/proposals), never direct canonical writes.
+
+**Planning**: per-agent-type Zod action manifests live in `packages/research/src/campaigns/planner-step.ts` (`agent_plan_v1`, ≤10 actions per batch); invalid plans get one repair retry, then a recorded `stuck` outcome. The v1 handler registry (`apps/worker/src/supervisor/handlers.ts`) is a passthrough no-op for all five types until real executors land.
+
+**Budgets**: the global daily cap (`OPENROUTER_MAX_COST_PER_DAY_USD`, default $1 via `dailyBudgetCapUsd` in `packages/research/src/campaigns/budget.ts`) is checked each poll against the `model_usage` sum since UTC midnight; an unreadable spend read fails safe by parking, never by spending. Each agent is additionally capped by `budget_share_pct` of that cap and/or an absolute `daily_budget_usd` (the lower applies, `agentDailyBudgetUsd` in `apps/worker/src/supervisor/supervisor.ts`); tick `cost_usd` accumulates into `spend_today_usd`. Crossing either parks the agent (`budget_exhausted`, far-future `next_tick_at` just past UTC midnight).
+
+**Registry seeding status**: the six §1.3 default agent rows are NOT seeded automatically yet; agents are created at runtime through the control-plane API below.
+
+**Control plane** (`apps/web/src/app/api/v1/agents/`): authenticated reads — `GET /api/v1/agents` (list + aggregates), `GET /api/v1/agents/overview`, `GET /api/v1/agents/:id`, `GET /api/v1/agents/:id/ticks`; admin mutations with CSRF and `audit_events` rows — `POST /api/v1/agents`, `PATCH /api/v1/agents/:id` (admin), `POST /api/v1/agents/:id/pause|resume` (analyst or admin), `POST /api/v1/agents/:id/kill` (admin, reason required).
+
 ## Authentication and authorization
 
 Every route except `/login`, `/api/v1/auth/login`, and health checks requires authentication. Roles are `admin`, `analyst`, and `viewer`; authorization is enforced server-side at the operation, with CSRF checks on mutations.

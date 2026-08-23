@@ -63,6 +63,8 @@ Reuse without duplication: frontier_items, leads, identity matching, observation
 
 ### 1.2 Supervisor (worker process, new `apps/worker/src/supervisor/`)
 
+> **Status: implemented** — `apps/worker/src/supervisor/supervisor.ts` (lease/tick/heartbeat/takeover, budget gates) + `packages/database/src/agents/{registry,ticks}.ts`; DB integration coverage in `tests/supervisor.db.test.ts` and `tests/agent-budget.db.test.ts`.
+
 Single long-lived loop inside the existing worker process:
 
 ```
@@ -88,6 +90,9 @@ Tick lifecycle per agent:
 
 ### 1.3 Agent types v1 (all defined at launch)
 
+> **Status: NOT implemented** — the five `agent_type` enum values and handler-registry slots exist, but the default registry seed rows and real per-type executors do not yet (`apps/worker/src/supervisor/handlers.ts` registers passthrough no-ops).
+
+
 | Key | Type | Mission | Work source | Outputs |
 | --- | --- | --- | --- | --- |
 | `discover-usaspending` | discover_source | Find new candidate companies from federal award recipients | Frontier expansion (existing strategy) + lead ingest + auto-promote | leads, companies, queued candidates |
@@ -100,6 +105,8 @@ Tick lifecycle per agent:
 Each ships with a default registry row (seeded migration insert), paused=false except where keys are missing (`discover-sam` seeds paused). Creating NEW agent types later = adding a type enum value + executor manifest + registry row; the control plane renders it automatically.
 
 ### 1.4 Control-plane API
+
+> **Status: implemented** — `apps/web/src/app/api/v1/agents/` (list, overview, detail, ticks, pause/resume/kill lifecycle, register, patch), audited and role-gated as specified.
 
 ```
 GET    /api/v1/agents                  list + health/spend/finds aggregates

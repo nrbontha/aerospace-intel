@@ -127,6 +127,31 @@ railway up --service worker --detach -y
 
 or `railway redeploy --service worker` when the current image is already the one you want. With `RESEARCH_SHARED_STORAGE=false`, worker `/health` is 200 and `/ready` is **503** (`queue: not_ready`, `researchHandlers=false`). That is the intended fail-closed state, not a reason to set the flag true.
 
+## Agent supervisor
+
+The worker process also runs the research-agent supervisor (`apps/worker/src/supervisor/supervisor.ts`): it polls due agents every 5s and runs up to 4 concurrent bounded ticks (60s wall time each). Constants: lease 90s, heartbeat every 15s during a tick, failure backoff 15m × 2^n capped at 24h (`apps/worker/src/supervisor/supervisor.ts` defaults).
+
+Enabling/disabling:
+
+- On by default. Set `AGENT_SUPERVISOR_ENABLED=false` in the worker environment to skip starting it (`apps/worker/src/index.ts`); a restart is required for the change to apply.
+- Budgets gate everything: global daily cap `OPENROUTER_MAX_COST_PER_DAY_USD` (default $1) over `model_usage` spend since UTC midnight, plus each agent's `budget_share_pct` / `daily_budget_usd` floor. An agent that crosses its cap is parked with outcome `budget_exhausted` until just past UTC midnight; it resumes automatically — no operator action needed. If daily spend cannot be read, the supervisor fails safe and parks agents rather than spending blind.
+
+Pause/kill (audited control plane, `apps/web/src/app/api/v1/agents/`):
+
+```bash
+# pause/resume: analyst or admin, CSRF required
+curl -X POST "$APP_URL/api/v1/agents/$AGENT_ID/pause"   # or /resume
+
+# kill: admin only; aborts the current tick, marks paused, reason required
+curl -X POST "$APP_URL/api/v1/agents/$AGENT_ID/kill"
+```
+
+A paused agent is never claimed until resumed. Kill is for policy reasons, not recovery.
+
+Stale leases are self-healing: if the worker dies mid-tick, the 90s lease expires and any live supervisor instance reclaims the agent on its next poll. Human intervention is never required to unstick an agent; do not hand-edit `leased_by`/`lease_expires_at`.
+
+Observe state as an authenticated user via `GET /api/v1/agents/overview` (running count, $ today vs cap, last finds) or `GET /api/v1/agents/:id/ticks` for the per-agent tick journal.
+
 ## Limited availability rollout
 
 Production is the Railway project above. It is **limited availability**, not generally available. Do not advertise replay, a shared object store, or planned integrations.
