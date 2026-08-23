@@ -32,7 +32,8 @@
   "dependencies": {
     "@asi/contracts": "*",
     "drizzle-orm": "0.45.2",
-    "pg": "8.16.3"
+    "pg": "8.16.3",
+    "xlsx": "0.18.5"
   },
   "devDependencies": {
     "@types/node": "22.20.1",

@@ -1,9 +1,14 @@
 import {
+  buildToPrintRiskValues,
   companyStatusValues,
   contactVerificationStatusValues,
   evidenceExtractionStatusValues,
+  goldenExampleTypeValues,
   identifierTypeValues,
   importStatusValues,
+  labelScaleValues,
+  leadStatusValues,
+  matchDecisionValues,
   observationConflictStatusValues,
   observationReviewStatusValues,
   ownershipTypeValues,
@@ -12,7 +17,9 @@ import {
   recordStatusValues,
   researchRunStatusValues,
   researchTargetTypeValues,
+  reviewStatusValues,
   roleValues,
+  snapshotMemberMatchStatusValues,
   sourceAccessValues,
   sourceIngestionValues,
 } from "@asi/contracts";
@@ -21,6 +28,7 @@ import {
   type AnyPgColumn,
   bigint,
   boolean,
+  char,
   check,
   date,
   index,
@@ -123,6 +131,22 @@ export const importRowStatus = pgEnum("import_row_status", [
   "imported",
   "rejected",
 ]);
+export const snapshotMemberMatchStatus = pgEnum(
+  "snapshot_member_match_status",
+  snapshotMemberMatchStatusValues,
+);
+export const goldenExampleType = pgEnum(
+  "golden_example_type",
+  goldenExampleTypeValues,
+);
+export const labelScale = pgEnum("label_scale", labelScaleValues);
+export const buildToPrintRisk = pgEnum(
+  "build_to_print_risk",
+  buildToPrintRiskValues,
+);
+export const leadStatus = pgEnum("lead_status", leadStatusValues);
+export const matchDecision = pgEnum("match_decision", matchDecisionValues);
+export const reviewStatus = pgEnum("review_status", reviewStatusValues);
 
 export const users = pgTable(
   "users",
@@ -1417,6 +1441,216 @@ export const scoringWeights = pgTable(
   ],
 );
 
+export const knownUniverseSnapshots = pgTable(
+  "known_universe_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    key: text("key").notNull(),
+    name: text("name").notNull(),
+    sourceType: text("source_type").notNull(),
+    importFileName: text("import_file_name"),
+    contentSha256: char("content_sha256", { length: 64 }),
+    effectiveDate: date("effective_date"),
+    notes: text("notes"),
+    rowCount: integer("row_count").notNull().default(0),
+    active: boolean("active").notNull().default(true),
+    createdBy: uuid("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: ct(),
+  },
+  (t) => [
+    uniqueIndex("known_universe_snapshots_key_uidx").on(t.key),
+    check(
+      "known_universe_snapshots_integrity_chk",
+      sql`${t.rowCount} >= 0 AND ${t.sourceType} IN ('golden_set_workbook','grata_enrichment','preliminary_pipeline','manual','external_export')`,
+    ),
+  ],
+);
+export const knownUniverseMembers = pgTable(
+  "known_universe_members",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    snapshotId: uuid("snapshot_id")
+      .notNull()
+      .references(() => knownUniverseSnapshots.id, { onDelete: "cascade" }),
+    companyId: uuid("company_id").references(() => companies.id, {
+      onDelete: "set null",
+    }),
+    matchedCompanyId: uuid("matched_company_id").references(
+      () => companies.id,
+      { onDelete: "set null" },
+    ),
+    rawName: text("raw_name").notNull(),
+    rawDomain: text("raw_domain"),
+    normalizedDomain: text("normalized_domain"),
+    normalizedName: text("normalized_name"),
+    matchStatus: snapshotMemberMatchStatus("match_status")
+      .notNull()
+      .default("unresolved"),
+    matchConfidence: numeric("match_confidence", {
+      precision: 4,
+      scale: 3,
+    }),
+    rawPayload: jsonb("raw_payload")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    sourceRow: integer("source_row"),
+    createdAt: ct(),
+  },
+  (t) => [
+    uniqueIndex("known_universe_members_identity_uidx")
+      .on(t.snapshotId, sql`lower(${t.normalizedDomain})`, sql`lower(${t.normalizedName})`)
+      .where(sql`${t.normalizedDomain} IS NOT NULL`),
+    uniqueIndex("known_universe_members_name_uidx")
+      .on(t.snapshotId, sql`lower(${t.normalizedName})`)
+      .where(
+        sql`${t.normalizedDomain} IS NULL AND ${t.normalizedName} IS NOT NULL`,
+      ),
+    index("known_universe_members_snapshot_idx").on(t.snapshotId),
+    index("known_universe_members_company_idx").on(t.companyId),
+    index("known_universe_members_matched_company_idx").on(t.matchedCompanyId),
+    check(
+      "known_universe_members_confidence_chk",
+      sql`${t.matchConfidence} IS NULL OR ${t.matchConfidence} BETWEEN 0 AND 1`,
+    ),
+  ],
+);
+export const goldenExamples = pgTable(
+  "golden_examples",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id").references(() => companies.id, {
+      onDelete: "set null",
+    }),
+    snapshotId: uuid("snapshot_id").references(() => knownUniverseSnapshots.id, {
+      onDelete: "set null",
+    }),
+    name: text("name").notNull(),
+    domain: text("domain"),
+    descriptionRaw: text("description_raw"),
+    grataPayload: jsonb("grata_payload")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    workbookRow: integer("workbook_row"),
+    proposedLabels: jsonb("proposed_labels")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    archetypeFit: labelScale("archetype_fit"),
+    currentActionability: labelScale("current_actionability"),
+    businessModelFit: labelScale("business_model_fit"),
+    ownershipFit: labelScale("ownership_fit"),
+    goldenExampleType: goldenExampleType("golden_example_type"),
+    buildToPrintRisk: buildToPrintRisk("build_to_print_risk"),
+    reviewNotes: text("review_notes"),
+    reviewStatus: reviewStatus("review_status").notNull().default("unclassified"),
+    reviewedBy: uuid("reviewed_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    reviewedAt: timestamp("reviewed_at", { withTimezone: true }),
+    createdAt: ct(),
+  },
+  (t) => [
+    uniqueIndex("golden_examples_name_domain_uidx").on(
+      sql`lower(${t.name})`,
+      sql`coalesce(lower(${t.domain}), '')`,
+    ),
+    index("golden_examples_company_idx").on(t.companyId),
+    index("golden_examples_review_status_idx").on(t.reviewStatus),
+  ],
+);
+export const leads = pgTable(
+  "leads",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    researchRunId: uuid("research_run_id").references(() => researchRuns.id, {
+      onDelete: "set null",
+    }),
+    // Plain column by design: campaigns table arrives in a later migration.
+    campaignId: uuid("campaign_id"),
+    sourceDocumentId: uuid("source_document_id").references(
+      () => sourceDocuments.id,
+      { onDelete: "set null" },
+    ),
+    rawName: text("raw_name").notNull(),
+    context: jsonb("context")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    url: text("url"),
+    possibleDomain: text("possible_domain"),
+    possibleLocation: text("possible_location"),
+    possibleIdentifiers: jsonb("possible_identifiers")
+      .$type<unknown[]>()
+      .notNull()
+      .default([]),
+    possibleProducts: jsonb("possible_products")
+      .$type<unknown[]>()
+      .notNull()
+      .default([]),
+    extractionMethod: text("extraction_method"),
+    extractionConfidence: numeric("extraction_confidence", {
+      precision: 4,
+      scale: 3,
+    }),
+    status: leadStatus("status").notNull().default("new"),
+    resolvedCompanyId: uuid("resolved_company_id").references(
+      () => companies.id,
+      { onDelete: "set null" },
+    ),
+    createdAt: ct(),
+    updatedAt: ut(),
+  },
+  (t) => [
+    index("leads_status_idx").on(t.status, t.createdAt),
+    index("leads_resolved_company_idx").on(t.resolvedCompanyId),
+    index("leads_source_document_idx").on(t.sourceDocumentId),
+    check(
+      "leads_confidence_chk",
+      sql`${t.extractionConfidence} IS NULL OR ${t.extractionConfidence} BETWEEN 0 AND 1`,
+    ),
+  ],
+);
+export const identityMatchCandidates = pgTable(
+  "identity_match_candidates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    leadId: uuid("lead_id")
+      .notNull()
+      .references(() => leads.id, { onDelete: "cascade" }),
+    companyId: uuid("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "cascade" }),
+    signalType: text("signal_type").notNull(),
+    features: jsonb("features")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    confidence: numeric("confidence", { precision: 4, scale: 3 }).notNull(),
+    explanation: text("explanation"),
+    decision: matchDecision("decision").notNull().default("pending"),
+    decidedBy: uuid("decided_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    decidedAt: timestamp("decided_at", { withTimezone: true }),
+    createdAt: ct(),
+  },
+  (t) => [
+    uniqueIndex("identity_match_candidates_lead_company_uidx").on(
+      t.leadId,
+      t.companyId,
+    ),
+    index("identity_match_candidates_company_idx").on(t.companyId),
+    check(
+      "identity_match_candidates_confidence_chk",
+      sql`${t.confidence} BETWEEN 0 AND 1`,
+    ),
+  ],
+);
+
 export type SelectRow<T extends { $inferSelect: unknown }> = T["$inferSelect"];
 export type InsertRow<T extends { $inferInsert: unknown }> = T["$inferInsert"];
 export type User = SelectRow<typeof users>;
@@ -1447,3 +1681,16 @@ export type ProposalReview = SelectRow<typeof proposalReviews>;
 export type NewProposalReview = InsertRow<typeof proposalReviews>;
 export type AuditEvent = SelectRow<typeof auditEvents>;
 export type NewAuditEvent = InsertRow<typeof auditEvents>;
+
+export type KnownUniverseSnapshot = SelectRow<typeof knownUniverseSnapshots>;
+export type NewKnownUniverseSnapshot = InsertRow<typeof knownUniverseSnapshots>;
+export type KnownUniverseMember = SelectRow<typeof knownUniverseMembers>;
+export type NewKnownUniverseMember = InsertRow<typeof knownUniverseMembers>;
+export type GoldenExample = SelectRow<typeof goldenExamples>;
+export type NewGoldenExample = InsertRow<typeof goldenExamples>;
+export type Lead = SelectRow<typeof leads>;
+export type NewLead = InsertRow<typeof leads>;
+export type IdentityMatchCandidate = SelectRow<typeof identityMatchCandidates>;
+export type NewIdentityMatchCandidate = InsertRow<
+  typeof identityMatchCandidates
+>;

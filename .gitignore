@@ -40,3 +40,6 @@ backups/
 
 # Local Railway link (project IDs live in the dashboard, not the repo)
 .railway/
+
+# Real workbooks (never commit; source lives in ~/Downloads)
+data/
