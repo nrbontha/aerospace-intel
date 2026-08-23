@@ -1,7 +1,7 @@
 import { pathToFileURL } from "node:url";
 
 import { allowsResearchDocumentWrites, getServerEnv } from "@asi/config";
-import { closeDatabase } from "@asi/database/client";
+import { closeDatabase, getDatabase } from "@asi/database/client";
 import { OpenRouterClient } from "@asi/research";
 
 import { startHealthServer, type HealthServer } from "./health.js";
@@ -27,6 +27,7 @@ import {
   startSupervisor,
   type SupervisorRuntime,
 } from "./supervisor/index.js";
+import { ensureDefaultAgents } from "./supervisor/seed.js";
 
 const SENSITIVE_KEY_PATTERN =
   /authorization|cookie|credential|database.?url|password|secret|token|api.?key/i;
@@ -259,6 +260,8 @@ export async function startWorker(): Promise<WorkerRuntime> {
     });
     await queue.start();
     if (process.env.AGENT_SUPERVISOR_ENABLED !== "false") {
+      const seeded = await ensureDefaultAgents(getDatabase());
+      if (seeded > 0) log("info", "supervisor.registry_seeded", { count: seeded });
       supervisor = startSupervisor({
         handlers: createV1TickHandlerRegistry(),
         logger: log,
