@@ -7,3 +7,4 @@ export * from "./source-workflow.js";
 export * from "./tools.js";
 export * from "./subject-workflow.js";
 export * from "./discover-workflow.js";
+export * from "./scoring-axial/index.js";
