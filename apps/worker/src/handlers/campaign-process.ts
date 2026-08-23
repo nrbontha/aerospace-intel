@@ -4,9 +4,11 @@ import type { CampaignStatus } from "@asi/contracts";
 import {
   CompositeDiscoveryStrategy,
   PassthroughStrategy,
+  UsaspendingDiscoveryStrategy,
   processDueItems,
   type CampaignProcessJobPayload,
   type DiscoveryStrategy,
+  type LeadsIngestJobPayload,
 } from "@asi/research";
 import { getDatabase } from "@asi/database/client";
 import { frontierItems, researchCampaigns } from "@asi/database";
@@ -124,7 +126,7 @@ export function createCampaignProcessHandler(
   options: CampaignProcessHandlerOptions,
 ): ResearchJobHandler<"campaign-process.v1"> {
   const strategies =
-    options.strategies ?? [new PassthroughStrategy()];
+    options.strategies ?? [new PassthroughStrategy(), new UsaspendingDiscoveryStrategy()];
   const strategy = new CompositeDiscoveryStrategy(strategies);
 
   return async function handleCampaignProcess(
@@ -157,6 +159,27 @@ export function createCampaignProcessHandler(
     });
 
     const currentStatus = await loadCampaignStatus(payload.campaignId);
+
+    // Company-type frontier items discovered this slice flow into lead
+    // ingestion; singletonKey keeps one pending ingest per campaign.
+    if (slice.childrenInserted > 0) {
+      const ingestUrl =
+        options.databaseUrl ?? process.env["DATABASE_URL"] ?? "";
+      if (ingestUrl.length === 0) {
+        options.logger("error", "campaign.leads_ingest_no_database_url");
+      } else {
+        const publisher = await getCampaignPublisher(ingestUrl);
+        await publisher.send(
+          options.queueName,
+          { name: "leads.ingest.v1", campaignId: payload.campaignId } satisfies LeadsIngestJobPayload,
+          {
+            singletonKey: `leads-ingest-${payload.campaignId}`,
+            retryLimit: 0,
+          },
+        );
+      }
+    }
+
     if (currentStatus !== "running") return;
     if (!(await campaignHasWorkDue(payload.campaignId))) return;
 

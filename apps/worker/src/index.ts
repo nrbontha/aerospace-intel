@@ -9,6 +9,7 @@ import {
   createCampaignProcessHandler,
   createCompanyResearchHandler,
   createDiscoverResearchHandler,
+  createLeadsIngestHandler,
   createPartResearchHandler,
   createPlatformResearchHandler,
   createRefreshResearchHandler,
@@ -201,6 +202,7 @@ export async function startWorker(): Promise<WorkerRuntime> {
     },
   } as const;
   const handlers = Object.freeze({
+    "leads.ingest.v1": createLeadsIngestHandler({ logger: log }),
     "campaign-process.v1": createCampaignProcessHandler({
       queueName: env.RESEARCH_QUEUE_NAME,
       logger: log,

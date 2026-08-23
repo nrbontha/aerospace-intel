@@ -14,4 +14,5 @@ export * from "./search.js";
 export * from "./import-parsers/index.js";
 export * from "./snapshots/index.js";
 export * from "./candidates/index.js";
+export * from "./leads/index.js";
 export * from "./golden/index.js";
