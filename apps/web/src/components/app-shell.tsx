@@ -35,6 +35,7 @@ const navigation: readonly NavigationItem[] = [
   { href: "/data-sources", label: "Data Sources" },
   { href: "/golden-set", label: "Golden Set" },
   { href: "/known-universe", label: "Known Universe" },
+  { href: "/campaigns", label: "Campaigns" },
   { href: "/platforms", label: "Platforms" },
   { href: "/parts", label: "Parts" },
   { href: "/subsystems", label: "Subsystems" },
@@ -44,6 +45,7 @@ const navigation: readonly NavigationItem[] = [
   { href: "/certifications", label: "Certifications" },
   { href: "/research-queue", label: "Research Queue" },
   { href: "/research-runs", label: "Research Runs" },
+  { href: "/experiments", label: "Experiments" },
   { href: "/imports", label: "Imports" },
   { href: "/admin", label: "Admin", adminOnly: true },
 ];
