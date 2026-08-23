@@ -1,8 +1,14 @@
 import {
   buildToPrintRiskValues,
+  campaignStatusValues,
+  candidateStatusValues,
   companyStatusValues,
   contactVerificationStatusValues,
   evidenceExtractionStatusValues,
+  experimentKindValues,
+  feedbackChannelValues,
+  frontierItemStatusValues,
+  frontierItemTypeValues,
   goldenExampleTypeValues,
   identifierTypeValues,
   importStatusValues,
@@ -10,15 +16,20 @@ import {
   leadStatusValues,
   matchDecisionValues,
   observationConflictStatusValues,
+  noveltyStatusValues,
   observationReviewStatusValues,
   ownershipTypeValues,
+  programAxisValues,
+  programStatusValues,
   proposalStatusValues,
   qualificationScarcityValues,
   recordStatusValues,
+  researchQuestionStatusValues,
   researchRunStatusValues,
   researchTargetTypeValues,
   reviewStatusValues,
   roleValues,
+  scoreAxisValues,
   snapshotMemberMatchStatusValues,
   sourceAccessValues,
   sourceIngestionValues,
@@ -146,6 +157,23 @@ export const buildToPrintRisk = pgEnum(
 );
 export const leadStatus = pgEnum("lead_status", leadStatusValues);
 export const matchDecision = pgEnum("match_decision", matchDecisionValues);
+export const candidateStatus = pgEnum("candidate_status", candidateStatusValues);
+export const noveltyStatus = pgEnum("novelty_status", noveltyStatusValues);
+export const scoreAxis = pgEnum("score_axis", scoreAxisValues);
+export const programAxis = pgEnum("program_axis", programAxisValues);
+export const programStatus = pgEnum("program_status", programStatusValues);
+export const experimentKind = pgEnum("experiment_kind", experimentKindValues);
+export const feedbackChannel = pgEnum("feedback_channel", feedbackChannelValues);
+export const researchQuestionStatus = pgEnum(
+  "research_question_status",
+  researchQuestionStatusValues,
+);
+export const campaignStatus = pgEnum("campaign_status", campaignStatusValues);
+export const frontierItemType = pgEnum("frontier_item_type", frontierItemTypeValues);
+export const frontierItemStatus = pgEnum(
+  "frontier_item_status",
+  frontierItemStatusValues,
+);
 export const reviewStatus = pgEnum("review_status", reviewStatusValues);
 
 export const users = pgTable(
@@ -1651,6 +1679,370 @@ export const identityMatchCandidates = pgTable(
   ],
 );
 
+// ---------------------------------------------------------------------------
+// Candidate discovery (migration 0002) — additive section
+// ---------------------------------------------------------------------------
+
+export const scoringPrograms = pgTable(
+  "scoring_programs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    version: integer("version").notNull(),
+    axis: programAxis("axis").notNull(),
+    program: jsonb("program")
+      .$type<Record<string, unknown>>()
+      .notNull(),
+    status: programStatus("status").notNull().default("challenger"),
+    complexity: numeric("complexity", { precision: 5, scale: 3 }).default("0"),
+    createdBy: uuid("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: ct(),
+  },
+  (t) => [
+    uniqueIndex("scoring_programs_name_version_uidx").on(t.name, t.version),
+    check(
+      "scoring_programs_complexity_chk",
+      sql`${t.complexity} IS NULL OR ${t.complexity} >= 0`,
+    ),
+  ],
+);
+
+export const candidates = pgTable(
+  "candidates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "cascade" }),
+    status: candidateStatus("status").notNull().default("queued_research"),
+    noveltyStatus: noveltyStatus("novelty_status")
+      .notNull()
+      .default("unable_to_assess"),
+    noveltySnapshotIds: uuid("novelty_snapshot_ids")
+      .array()
+      .notNull()
+      .default(sql`'{}'::uuid[]`),
+    rationale: jsonb("rationale")
+      .$type<{
+        whyInteresting: string[];
+        risks: string[];
+        unknowns: string[];
+      }>()
+      .notNull()
+      .default({ whyInteresting: [], risks: [], unknowns: [] }),
+    // Denormalized latest per-axis value; history lives in candidate_scores.
+    currentScores: jsonb("current_scores")
+      .$type<Partial<Record<string, number | null>>>()
+      .notNull()
+      .default({}),
+    researchPriority: numeric("research_priority", {
+      precision: 6,
+      scale: 2,
+    }),
+    partnerReviewPriority: numeric("partner_review_priority", {
+      precision: 6,
+      scale: 2,
+    }),
+    createdAt: ct(),
+    updatedAt: ut(),
+  },
+  (t) => [
+    uniqueIndex("candidates_company_id_uidx").on(t.companyId),
+    index("candidates_status_idx").on(t.status),
+    index("candidates_novelty_status_idx").on(t.noveltyStatus),
+    check(
+      "candidates_research_priority_chk",
+      sql`${t.researchPriority} IS NULL OR ${t.researchPriority} BETWEEN 0 AND 100`,
+    ),
+    check(
+      "candidates_partner_review_priority_chk",
+      sql`${t.partnerReviewPriority} IS NULL OR ${t.partnerReviewPriority} BETWEEN 0 AND 100`,
+    ),
+  ],
+);
+
+/** Append-only: enforced by the deny_candidate_scores_mutation trigger. */
+export const candidateScores = pgTable(
+  "candidate_scores",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    candidateId: uuid("candidate_id")
+      .notNull()
+      .references(() => candidates.id, { onDelete: "cascade" }),
+    axis: scoreAxis("axis").notNull(),
+    // null = un-scoreable (e.g. missing ownership evidence)
+    value: numeric("value", { precision: 5, scale: 2 }),
+    scoringProgramId: uuid("scoring_program_id").references(
+      () => scoringPrograms.id,
+      { onDelete: "set null" },
+    ),
+    featureSchemaVersion: text("feature_schema_version").notNull().default("v1"),
+    details: jsonb("details")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    computedAt: timestamp("computed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("candidate_scores_candidate_idx").on(t.candidateId, t.computedAt),
+    index("candidate_scores_program_idx").on(t.scoringProgramId),
+    check(
+      "candidate_scores_value_chk",
+      sql`${t.value} IS NULL OR ${t.value} BETWEEN -1 AND 101`,
+    ),
+  ],
+);
+
+export const featureSnapshots = pgTable(
+  "feature_snapshots",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyId: uuid("company_id")
+      .notNull()
+      .references(() => companies.id, { onDelete: "cascade" }),
+    schemaVersion: text("schema_version").notNull().default("v1"),
+    features: jsonb("features")
+      .$type<Record<string, unknown>>()
+      .notNull(),
+    contentSha256: char("content_sha256", { length: 64 }).notNull(),
+    thesisVersion: text("thesis_version").notNull().default("thesis-v0"),
+    createdAt: ct(),
+  },
+  (t) => [
+    uniqueIndex("feature_snapshots_identity_uidx").on(
+      t.companyId,
+      t.schemaVersion,
+      t.contentSha256,
+    ),
+    index("feature_snapshots_company_idx").on(t.companyId),
+  ],
+);
+
+/** Append-only journal, enforced by the deny_experiment_runs_mutation trigger. */
+export const experimentRuns = pgTable(
+  "experiment_runs",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    kind: experimentKind("kind").notNull(),
+    label: text("label").notNull(),
+    primaryMetricName: text("primary_metric_name"),
+    primaryMetricValue: numeric("primary_metric_value", {
+      precision: 8,
+      scale: 4,
+    }),
+    result: jsonb("result")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    keep: boolean("keep"),
+    decision: text("decision"),
+    lineageParentId: uuid("lineage_parent_id").references(
+      (): AnyPgColumn => experimentRuns.id,
+      { onDelete: "set null" },
+    ),
+    // Plain column by design: campaign linkage is intentionally unenforced.
+    campaignId: uuid("campaign_id"),
+    createdBy: uuid("created_by").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: ct(),
+  },
+  (t) => [
+    index("experiment_runs_kind_created_idx").on(t.kind, t.createdAt),
+    index("experiment_runs_campaign_idx").on(t.campaignId),
+    index("experiment_runs_lineage_parent_idx").on(t.lineageParentId),
+  ],
+);
+
+export const feedback = pgTable(
+  "feedback",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    channel: feedbackChannel("channel").notNull(),
+    companyId: uuid("company_id").references(() => companies.id, {
+      onDelete: "set null",
+    }),
+    candidateId: uuid("candidate_id").references(() => candidates.id, {
+      onDelete: "set null",
+    }),
+    leadId: uuid("lead_id").references(() => leads.id, {
+      onDelete: "set null",
+    }),
+    action: text("action").notNull(),
+    reason: text("reason"),
+    payload: jsonb("payload")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    notes: text("notes"),
+    actor: uuid("actor")
+      .notNull()
+      .references(() => users.id),
+    createdAt: ct(),
+  },
+  (t) => [
+    index("feedback_channel_created_idx").on(t.channel, t.createdAt),
+    index("feedback_candidate_idx").on(t.candidateId),
+    index("feedback_company_idx").on(t.companyId),
+    index("feedback_lead_idx").on(t.leadId),
+    check("feedback_action_nonempty_chk", sql`btrim(${t.action}) <> ''`),
+    check(
+      "feedback_investment_action_chk",
+      sql`${t.channel} <> 'investment' OR ${t.action} IN ('strong_fit','possible_fit','shortlist','hold','needs_more_research','reject','historical_ideal_unactionable')`,
+    ),
+    check(
+      "feedback_identity_action_chk",
+      sql`${t.channel} <> 'identity' OR ${t.action} IN ('same_company','different_company','duplicate','alias','subsidiary','parent','acquired_into','already_in_pipeline','already_known_outside_pipeline','incorrect_match','correct_match')`,
+    ),
+    check(
+      "feedback_entity_chk",
+      sql`${t.companyId} IS NOT NULL OR ${t.candidateId} IS NOT NULL OR ${t.leadId} IS NOT NULL`,
+    ),
+  ],
+);
+
+export const researchQuestions = pgTable(
+  "research_questions",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    candidateId: uuid("candidate_id").references(() => candidates.id, {
+      onDelete: "set null",
+    }),
+    companyId: uuid("company_id").references(() => companies.id, {
+      onDelete: "set null",
+    }),
+    question: text("question").notNull(),
+    status: researchQuestionStatus("status").notNull().default("open"),
+    answer: jsonb("answer").$type<Record<string, unknown>>(),
+    priority: numeric("priority", { precision: 5, scale: 2 }),
+    createdAt: ct(),
+    closedAt: timestamp("closed_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("research_questions_candidate_idx").on(t.candidateId),
+    index("research_questions_company_idx").on(t.companyId),
+    index("research_questions_status_idx").on(t.status),
+    check("research_questions_question_chk", sql`btrim(${t.question}) <> ''`),
+    check(
+      "research_questions_priority_chk",
+      sql`${t.priority} IS NULL OR ${t.priority} BETWEEN 0 AND 100`,
+    ),
+    check(
+      "research_questions_entity_chk",
+      sql`${t.candidateId} IS NOT NULL OR ${t.companyId} IS NOT NULL`,
+    ),
+  ],
+);
+
+export const researchCampaigns = pgTable(
+  "research_campaigns",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    name: text("name").notNull(),
+    objective: text("objective"),
+    thesisVersion: text("thesis_version").notNull().default("thesis-v0"),
+    policyVersion: text("policy_version").notNull().default("policy-v0"),
+    seeds: jsonb("seeds")
+      .$type<{
+        sources?: string[];
+        platforms?: string[];
+        capabilities?: string[];
+        geography?: string[];
+      }>()
+      .notNull()
+      .default({}),
+    excludedSources: jsonb("excluded_sources")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
+    budgetUsd: numeric("budget_usd", { precision: 10, scale: 2 }),
+    spendUsd: numeric("spend_usd", { precision: 10, scale: 2 })
+      .notNull()
+      .default("0"),
+    concurrency: integer("concurrency").notNull().default(2),
+    maxDepth: integer("max_depth").notNull().default(2),
+    status: campaignStatus("status").notNull().default("draft"),
+    creator: uuid("creator").references(() => users.id, {
+      onDelete: "set null",
+    }),
+    createdAt: ct(),
+    startedAt: timestamp("started_at", { withTimezone: true }),
+    pausedAt: timestamp("paused_at", { withTimezone: true }),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    metrics: jsonb("metrics")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+  },
+  (t) => [
+    uniqueIndex("research_campaigns_name_uidx").on(t.name),
+    check("research_campaigns_spend_chk", sql`${t.spendUsd} >= 0`),
+    check(
+      "research_campaigns_concurrency_chk",
+      sql`${t.concurrency} BETWEEN 1 AND 16`,
+    ),
+    check("research_campaigns_max_depth_chk", sql`${t.maxDepth} >= 0`),
+  ],
+);
+
+export const frontierItems = pgTable(
+  "frontier_items",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    campaignId: uuid("campaign_id")
+      .notNull()
+      .references(() => researchCampaigns.id, { onDelete: "cascade" }),
+    itemType: frontierItemType("item_type").notNull(),
+    normalizedValue: text("normalized_value").notNull(),
+    parentItemId: uuid("parent_item_id").references(
+      (): AnyPgColumn => frontierItems.id,
+      { onDelete: "set null" },
+    ),
+    discoveryPath: text("discovery_path"),
+    priority: numeric("priority", { precision: 6, scale: 2 })
+      .notNull()
+      .default("0"),
+    estimatedValue: numeric("estimated_value", { precision: 6, scale: 2 }),
+    estimatedCostUsd: numeric("estimated_cost_usd", { precision: 8, scale: 4 })
+      .notNull()
+      .default("0"),
+    depth: integer("depth").notNull().default(0),
+    status: frontierItemStatus("status").notNull().default("pending"),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    lastAttemptAt: timestamp("last_attempt_at", { withTimezone: true }),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+    idempotencyKey: text("idempotency_key"),
+    normalizedUrl: text("normalized_url"),
+    contentSha256: char("content_sha256", { length: 64 }),
+    failureReason: text("failure_reason"),
+    payload: jsonb("payload")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    createdAt: ct(),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+  },
+  (t) => [
+    uniqueIndex("frontier_items_idempotency_key_uidx").on(t.idempotencyKey),
+    index("frontier_items_campaign_status_idx").on(t.campaignId, t.status),
+    index("frontier_items_status_next_attempt_idx").on(
+      t.status,
+      t.nextAttemptAt,
+    ),
+    index("frontier_items_parent_idx").on(t.parentItemId),
+    check("frontier_items_depth_chk", sql`${t.depth} >= 0`),
+    check("frontier_items_attempt_count_chk", sql`${t.attemptCount} >= 0`),
+    check(
+      "frontier_items_estimated_cost_chk",
+      sql`${t.estimatedCostUsd} >= 0`,
+    ),
+  ],
+);
+
 export type SelectRow<T extends { $inferSelect: unknown }> = T["$inferSelect"];
 export type InsertRow<T extends { $inferInsert: unknown }> = T["$inferInsert"];
 export type User = SelectRow<typeof users>;
@@ -1694,3 +2086,21 @@ export type IdentityMatchCandidate = SelectRow<typeof identityMatchCandidates>;
 export type NewIdentityMatchCandidate = InsertRow<
   typeof identityMatchCandidates
 >;
+export type ScoringProgram = SelectRow<typeof scoringPrograms>;
+export type NewScoringProgram = InsertRow<typeof scoringPrograms>;
+export type Candidate = SelectRow<typeof candidates>;
+export type NewCandidate = InsertRow<typeof candidates>;
+export type CandidateScore = SelectRow<typeof candidateScores>;
+export type NewCandidateScore = InsertRow<typeof candidateScores>;
+export type FeatureSnapshot = SelectRow<typeof featureSnapshots>;
+export type NewFeatureSnapshot = InsertRow<typeof featureSnapshots>;
+export type ExperimentRun = SelectRow<typeof experimentRuns>;
+export type NewExperimentRun = InsertRow<typeof experimentRuns>;
+export type Feedback = SelectRow<typeof feedback>;
+export type NewFeedback = InsertRow<typeof feedback>;
+export type ResearchQuestion = SelectRow<typeof researchQuestions>;
+export type NewResearchQuestion = InsertRow<typeof researchQuestions>;
+export type ResearchCampaign = SelectRow<typeof researchCampaigns>;
+export type NewResearchCampaign = InsertRow<typeof researchCampaigns>;
+export type FrontierItem = SelectRow<typeof frontierItems>;
+export type NewFrontierItem = InsertRow<typeof frontierItems>;
