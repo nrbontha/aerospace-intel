@@ -1,0 +1,83 @@
+{
+  "kind": "blind_discovery",
+  "generatedAt": "2026-08-23T12:05:06.256Z",
+  "campaignId": "9e07da9f-7972-4899-bdd1-e809e7aa8eb7",
+  "campaignName": "bench-blind-2026-08-23T12-05-04",
+  "seeds": {
+    "sources": [
+      "usaspending"
+    ],
+    "geography": [
+      "US"
+    ],
+    "platforms": [
+      "fixed-wing aircraft",
+      "rotorcraft",
+      "unmanned aerial systems",
+      "spacecraft hardware"
+    ],
+    "capabilities": [
+      "precision CNC machining",
+      "sheet metal fabrication",
+      "cable and wire harness assembly",
+      "surface treatment and finishing",
+      "fastener manufacturing",
+      "casting and forging"
+    ]
+  },
+  "identityLeaks": [],
+  "iterations": [
+    {
+      "iteration": 1,
+      "claimed": 50,
+      "completed": 50,
+      "failed": 0,
+      "childrenInserted": 38,
+      "stopReason": "frontier_exhausted"
+    }
+  ],
+  "frontierByTypeAndStatus": {
+    "platform/done": 4,
+    "qualification/done": 6,
+    "source/done": 1,
+    "query/done": 2,
+    "company/done": 37
+  },
+  "ingestSummary": {
+    "created": 37,
+    "resolvedExact": 0,
+    "probableReview": 2,
+    "unresolved": 35,
+    "duplicateSkipped": 0
+  },
+  "verdict": {
+    "producedLeads": 37,
+    "knownRediscoveries": 2,
+    "rediscoveredCompanies": 2,
+    "rediscoveredMembers": 0,
+    "novelLeads": 35,
+    "duplicatesOfPriorCampaigns": 37,
+    "duplicateRate": 1
+  },
+  "rediscoveries": [
+    {
+      "lead": "YORK PRECISION MACHINING AND HYDRAULICS, LLC",
+      "target": "1854862a-d3e3-437f-99f6-023d362d40c7",
+      "signal": "probable"
+    },
+    {
+      "lead": "ZEPHYR INTERNATIONAL LLC",
+      "target": "47b6dfcd-9461-429e-8ed9-18d739e4da4a",
+      "signal": "probable"
+    }
+  ],
+  "costUsd": 0,
+  "wallTimeMs": 2139,
+  "findings": [
+    "Capability/platform seeds became frontier items that NO strategy can expand (measured limitation): platform/done: 4, qualification/done: 6. The USAspending strategy ignores non-source seeds entirely.",
+    "All discovery flowed through ONE hardcoded default query (aerospace NAICS/PSC lists inside UsaspendingDiscoveryStrategy); campaign capability/platform seeds did not shape any source query.",
+    "2 known entities rediscovered.",
+    "Cross-campaign duplicate rate 1: per-campaign dedupe keys are scoped by campaignId by design, so identical recipients re-appear across campaigns and are NOT deduped globally.",
+    "Total LLM spend during the run: $0.0000 (USAspending is a free public API; no OpenRouter calls are on this path)."
+  ]
+}

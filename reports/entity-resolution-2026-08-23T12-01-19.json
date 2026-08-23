@@ -1,0 +1,273 @@
+{
+  "kind": "entity_resolution",
+  "generatedAt": "2026-08-23T12:01:19.518Z",
+  "seed": 20260823,
+  "groundTruth": {
+    "companies": 15,
+    "goldenMembers": 36,
+    "pipelineMembers": 246,
+    "leads": 37,
+    "goldenPipelineDomainOverlap": 12
+  },
+  "caseCount": 222,
+  "casesByKind": {
+    "exact_name": 30,
+    "whitespace_punct_noise": 30,
+    "legal_suffix_variant": 15,
+    "transposed_order": 12,
+    "city_append": 10,
+    "state_append": 8,
+    "alias_short_name": 21,
+    "former_name_style": 15,
+    "member_replay": 36,
+    "lead_replay": 37,
+    "confusable_negative": 3,
+    "family_sibling": 5
+  },
+  "snapshotMatcher": {
+    "operatingThreshold": 0.72,
+    "exactPrecision": 1,
+    "exactRecall": 0.2097902097902098,
+    "probableAtThreshold": {
+      "threshold": 0.72,
+      "tp": 123,
+      "fp": 1,
+      "fn": 20,
+      "tn": 78,
+      "precision": 0.9919354838709677,
+      "recall": 0.8601398601398601,
+      "f1": 0.9213483146067415
+    },
+    "sweep": [
+      {
+        "threshold": 0.6,
+        "tp": 123,
+        "fp": 1,
+        "fn": 20,
+        "tn": 78,
+        "precision": 0.9919354838709677,
+        "recall": 0.8601398601398601,
+        "f1": 0.9213483146067415
+      },
+      {
+        "threshold": 0.65,
+        "tp": 123,
+        "fp": 1,
+        "fn": 20,
+        "tn": 78,
+        "precision": 0.9919354838709677,
+        "recall": 0.8601398601398601,
+        "f1": 0.9213483146067415
+      },
+      {
+        "threshold": 0.7,
+        "tp": 123,
+        "fp": 1,
+        "fn": 20,
+        "tn": 78,
+        "precision": 0.9919354838709677,
+        "recall": 0.8601398601398601,
+        "f1": 0.9213483146067415
+      },
+      {
+        "threshold": 0.75,
+        "tp": 121,
+        "fp": 0,
+        "fn": 22,
+        "tn": 79,
+        "precision": 1,
+        "recall": 0.8461538461538461,
+        "f1": 0.9166666666666666
+      },
+      {
+        "threshold": 0.8,
+        "tp": 115,
+        "fp": 0,
+        "fn": 28,
+        "tn": 79,
+        "precision": 1,
+        "recall": 0.8041958041958042,
+        "f1": 0.8914728682170543
+      },
+      {
+        "threshold": 0.85,
+        "tp": 108,
+        "fp": 0,
+        "fn": 35,
+        "tn": 79,
+        "precision": 1,
+        "recall": 0.7552447552447552,
+        "f1": 0.8605577689243028
+      },
+      {
+        "threshold": 0.9,
+        "tp": 106,
+        "fp": 0,
+        "fn": 37,
+        "tn": 79,
+        "precision": 1,
+        "recall": 0.7412587412587412,
+        "f1": 0.8514056224899599
+      }
+    ],
+    "falseMerges": {
+      "wrongCompanyMerges": 1,
+      "familySiblingMerges": 0,
+      "detail": [
+        {
+          "caseId": "er-0216",
+          "kind": "confusable_negative",
+          "rawName": "Zephyr International Group Inc.",
+          "matchedCompanyId": "47b6dfcd-9461-429e-8ed9-18d739e4da4a",
+          "expectedCompanyId": null,
+          "reason": "negative confusable linked to a real company"
+        }
+      ]
+    },
+    "aliasCapture": {
+      "aliasCases": 36,
+      "captured": 29,
+      "rate": 0.8055555555555556,
+      "misses": [
+        {
+          "caseId": "er-0018",
+          "rawName": "GE"
+        },
+        {
+          "caseId": "er-0029",
+          "rawName": "HMC"
+        },
+        {
+          "caseId": "er-0049",
+          "rawName": "LM"
+        },
+        {
+          "caseId": "er-0076",
+          "rawName": "Parker-Hannifin"
+        },
+        {
+          "caseId": "er-0086",
+          "rawName": "PCC"
+        },
+        {
+          "caseId": "er-0105",
+          "rawName": "Spirit"
+        },
+        {
+          "caseId": "er-0116",
+          "rawName": "The Boeing"
+        }
+      ]
+    },
+    "byKind": {
+      "exact_name": {
+        "tp": 30,
+        "fp": 0,
+        "fn": 0,
+        "tn": 0
+      },
+      "whitespace_punct_noise": {
+        "tp": 30,
+        "fp": 0,
+        "fn": 0,
+        "tn": 0
+      },
+      "legal_suffix_variant": {
+        "tp": 8,
+        "fp": 0,
+        "fn": 7,
+        "tn": 0
+      },
+      "transposed_order": {
+        "tp": 11,
+        "fp": 0,
+        "fn": 1,
+        "tn": 0
+      },
+      "city_append": {
+        "tp": 5,
+        "fp": 0,
+        "fn": 5,
+        "tn": 0
+      },
+      "state_append": {
+        "tp": 8,
+        "fp": 0,
+        "fn": 0,
+        "tn": 0
+      },
+      "alias_short_name": {
+        "tp": 16,
+        "fp": 0,
+        "fn": 5,
+        "tn": 0
+      },
+      "former_name_style": {
+        "tp": 13,
+        "fp": 0,
+        "fn": 2,
+        "tn": 0
+      },
+      "member_replay": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "tn": 36
+      },
+      "lead_replay": {
+        "tp": 2,
+        "fp": 0,
+        "fn": 0,
+        "tn": 35
+      },
+      "confusable_negative": {
+        "tp": 0,
+        "fp": 1,
+        "fn": 0,
+        "tn": 2
+      },
+      "family_sibling": {
+        "tp": 0,
+        "fp": 0,
+        "fn": 0,
+        "tn": 5
+      }
+    }
+  },
+  "leadsMatcher": {
+    "summary": {
+      "created": 137,
+      "resolvedExact": 30,
+      "probableReview": 80,
+      "unresolved": 27,
+      "duplicateSkipped": 161
+    },
+    "domainExactHits": 30,
+    "domainExactTotal": 30,
+    "domainExactMisses": [],
+    "probableCorrect": 79,
+    "probableWrong": [],
+    "negativeLeaks": [
+      "er-0216:Zephyr International Group Inc."
+    ],
+    "duplicateSkipped": 161
+  },
+  "parentSubsidiary": {
+    "family": "yulista",
+    "siblingsTested": 10,
+    "siblingMerges": 0,
+    "automaticRelatedLinkSupport": false,
+    "manualDecisionOptions": [
+      "merged",
+      "rejected_merge",
+      "alias",
+      "parent_subsidiary",
+      "acquired_into"
+    ]
+  },
+  "findings": [
+    "1 false merge(s) at the operating threshold — see snapshotMatcher.falseMerges.detail.",
+    "The production matcher has NO automatic parent/subsidiary or related-link concept: probable matches are held for analyst review, and the only related-link mechanism is a manual identity-match decision (parent_subsidiary).",
+    "Thresholds below the 0.72 production floor are unreachable through matchMember: the SQL rule enforces 0.72 internally, so the reported sweep plateaus below it. Lowering the operating point requires a matcher change, not a decision change."
+  ]
+}
