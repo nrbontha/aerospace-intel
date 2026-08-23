@@ -13,8 +13,14 @@ export const dynamic = "force-dynamic";
 export async function GET(request: NextRequest): Promise<Response> {
   try {
     await requireUser();
+    // strictObject: parse ONLY the declared pagination keys, never the raw
+    // searchParams (an unknown key such as status would fail validation).
+    const params = request.nextUrl.searchParams;
     const query = paginatedQuerySchema.safeParse({
-      ...Object.fromEntries(request.nextUrl.searchParams),
+      ...(params.get("page") === null ? {} : { page: params.get("page") }),
+      ...(params.get("pageSize") === null
+        ? {}
+        : { pageSize: params.get("pageSize") }),
     });
     if (!query.success) {
       return jsonError(
@@ -24,7 +30,7 @@ export async function GET(request: NextRequest): Promise<Response> {
         query.error.flatten(),
       );
     }
-    const status = request.nextUrl.searchParams.get("status") ?? undefined;
+    const status = params.get("status") ?? undefined;
     const result = await listIdentityMatches({
       ...(status === undefined ? {} : { status }),
       page: query.data.page,

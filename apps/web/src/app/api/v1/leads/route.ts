@@ -1,4 +1,4 @@
-import { leadListQuerySchema, paginatedQuerySchema, uuidSchema } from "@asi/contracts";
+import { leadListQuerySchema, uuidSchema } from "@asi/contracts";
 import type { NextRequest } from "next/server";
 
 import { listLeads } from "@asi/database";
@@ -17,11 +17,18 @@ const leadListRouteQuerySchema = leadListQuerySchema.extend({
 export async function GET(request: NextRequest): Promise<Response> {
   try {
     await requireUser();
+    // Parse ONLY the declared keys — strictObject rejects unknown keys, so
+    // spreading every searchParam here would 400/500 on any filter.
+    const params = request.nextUrl.searchParams;
     const query = leadListRouteQuerySchema.safeParse({
-      ...Object.fromEntries(request.nextUrl.searchParams),
-      ...paginatedQuerySchema.parse(
-        Object.fromEntries(request.nextUrl.searchParams),
-      ),
+      ...(params.get("campaignId") === null
+        ? {}
+        : { campaignId: params.get("campaignId") }),
+      ...(params.get("status") === null ? {} : { status: params.get("status") }),
+      ...(params.get("page") === null ? {} : { page: params.get("page") }),
+      ...(params.get("pageSize") === null
+        ? {}
+        : { pageSize: params.get("pageSize") }),
     });
     if (!query.success) {
       return jsonError(
