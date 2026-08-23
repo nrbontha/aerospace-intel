@@ -1,6 +1,13 @@
 "use client";
 
-import type { CandidateDto, CandidateStatus, NoveltyStatus } from "@asi/contracts";
+import type {
+  CandidateDto,
+  CandidateStatus,
+  EffectiveTier,
+  NoveltyStatus,
+  TierOverride,
+} from "@asi/contracts";
+import { effectiveTierValues, tierOverrideValues } from "@asi/contracts";
 import {
   Button,
   EmptyState,
@@ -20,18 +27,24 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 
 import { CatalogExport } from "@/components/catalog-export";
 import {
-  AxisChip,
+  ConfidenceChip,
   NoveltyBadge,
-  StatusBadge,
+  TierChip,
+  confidenceBand,
   formatInstant,
   humanLabel,
+  type ConfidenceBand,
 } from "@/components/target-feed/candidate-bits";
 import {
   createFeedback,
   listCandidates,
+  resolveCandidateFacts,
   resolveCompanyIdentities,
+  setCandidateTier,
   updateCandidateStatus,
+  type CandidateRowFacts,
   type CompanyIdentity,
+  type TierMutationResult,
 } from "@/lib/target-feed-api";
 
 /**
@@ -45,17 +58,6 @@ type ManualStatus = Extract<
   CandidateStatus,
   "archived" | "rejected" | "hold" | "shortlist" | "queued_research"
 >;
-const STATUS_FILTER_OPTIONS: readonly CandidateStatus[] = [
-  "queued_research",
-  "in_research",
-  "research_ready",
-  "partner_review",
-  "shortlist",
-  "hold",
-  "rejected",
-  "watchlist",
-  "archived",
-];
 
 const NOVELTY_OPTIONS: readonly NoveltyStatus[] = [
   "not_matched_to_current_known_universe",
@@ -84,41 +86,113 @@ const FEEDBACK_ACTION_BY_STATUS: Record<ManualStatus, "shortlist" | "hold" | "re
     archived: null,
   };
 
-const AXIS_FILTER_KEYS = [
-  "minFit",
-  "maxFit",
-  "minNovelty",
-  "maxNovelty",
-  "minConfidence",
-  "maxConfidence",
-  "minActionability",
-  "maxActionability",
-] as const;
+const AXIS_FILTER_KEYS = ["minFit", "minNovelty", "minActionability"] as const;
 
 type AxisFilterKey = (typeof AXIS_FILTER_KEYS)[number];
 
 const AXIS_FILTER_LABELS: Record<AxisFilterKey, string> = {
   minFit: "Min fit",
-  maxFit: "Max fit",
   minNovelty: "Min novelty",
-  maxNovelty: "Max novelty",
-  minConfidence: "Min confidence",
-  maxConfidence: "Max confidence",
   minActionability: "Min actionability",
-  maxActionability: "Max actionability",
 };
 
-export const REJECT_REASONS: Record<string, string> = {
-  ownership_unactionable: "Ownership makes it unactionable",
-  outside_archetype: "Outside target archetype",
-  too_small: "Too small for the program",
-  distributor_service: "Pure distributor / service business",
-  already_covered: "Already covered elsewhere in pipeline",
-  insufficient_evidence: "Insufficient evidence to proceed",
-  other: "Other (note required)",
+/** Confidence band → server-side axis range. Bands mirror
+ * confidenceBand(): ≥70 strong, ≥50 medium, ≥25 weak, else thin. The
+ * 0.01 gap keeps the <= range comparisons from overlapping neighbors. */
+const CONFIDENCE_BAND_RANGES: Record<
+  ConfidenceBand,
+  { minConfidence?: number; maxConfidence?: number }
+> = {
+  strong: { minConfidence: 70 },
+  medium: { minConfidence: 50, maxConfidence: 69.99 },
+  weak: { minConfidence: 25, maxConfidence: 49.99 },
+  thin: { maxConfidence: 24.99 },
 };
 
-type RowView = Readonly<{ candidate: CandidateDto; identity: CompanyIdentity }>;
+// Frozen engine band ladders (packages/database/src/candidates/bands.ts;
+// parity with the research engine is asserted there by unit test). Local
+// copies because the client must not pull @asi/database into the bundle.
+const REVENUE_BAND_OPTIONS: readonly string[] = [
+  "<5m",
+  "5-10m",
+  "10-20m",
+  "20-35m",
+  "35-50m",
+  "unknown",
+];
+const OWNERSHIP_TYPE_OPTIONS: readonly string[] = [
+  "independent_founder",
+  "independent_family",
+  "pe_owned",
+  "strategic_sub",
+  "public_sub",
+  "unknown",
+];
+
+// ---------------------------------------------------------------------------
+// Saved views (URL-persisted presets, REDESIGN_PLAN §2.3)
+// ---------------------------------------------------------------------------
+
+type SavedView = Readonly<{
+  key: string;
+  label: string;
+  /** URL params applied when the preset is chosen (clearing other filters). */
+  params: Readonly<Record<string, string>>;
+}>;
+
+const SAVED_VIEWS: readonly SavedView[] = [
+  {
+    key: "partner-queue",
+    label: "Partner queue",
+    params: { tier: "high_interest" },
+  },
+  {
+    key: "needs-research",
+    label: "Needs research",
+    params: { tier: "needs_research" },
+  },
+  { key: "watchlist", label: "Watchlist", params: { tier: "watchlist" } },
+  // No created-after API param exists yet, so freshness filters client-side
+  // over the loaded page — surfaced honestly in the UI.
+  { key: "fresh-finds", label: "Fresh finds (24h)", params: { fresh: "24h" } },
+];
+
+const FILTER_PARAM_KEYS = [
+  "tier",
+  "noveltyStatus",
+  "confBand",
+  "ownership",
+  "revenue",
+  "lowconf",
+  "origin",
+  "q",
+  "fresh",
+  ...AXIS_FILTER_KEYS,
+] as const;
+
+function activeSavedViewKey(searchParams: URLSearchParams): string | null {
+  for (const view of SAVED_VIEWS) {
+    const entries = Object.entries(view.params);
+    if (
+      entries.every(([key, value]) => searchParams.get(key) === value) &&
+      !FILTER_PARAM_KEYS.some(
+        (key) =>
+          !(key in view.params) &&
+          (searchParams.get(key) ?? "") !== "" &&
+          key !== "origin",
+      )
+    ) {
+      return view.key;
+    }
+  }
+  return null;
+}
+
+type RowView = Readonly<{
+  candidate: CandidateDto;
+  identity: CompanyIdentity;
+  facts: CandidateRowFacts;
+}>;
 
 function filterValue(
   params: URLSearchParams,
@@ -131,165 +205,106 @@ function filterValue(
 }
 
 // ---------------------------------------------------------------------------
-// Partner-review inline actions
+// Per-row tier menu (single-row human override with audit note)
 // ---------------------------------------------------------------------------
 
-function PartnerReviewActions({
+function RowTierMenu({
   candidate,
-  onResolved,
+  onUpdated,
 }: {
   candidate: CandidateDto;
-  onResolved: (candidateId: string) => void;
+  onUpdated: (candidateId: string, result: TierMutationResult) => void;
 }) {
-  const [pending, setPending] = useState<string | null>(null);
-  const [rejectOpen, setRejectOpen] = useState(false);
-  const [reasonCode, setReasonCode] = useState("ownership_unactionable");
-  const [notes, setNotes] = useState("");
+  const [open, setOpen] = useState(false);
+  const [draftTier, setDraftTier] = useState<TierOverride>("high_interest");
+  const [note, setNote] = useState("");
+  const [pending, setPending] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function run(
-    actionKey: string,
-    work: () => Promise<void>,
-  ): Promise<void> {
-    setPending(actionKey);
+  async function apply(): Promise<void> {
+    setPending(true);
     setError(null);
     try {
-      await work();
-      onResolved(candidate.id);
+      const result = await setCandidateTier(
+        candidate.id,
+        draftTier,
+        note.trim() === "" ? undefined : note.trim(),
+      );
+      onUpdated(candidate.id, result);
+      setOpen(false);
+      setNote("");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Action failed.");
+      setError(caught instanceof Error ? caught.message : "Tier change failed.");
     } finally {
-      setPending(null);
+      setPending(false);
     }
   }
 
-  function feedbackWork(
-    action: "strong_fit" | "possible_fit" | "reject" | "needs_more_research",
-    status: ManualStatus,
-    reason?: string,
-  ): () => Promise<void> {
-    return async () => {
-      await createFeedback({
-        channel: "investment",
-        action,
-        candidateId: candidate.id,
-        ...(reason === undefined ? {} : { reason }),
-        ...(notes.trim() === "" ? {} : { notes: notes.trim() }),
-      });
-      await updateCandidateStatus(candidate.id, status);
-    };
-  }
-
   return (
-    <div className="admin-stack">
-      <div className="admin-actions">
-        <Button
-          size="small"
-          disabled={pending !== null}
-          onClick={() => void run("strong_fit", feedbackWork("strong_fit", "shortlist"))}
-        >
-          Strong Fit
-        </Button>
-        <Button
-          size="small"
-          variant="secondary"
-          disabled={pending !== null}
-          onClick={() =>
-            void run("possible_fit", feedbackWork("possible_fit", "hold"))
-          }
-        >
-          Possible Fit
-        </Button>
-        <Button
-          size="small"
-          variant="secondary"
-          aria-expanded={rejectOpen}
-          disabled={pending !== null}
-          onClick={() => setRejectOpen((open) => !open)}
-        >
-          Reject…
-        </Button>
-        <Button
-          size="small"
-          variant="ghost"
-          disabled={pending !== null}
-          onClick={() =>
-            void run(
-              "needs_more_research",
-              feedbackWork("needs_more_research", "hold"),
-            )
-          }
-        >
-          Needs More Research
-        </Button>
+    <details
+      open={open}
+      onToggle={(event) => setOpen((event.target as HTMLDetailsElement).open)}
+    >
+      <summary>Tier ▾</summary>
+      <div
+        style={{
+          minWidth: "16rem",
+          padding: "0.5rem",
+          border: "1px solid var(--asi-border, currentColor)",
+          borderRadius: "4px",
+          background: "var(--asi-surface-muted, transparent)",
+        }}
+      >
+        <p className="asi-page-description" role="note">
+          Human override — audited, recorded as investment feedback, and
+          pinned: engine routing may still move the underlying status, but it
+          will not change your tier.
+        </p>
+        <label className="admin-field">
+          <span className="admin-field__label">Set tier</span>
+          <Select
+            value={draftTier}
+            onChange={(event) => setDraftTier(event.target.value as TierOverride)}
+          >
+            {tierOverrideValues.map((tier) => (
+              <option key={tier} value={tier}>
+                {humanLabel(tier)}
+              </option>
+            ))}
+          </Select>
+        </label>
+        <label className="admin-field">
+          <span className="admin-field__label">Audit note</span>
+          <Input
+            maxLength={2000}
+            value={note}
+            onChange={(event) => setNote(event.target.value)}
+            placeholder="Why this tier (recorded with the override)"
+          />
+        </label>
+        <div className="admin-actions">
+          <Button
+            size="small"
+            type="button"
+            disabled={pending}
+            onClick={() => void apply()}
+          >
+            Apply
+          </Button>
+        </div>
+        {error !== null ? (
+          <p className="admin-feedback" data-tone="error" role="alert">
+            {error}
+          </p>
+        ) : null}
       </div>
-      {rejectOpen ? (
-        <form
-          className="admin-form-grid"
-          onSubmit={(event) => {
-            event.preventDefault();
-            const reason = REJECT_REASONS[reasonCode];
-            if (reason === undefined) return;
-            if (reasonCode === "other" && notes.trim() === "") {
-              setError('Reason "Other" requires a note.');
-              return;
-            }
-            void run(
-              "reject",
-              feedbackWork("reject", "rejected", `reject_reason:${reasonCode}`),
-            );
-          }}
-        >
-          <label className="admin-field">
-            <span className="admin-field__label">Rejection reason</span>
-            <Select
-              value={reasonCode}
-              onChange={(event) => setReasonCode(event.target.value)}
-            >
-              {Object.entries(REJECT_REASONS).map(([code, label]) => (
-                <option key={code} value={code}>
-                  {label}
-                </option>
-              ))}
-            </Select>
-          </label>
-          <label className="admin-field">
-            <span className="admin-field__label">Note</span>
-            <Input
-              maxLength={2000}
-              value={notes}
-              onChange={(event) => setNotes(event.target.value)}
-              placeholder="Optional context recorded with the decision"
-            />
-          </label>
-          <div className="admin-actions">
-            <Button
-              size="small"
-              type="submit"
-              disabled={pending !== null}
-              variant="danger"
-            >
-              Confirm rejection
-            </Button>
-          </div>
-        </form>
-      ) : null}
-      {pending !== null ? (
-        <p className="asi-page-description" role="status">
-          Recording {pending}…
-        </p>
-      ) : null}
-      {error !== null ? (
-        <p className="admin-feedback" data-tone="error" role="alert">
-          {error}
-        </p>
-      ) : null}
-    </div>
+    </details>
   );
 }
 
 // ---------------------------------------------------------------------------
-// Per-row status menu (single-row bookkeeping with audit note)
+// Per-row status menu (single-row bookkeeping with audit note; also used by
+// the candidate profile page)
 // ---------------------------------------------------------------------------
 
 export function RowStatusMenu({
@@ -410,13 +425,18 @@ export function RowStatusMenu({
 // Main table
 // ---------------------------------------------------------------------------
 
-export function TargetFeed({ queue = false }: { queue?: boolean }) {
+export function TargetFeed() {
   const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
 
-  const statusFilter = queue ? "partner_review" : (searchParams.get("status") ?? "");
+  const tierFilter = searchParams.get("tier") ?? "";
   const noveltyFilter = searchParams.get("noveltyStatus") ?? "";
+  const confidenceBandFilter = searchParams.get("confBand") ?? "";
+  const ownershipFilter = searchParams.get("ownership") ?? "";
+  const revenueFilter = searchParams.get("revenue") ?? "";
+  const lowConfidenceOnly = searchParams.get("lowconf") === "1";
+  const freshOnly = searchParams.get("fresh") === "24h";
   const textQuery = searchParams.get("q") ?? "";
   const page = Number(searchParams.get("page") ?? "1") || 1;
 
@@ -441,24 +461,33 @@ export function TargetFeed({ queue = false }: { queue?: boolean }) {
       setLoading(true);
       setError(null);
       try {
+        const bandRange =
+          confidenceBandFilter !== ""
+            ? CONFIDENCE_BAND_RANGES[confidenceBandFilter as ConfidenceBand]
+            : undefined;
         const result = await listCandidates(
           {
-            ...(queue
-              ? { status: "partner_review" as const }
-              : { status: (statusFilter || "") as CandidateStatus | "" }),
+            ...(tierFilter ? { tier: tierFilter as EffectiveTier } : {}),
             ...(noveltyFilter
               ? { noveltyStatus: noveltyFilter as NoveltyStatus }
               : {}),
+            ...(bandRange ?? {}),
             ...axisFilters,
             page,
             pageSize: 25,
           },
           signal,
         );
-        const identities = await resolveCompanyIdentities(
-          result.data.map((candidate) => candidate.companyId),
-          signal,
-        );
+        const [identities, facts] = await Promise.all([
+          resolveCompanyIdentities(
+            result.data.map((candidate) => candidate.companyId),
+            signal,
+          ),
+          resolveCandidateFacts(
+            result.data.map((candidate) => candidate.id),
+            signal,
+          ),
+        ]);
         if (signal.aborted) return;
         setRows(
           result.data.map((candidate) => ({
@@ -467,6 +496,10 @@ export function TargetFeed({ queue = false }: { queue?: boolean }) {
               name: null,
               domain: null,
               headquartersCountryCode: null,
+            },
+            facts: facts.get(candidate.id) ?? {
+              revenueBand: null,
+              ownershipType: null,
             },
           })),
         );
@@ -485,7 +518,7 @@ export function TargetFeed({ queue = false }: { queue?: boolean }) {
         if (!signal.aborted) setLoading(false);
       }
     },
-    [axisFilters, noveltyFilter, page, queue, statusFilter],
+    [axisFilters, confidenceBandFilter, noveltyFilter, page, tierFilter],
   );
 
   useEffect(() => {
@@ -497,7 +530,10 @@ export function TargetFeed({ queue = false }: { queue?: boolean }) {
   function patchParams(mutate: (params: URLSearchParams) => void): void {
     const params = new URLSearchParams(queryString);
     mutate(params);
-    if (!queue && !params.get("status")) params.delete("status");
+    if (!params.get("tier")) params.delete("tier");
+    if (!params.get("confBand")) params.delete("confBand");
+    if (!params.get("lowconf")) params.delete("lowconf");
+    if (!params.get("fresh")) params.delete("fresh");
     params.delete("page");
     router.replace(`${pathname}?${params.toString()}`, { scroll: false });
   }
@@ -509,30 +545,73 @@ export function TargetFeed({ queue = false }: { queue?: boolean }) {
     });
   }
 
-  function clearFilters(): void {
-    router.replace(queue ? `${pathname}?queue=partner` : pathname, {
-      scroll: false,
-    });
+  function applySavedView(view: SavedView): void {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(view.params)) {
+      params.set(key, value);
+    }
+    router.replace(`${pathname}?${params.toString()}`, { scroll: false });
   }
 
+  function clearFilters(): void {
+    router.replace(pathname, { scroll: false });
+  }
+
+  // Client-side fallbacks operate on the loaded page only (labeled in the UI):
+  // text match, ownership/revenue band (feature snapshot slice), the
+  // low-confidence-fields proxy, and the 24h freshness window. The API does
+  // not support these predicates server-side yet.
   const filteredRows = useMemo(() => {
     const query = textQuery.trim().toLocaleLowerCase("en-US");
-    if (query === "") return rows;
-    return rows.filter(({ identity }) => {
-      const haystack =
-        `${identity.name ?? ""} ${identity.domain ?? ""}`.toLocaleLowerCase(
-          "en-US",
-        );
-      return haystack.includes(query);
+    const cutoff = freshOnly ? Date.now() - 24 * 60 * 60 * 1000 : null;
+    return rows.filter(({ candidate, identity, facts }) => {
+      if (query !== "") {
+        const haystack =
+          `${identity.name ?? ""} ${identity.domain ?? ""}`.toLocaleLowerCase(
+            "en-US",
+          );
+        if (!haystack.includes(query)) return false;
+      }
+      if (
+        ownershipFilter !== "" &&
+        (facts.ownershipType ?? "unknown") !== ownershipFilter
+      ) {
+        return false;
+      }
+      if (
+        revenueFilter !== "" &&
+        (facts.revenueBand ?? "unknown") !== revenueFilter
+      ) {
+        return false;
+      }
+      if (lowConfidenceOnly) {
+        const band = confidenceBand(candidate.currentScores.confidence);
+        if (band !== "weak" && band !== "thin") return false;
+      }
+      if (
+        cutoff !== null &&
+        new Date(candidate.createdAt).getTime() < cutoff
+      ) {
+        return false;
+      }
+      return true;
     });
-  }, [rows, textQuery]);
+  }, [rows, textQuery, ownershipFilter, revenueFilter, lowConfidenceOnly, freshOnly]);
 
   const anyServerFilter =
-    queue ||
-    statusFilter !== "" ||
+    tierFilter !== "" ||
     noveltyFilter !== "" ||
+    confidenceBandFilter !== "" ||
     textQuery !== "" ||
     AXIS_FILTER_KEYS.some((key) => axisFilters[key] !== "");
+  const anyClientFilter =
+    ownershipFilter !== "" ||
+    revenueFilter !== "" ||
+    lowConfidenceOnly ||
+    freshOnly;
+  const anyFilter = anyServerFilter || anyClientFilter;
+
+  const activeViewKey = activeSavedViewKey(searchParams);
 
   function handleRowStatus(candidateId: string, status: CandidateStatus): void {
     setRows((current) =>
@@ -545,10 +624,25 @@ export function TargetFeed({ queue = false }: { queue?: boolean }) {
     setReloadKey((key) => key + 1);
   }
 
-  function handleQueueResolution(candidateId: string): void {
-    // Optimistic removal; the reload reconciles against the server.
+  function handleRowTier(
+    candidateId: string,
+    result: TierMutationResult,
+  ): void {
     setRows((current) =>
-      current.filter((row) => row.candidate.id !== candidateId),
+      current.map((row) =>
+        row.candidate.id === candidateId
+          ? {
+              ...row,
+              candidate: {
+                ...row.candidate,
+                status: result.status,
+                tierOverride: result.tierOverride,
+                tierSource: result.tierSource,
+                effectiveTier: result.effectiveTier,
+              },
+            }
+          : row,
+      ),
     );
     setReloadKey((key) => key + 1);
   }
@@ -557,37 +651,52 @@ export function TargetFeed({ queue = false }: { queue?: boolean }) {
     <section aria-labelledby="target-feed-title">
       <div className="admin-panel">
         <header className="admin-panel__header">
-          <h2 id="target-feed-title">
-            {queue ? "Partner review queue" : "Scored candidates"}
-          </h2>
+            <h2 id="target-feed-title">Scored candidates</h2>
           <p className="asi-page-description">
-            {queue
-              ? "Candidates routed to partner review, ordered by partner review priority. Actions record investment feedback and transition the candidate."
-              : "Discovery candidates ranked by partner-review priority. Scores come from the champion scoring program; “—” means the axis was not scoreable."}
+            One tiered table of every acquisition-target candidate. Tiers are
+            engine-proposed and human-overridable; overrides are audited and
+            survive engine re-routing.
           </p>
         </header>
+        <div className="admin-actions" role="group" aria-label="Saved views">
+          <span className="admin-field__label">Saved views</span>
+          {SAVED_VIEWS.map((view) => (
+            <Button
+              key={view.key}
+              size="small"
+              variant={activeViewKey === view.key ? "secondary" : "ghost"}
+              aria-pressed={activeViewKey === view.key}
+              title={
+                view.key === "fresh-finds"
+                  ? "Client-side filter over the currently loaded page"
+                  : view.label
+              }
+              onClick={() => applySavedView(view)}
+            >
+              {view.label}
+            </Button>
+          ))}
+        </div>
         <form
           className="admin-form-grid"
           role="search"
           onSubmit={(event) => event.preventDefault()}
         >
-          {!queue ? (
-            <label className="admin-field" htmlFor="feed-status">
-              <span className="admin-field__label">Status</span>
-              <Select
-                id="feed-status"
-                value={statusFilter}
-                onChange={(event) => setFilter("status", event.target.value)}
-              >
-                <option value="">All statuses</option>
-                {STATUS_FILTER_OPTIONS.map((value) => (
-                  <option key={value} value={value}>
-                    {humanLabel(value)}
-                  </option>
-                ))}
-              </Select>
-            </label>
-          ) : null}
+          <label className="admin-field" htmlFor="feed-tier">
+            <span className="admin-field__label">Tier</span>
+            <Select
+              id="feed-tier"
+              value={tierFilter}
+              onChange={(event) => setFilter("tier", event.target.value)}
+            >
+              <option value="">All tiers</option>
+              {effectiveTierValues.map((tier) => (
+                <option key={tier} value={tier}>
+                  {humanLabel(tier)}
+                </option>
+              ))}
+            </Select>
+          </label>
           <label className="admin-field" htmlFor="feed-novelty">
             <span className="admin-field__label">Novelty verdict</span>
             <Select
@@ -603,8 +712,76 @@ export function TargetFeed({ queue = false }: { queue?: boolean }) {
               ))}
             </Select>
           </label>
+          <label className="admin-field" htmlFor="feed-conf-band">
+            <span className="admin-field__label">Confidence band</span>
+            <Select
+              id="feed-conf-band"
+              value={confidenceBandFilter}
+              onChange={(event) => setFilter("confBand", event.target.value)}
+            >
+              <option value="">All bands</option>
+              <option value="strong">Strong</option>
+              <option value="medium">Medium</option>
+              <option value="weak">Weak</option>
+              <option value="thin">Thin</option>
+            </Select>
+          </label>
+          <label className="admin-field" htmlFor="feed-ownership">
+            <span className="admin-field__label">Ownership †</span>
+            <Select
+              id="feed-ownership"
+              value={ownershipFilter}
+              onChange={(event) => setFilter("ownership", event.target.value)}
+            >
+              <option value="">All ownership types</option>
+              {OWNERSHIP_TYPE_OPTIONS.map((value) => (
+                <option key={value} value={value}>
+                  {humanLabel(value)}
+                </option>
+              ))}
+            </Select>
+          </label>
+          <label className="admin-field" htmlFor="feed-revenue">
+            <span className="admin-field__label">Revenue band †</span>
+            <Select
+              id="feed-revenue"
+              value={revenueFilter}
+              onChange={(event) => setFilter("revenue", event.target.value)}
+            >
+              <option value="">All revenue bands</option>
+              {REVENUE_BAND_OPTIONS.map((value) => (
+                <option key={value} value={value}>
+                  {value}
+                </option>
+              ))}
+            </Select>
+          </label>
+          <label className="admin-field" htmlFor="feed-origin">
+            <span className="admin-field__label">Discovery origin</span>
+            <Select
+              id="feed-origin"
+              disabled
+              title="Discovery provenance is not tracked by the API yet"
+              defaultValue=""
+            >
+              <option value="">Not tracked by the API yet</option>
+            </Select>
+          </label>
+          <label className="admin-field" htmlFor="feed-lowconf">
+            <span className="admin-field__label">Low-confidence fields †</span>
+            <Select
+              id="feed-lowconf"
+              value={lowConfidenceOnly ? "1" : ""}
+              onChange={(event) =>
+                setFilter("lowconf", event.target.value === "1" ? "1" : "")
+              }
+            >
+              <option value="">Any evidence quality</option>
+              <option value="1">Weak/thin confidence only</option>
+            </Select>
+          </label>
           <label className="admin-field" htmlFor="feed-query">
-            <span className="admin-field__label">Text filter (this page)</span>
+            <span className="admin-field__label">Text filter †</span>
             <Input
               id="feed-query"
               maxLength={200}
@@ -613,7 +790,7 @@ export function TargetFeed({ queue = false }: { queue?: boolean }) {
               onChange={(event) => setFilter("q", event.target.value)}
             />
           </label>
-          {AXIS_FILTER_KEYS.filter((key) => key.startsWith("min")).map((key) => (
+          {AXIS_FILTER_KEYS.map((key) => (
             <label className="admin-field" key={key} htmlFor={`feed-${key}`}>
               <span className="admin-field__label">{AXIS_FILTER_LABELS[key]}</span>
               <Input
@@ -628,7 +805,7 @@ export function TargetFeed({ queue = false }: { queue?: boolean }) {
             </label>
           ))}
           <div className="admin-actions">
-            {anyServerFilter ? (
+            {anyFilter ? (
               <Button
                 type="button"
                 variant="ghost"
@@ -639,6 +816,10 @@ export function TargetFeed({ queue = false }: { queue?: boolean }) {
               </Button>
             ) : null}
           </div>
+          <p className="asi-page-description">
+            † runs client-side against the currently loaded page — the
+            candidates list API does not support these predicates yet.
+          </p>
         </form>
         <div className="admin-actions">
           <CatalogExport entity="candidates" />
@@ -665,21 +846,17 @@ export function TargetFeed({ queue = false }: { queue?: boolean }) {
       {!loading && error === null && filteredRows.length === 0 ? (
         <EmptyState
           title={
-            anyServerFilter
-              ? queue
-                ? "Partner review queue is empty"
-                : "No candidates match these filters"
+            anyFilter
+              ? "No candidates match these filters"
               : "No scored candidates yet"
           }
           description={
-            anyServerFilter
-              ? queue
-                ? "Every candidate routed to partner review has been decided. New candidates appear here after scoring routes them."
-                : "Clear or change the filters to see other candidates."
+            anyFilter
+              ? "Clear or change the filters to see other candidates."
               : "Candidates appear here after resolved companies are promoted through scoring. No fake or sample rows are shown."
           }
           action={
-            anyServerFilter ? (
+            anyFilter ? (
               <Button variant="secondary" onClick={clearFilters}>
                 Clear filters
               </Button>
@@ -698,66 +875,101 @@ export function TargetFeed({ queue = false }: { queue?: boolean }) {
             </TableCaption>
             <TableHeader>
               <TableRow>
+                <TableHead>Tier</TableHead>
                 <TableHead>Company</TableHead>
                 <TableHead>Domain</TableHead>
                 <TableHead>HQ</TableHead>
                 <TableHead>Revenue band</TableHead>
                 <TableHead>Ownership</TableHead>
-                <TableHead>Scores (fit/novelty/conf/act)</TableHead>
                 <TableHead>Novelty</TableHead>
-                <TableHead>Status</TableHead>
-                <TableHead numeric>Priority</TableHead>
-                <TableHead>Updated</TableHead>
-                <TableHead>{queue ? "Decision" : "Actions"}</TableHead>
+                <TableHead>Confidence</TableHead>
+                <TableHead title="Last researched / last update">Last researched</TableHead>
+                <TableHead title="Discovery provenance">Source</TableHead>
+                <TableHead>Actions</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
-              {filteredRows.map(({ candidate, identity }) => (
-                <TableRow key={candidate.id}>
-                  <TableCell>
-                    <Link href={`/candidates/${candidate.id}`}>
-                      <strong>{identity.name ?? "Unnamed company"}</strong>
-                    </Link>
-                  </TableCell>
-                  <TableCell>{identity.domain ?? "—"}</TableCell>
-                  <TableCell>{identity.headquartersCountryCode ?? "—"}</TableCell>
-                  <TableCell title="Revenue band comes from the feature snapshot; open the profile to see it">—</TableCell>
-                  <TableCell title="Ownership chip comes from the feature snapshot; open the profile to see it">—</TableCell>
-                  <TableCell>
-                    <span style={{ display: "inline-flex", gap: "0.25rem", flexWrap: "wrap" }}>
-                      <AxisChip axis="fit" value={candidate.currentScores.fit} />
-                      <AxisChip axis="novelty" value={candidate.currentScores.novelty} />
-                      <AxisChip axis="confidence" value={candidate.currentScores.confidence} />
-                      <AxisChip axis="actionability" value={candidate.currentScores.actionability} />
-                    </span>
-                  </TableCell>
-                  <TableCell>
-                    <NoveltyBadge novelty={candidate.noveltyStatus} />
-                  </TableCell>
-                  <TableCell>
-                    <StatusBadge status={candidate.status} />
-                  </TableCell>
-                  <TableCell numeric>
-                    {candidate.partnerReviewPriority === null
-                      ? "—"
-                      : Math.round(candidate.partnerReviewPriority).toString()}
-                  </TableCell>
-                  <TableCell>{formatInstant(candidate.updatedAt)}</TableCell>
-                  <TableCell>
-                    {queue ? (
-                      <PartnerReviewActions
-                        candidate={candidate}
-                        onResolved={handleQueueResolution}
+              {filteredRows.map(({ candidate, identity, facts }) => {
+                const band = confidenceBand(candidate.currentScores.confidence);
+                const lowConfidenceFields = band === "weak" || band === "thin";
+                return (
+                  <TableRow key={candidate.id}>
+                    <TableCell>
+                      <TierChip
+                        tier={candidate.effectiveTier}
+                        pinned={
+                          candidate.tierSource === "human" &&
+                          candidate.tierOverride !== null
+                        }
                       />
-                    ) : (
-                      <RowStatusMenu
-                        candidate={candidate}
-                        onUpdated={handleRowStatus}
-                      />
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))}
+                    </TableCell>
+                    <TableCell>
+                      <Link href={`/candidates/${candidate.id}`}>
+                        <strong>{identity.name ?? "Unnamed company"}</strong>
+                      </Link>
+                    </TableCell>
+                    <TableCell>{identity.domain ?? "—"}</TableCell>
+                    <TableCell>{identity.headquartersCountryCode ?? "—"}</TableCell>
+                    <TableCell>{facts.revenueBand ?? "—"}</TableCell>
+                    <TableCell>
+                      {facts.ownershipType === null
+                        ? "—"
+                        : humanLabel(facts.ownershipType)}
+                    </TableCell>
+                    <TableCell>
+                      <NoveltyBadge novelty={candidate.noveltyStatus} />
+                    </TableCell>
+                    <TableCell>
+                      <span
+                        style={{
+                          display: "inline-flex",
+                          gap: "0.25rem",
+                          alignItems: "baseline",
+                        }}
+                      >
+                        <ConfidenceChip value={candidate.currentScores.confidence} />
+                        {lowConfidenceFields ? (
+                          <Link
+                            href={`/candidates/${candidate.id}`}
+                            aria-label={`Low-confidence material fields — review field badges on the profile`}
+                            title="Low-confidence material fields — review field badges on the profile"
+                          >
+                            ⚠
+                          </Link>
+                        ) : null}
+                      </span>
+                    </TableCell>
+                    <TableCell>{formatInstant(candidate.updatedAt)}</TableCell>
+                    <TableCell>
+                      <span
+                        className="asi-badge"
+                        style={{ opacity: 0.6 }}
+                        title="Discovery provenance is not surfaced by the API yet"
+                      >
+                        untracked
+                      </span>
+                    </TableCell>
+                    <TableCell>
+                      <span
+                        style={{
+                          display: "inline-flex",
+                          gap: "0.5rem",
+                          alignItems: "flex-start",
+                        }}
+                      >
+                        <RowTierMenu
+                          candidate={candidate}
+                          onUpdated={handleRowTier}
+                        />
+                        <RowStatusMenu
+                          candidate={candidate}
+                          onUpdated={handleRowStatus}
+                        />
+                      </span>
+                    </TableCell>
+                  </TableRow>
+                );
+              })}
             </TableBody>
           </Table>
           <nav className="admin-actions" aria-label="Candidate pagination">
@@ -794,9 +1006,3 @@ export function TargetFeed({ queue = false }: { queue?: boolean }) {
     </section>
   );
 }
-
-export function TargetFeedQueue() {
-  return <TargetFeed queue />;
-}
-
-

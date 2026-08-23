@@ -2241,3 +2241,7 @@ export type ResearchAgent = SelectRow<typeof researchAgents>;
 export type NewResearchAgent = InsertRow<typeof researchAgents>;
 export type AgentTick = SelectRow<typeof agentTicks>;
 export type NewAgentTick = InsertRow<typeof agentTicks>;
+
+export type TickOutcome = (typeof tickOutcome.enumValues)[number];
+export type AgentType = (typeof agentType.enumValues)[number];
+export type AgentStatus = (typeof agentStatus.enumValues)[number];

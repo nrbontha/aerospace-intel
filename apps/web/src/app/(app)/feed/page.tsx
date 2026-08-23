@@ -3,8 +3,8 @@ import { Suspense } from "react";
 import { TargetFeed } from "@/components/target-feed/target-feed";
 
 export const metadata = {
-  title: "Target Feed",
-  description: "Scored discovery candidates ranked by partner review priority.",
+  title: "Targets",
+  description: "The single tiered table of acquisition-target candidates.",
 };
 
 export default function FeedPage() {
@@ -12,10 +12,11 @@ export default function FeedPage() {
     <>
       <header className="asi-page-header">
         <p className="asi-page-kicker">Discovery</p>
-        <h1 className="asi-page-title">Target Feed</h1>
+        <h1 className="asi-page-title">Targets</h1>
         <p className="asi-page-description">
-          The default working surface: every scored supplier candidate, ranked
-          by partner-review priority, with novelty verdicts and axis scores.
+          The default working surface: every scored supplier candidate in one
+          tiered table — engine-proposed tiers, human overrides (audited),
+          confidence bands, and saved views.
         </p>
       </header>
       <Suspense

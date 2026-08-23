@@ -41,6 +41,9 @@ import {
 
 import { promoteCompany, rescoreCandidate } from "../apps/web/src/lib/candidate-scoring.js";
 import { runMigrations } from "../packages/database/src/migrate.js";
+// The repo imports @asi/database (built dist) AND source paths for
+// runMigrations; each module instance keeps its own pool — close both.
+import { closeDatabase as closeSourceDatabase } from "../packages/database/src/client.js";
 
 const execFileAsync = promisify(execFile);
 const DB_TESTS_ENABLED = process.env.ASI_DB_TESTS === "1";
@@ -115,7 +118,6 @@ describe.skipIf(!DB_TESTS_ENABLED)("migration 0003 on restored prod copy (DB)", 
     // free port up front races the OS ephemeral allocator on macOS.
     await docker([
       "run",
-      "--rm",
       "-d",
       "--name",
       CONTAINER,
@@ -158,8 +160,11 @@ describe.skipIf(!DB_TESTS_ENABLED)("migration 0003 on restored prod copy (DB)", 
 
   afterAll(async () => {
     try {
-      await closeDatabase();
+      await Promise.allSettled([closeDatabase(), closeSourceDatabase()]);
     } finally {
+      // Graceful stop first: SIGKILL from rm -f makes postmaster drop live
+      // sockets, which surfaces as an unhandled pg client error.
+      await docker(["stop", "-t", "10", CONTAINER]).catch(() => undefined);
       await execFileAsync("docker", ["rm", "-f", CONTAINER]).catch(() => undefined);
     }
   });

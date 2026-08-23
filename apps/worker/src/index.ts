@@ -22,6 +22,11 @@ import {
   type ResearchJobHandlerRegistry,
   type WorkerQueue,
 } from "./queue.js";
+import {
+  createV1TickHandlerRegistry,
+  startSupervisor,
+  type SupervisorRuntime,
+} from "./supervisor/index.js";
 
 const SENSITIVE_KEY_PATTERN =
   /authorization|cookie|credential|database.?url|password|secret|token|api.?key/i;
@@ -129,6 +134,7 @@ const log: QueueLogger = (level, event, fields = {}) => {
 async function stopComponents(
   healthServer: HealthServer | undefined,
   queue: WorkerQueue | undefined,
+  supervisor: SupervisorRuntime | undefined,
 ): Promise<void> {
   const errors: unknown[] = [];
 
@@ -140,6 +146,12 @@ async function stopComponents(
 
   try {
     await queue?.stop();
+  } catch (error) {
+    errors.push(error);
+  }
+
+  try {
+    await supervisor?.stop();
   } catch (error) {
     errors.push(error);
   }
@@ -173,7 +185,7 @@ export async function startWorker(): Promise<WorkerRuntime> {
       stop(): Promise<void> {
         stopPromise ??= (async () => {
           log("info", "worker.stopping");
-          await stopComponents(healthServer, undefined);
+          await stopComponents(healthServer, undefined, undefined);
           log("info", "worker.stopped");
         })();
         return stopPromise;
@@ -226,6 +238,7 @@ export async function startWorker(): Promise<WorkerRuntime> {
   }) satisfies ResearchJobHandlerRegistry;
   let healthServer: HealthServer | undefined;
   let queue: WorkerQueue | undefined;
+  let supervisor: SupervisorRuntime | undefined;
 
   log("info", "worker.starting", {
     concurrency: env.RESEARCH_CONCURRENCY,
@@ -245,9 +258,16 @@ export async function startWorker(): Promise<WorkerRuntime> {
       queueName: env.RESEARCH_QUEUE_NAME,
     });
     await queue.start();
+    if (process.env.AGENT_SUPERVISOR_ENABLED !== "false") {
+      supervisor = startSupervisor({
+        handlers: createV1TickHandlerRegistry(),
+        logger: log,
+      });
+      log("info", "supervisor.started", { instanceId: supervisor.instanceId });
+    }
   } catch (error) {
     try {
-      await stopComponents(healthServer, queue);
+      await stopComponents(healthServer, queue, supervisor);
     } catch (shutdownError) {
       log("error", "worker.startup_cleanup_failed", { error: shutdownError });
     }
@@ -264,7 +284,7 @@ export async function startWorker(): Promise<WorkerRuntime> {
     stop(): Promise<void> {
       stopPromise ??= (async () => {
         log("info", "worker.stopping");
-        await stopComponents(healthServer, queue);
+        await stopComponents(healthServer, queue, supervisor);
         log("info", "worker.stopped");
       })();
       return stopPromise;

@@ -1,12 +1,14 @@
 import type {
   CandidateDto,
   CandidateStatus,
+  EffectiveTier,
   FeedbackCreate,
   FeedbackDto,
   NoveltyStatus,
   ResearchQuestionCreate,
   ResearchQuestionDto,
   ScoreRecordDto,
+  TierOverride,
 } from "@asi/contracts";
 
 import { apiJson } from "@/components/csrf-client";
@@ -65,6 +67,7 @@ async function postJson<T>(url: string, body: unknown): Promise<T> {
 
 export type CandidateFilterParams = Readonly<{
   status?: CandidateStatus | "";
+  tier?: EffectiveTier | "";
   noveltyStatus?: NoveltyStatus | "";
   minFit?: number | "";
   maxFit?: number | "";
@@ -85,6 +88,7 @@ export function candidateQueryString(params: CandidateFilterParams): string {
   query.set("page", String(page));
   query.set("pageSize", String(pageSize));
   if (params.status) query.set("status", params.status);
+  if (params.tier) query.set("tier", params.tier);
   if (params.noveltyStatus) query.set("noveltyStatus", params.noveltyStatus);
   for (const key of [
     "minFit",
@@ -156,6 +160,29 @@ export async function updateCandidateStatus(
     headers: { "content-type": "application/json" },
     method: "PATCH",
   });
+  return envelope.data;
+}
+
+/** Human tier override (REDESIGN_PLAN §2.1). Audited server-side: writes
+ * tier_override + investment feedback + a candidate.tier_overridden audit
+ * event; engine routing never clobbers a human tier. */
+export type TierMutationResult = Readonly<{
+  id: string;
+  status: CandidateStatus;
+  tierOverride: TierOverride | null;
+  tierSource: "engine" | "human";
+  effectiveTier: EffectiveTier;
+}>;
+
+export async function setCandidateTier(
+  candidateId: string,
+  tier: TierOverride,
+  note?: string,
+): Promise<TierMutationResult> {
+  const envelope = await postJson<SuccessEnvelope<TierMutationResult>>(
+    `/api/v1/candidates/${candidateId}/tier`,
+    { tier, ...(note === undefined || note.trim() === "" ? {} : { note: note.trim() }) },
+  );
   return envelope.data;
 }
 
@@ -265,6 +292,81 @@ export async function resolveCompanyIdentities(
     unique.map(async (companyId) => {
       const identity = await getCompanyIdentity(companyId, signal);
       return [companyId, identity] as const;
+    }),
+  );
+  return new Map(entries);
+}
+
+// ---------------------------------------------------------------------------
+// Per-row feature facts (revenue band / ownership)
+// ---------------------------------------------------------------------------
+
+/**
+ * Feature-snapshot slice of GET /api/v1/candidates/[id] used for the table's
+ * Revenue band and Ownership columns plus their client-side filters. Like the
+ * identity slice above, this is a documented N+1 workaround: the list API
+ * does not join feature snapshots. Results are cached briefly per candidate.
+ */
+export type CandidateRowFacts = Readonly<{
+  revenueBand: string | null;
+  ownershipType: string | null;
+}>;
+
+const NO_FACTS: CandidateRowFacts = { revenueBand: null, ownershipType: null };
+
+const factsCache = new Map<string, { value: CandidateRowFacts; expires: number }>();
+const FACTS_TTL_MS = 60_000;
+
+function factsFromDetail(detail: {
+  featureSnapshot: { features: Record<string, unknown> } | null;
+}): CandidateRowFacts {
+  const snapshot = detail.featureSnapshot;
+  if (snapshot === null) return NO_FACTS;
+  const features = snapshot.features;
+  const ownership = features["ownership"];
+  const nestedOwnershipType =
+    typeof ownership === "object" && ownership !== null
+      ? (ownership as Record<string, unknown>)["ownershipType"]
+      : undefined;
+  return {
+    revenueBand: text(features["revenue_band"]),
+    ownershipType:
+      text(nestedOwnershipType) ?? text(features["ownership_type"]),
+  };
+}
+
+export async function getCandidateFacts(
+  candidateId: string,
+  signal: AbortSignal,
+): Promise<CandidateRowFacts> {
+  const cached = factsCache.get(candidateId);
+  if (cached !== undefined && cached.expires > Date.now()) return cached.value;
+  try {
+    const detail = await getCandidateDetail(candidateId, signal);
+    if (signal.aborted) return NO_FACTS;
+    const value = factsFromDetail(detail);
+    factsCache.set(candidateId, {
+      value,
+      expires: Date.now() + FACTS_TTL_MS,
+    });
+    return value;
+  } catch (error) {
+    if (signal.aborted) throw error;
+    // A missing/unreadable snapshot must not break the whole table row.
+    return NO_FACTS;
+  }
+}
+
+/** Resolve feature facts for every candidate on one page, in parallel. */
+export async function resolveCandidateFacts(
+  candidateIds: readonly string[],
+  signal: AbortSignal,
+): Promise<Map<string, CandidateRowFacts>> {
+  const unique = [...new Set(candidateIds)];
+  const entries = await Promise.all(
+    unique.map(async (candidateId) => {
+      const facts = await getCandidateFacts(candidateId, signal);
+      return [candidateId, facts] as const;
     }),
   );
   return new Map(entries);
