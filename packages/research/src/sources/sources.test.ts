@@ -1,0 +1,364 @@
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+
+import { getSearchableSources, SOURCE_CATALOG } from "./catalog.js";
+import { SamApiKeyMissingError, SamEntityClient } from "./sam.js";
+import { SourceFetchError } from "./types.js";
+import {
+  AIRCRAFT_COMPONENT_PSC,
+  AEROSPACE_NAICS,
+  USASPENDING_SEARCH_URL,
+  UsaspendingClient,
+} from "./usaspending.js";
+
+function loadFixture(name: string): unknown {
+  const path = new URL(`./fixtures/${name}.json`, import.meta.url);
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+
+/** Test seam: builds a Response without touching the network (many call sites). */
+function jsonResponse(body: unknown, status = 200): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
+
+type FetchSpy = {
+  calls: { url: string; init: RequestInit | undefined }[];
+  respond: (url: string, init?: RequestInit) => Response | Promise<Response>;
+};
+
+/** Test seam/DI boundary: records calls so tests assert request shape + count. */
+function fetchSpy(respond: FetchSpy["respond"]): {
+  spy: FetchSpy;
+  fetchImpl: typeof fetch;
+} {
+  const spy: FetchSpy = { calls: [], respond };
+  const fetchImpl = (async (
+    input: RequestInfo | URL,
+    init?: RequestInit,
+  ) => {
+    const url = String(input);
+    spy.calls.push({ url, init });
+    return await spy.respond(url, init);
+  }) as unknown as typeof fetch;
+  return { spy, fetchImpl };
+}
+
+const noSleep = async () => {};
+
+const FY_WINDOW = { startDate: "2021-01-01", endDate: "2026-01-01" };
+
+describe("UsaspendingClient aggregation", () => {
+  it("aggregates rows into one LeadCandidate per recipient with exact sums, counts, freshest date", async () => {
+    const pages = [
+      loadFixture("usaspending-page1"),
+      loadFixture("usaspending-page2"),
+    ];
+    const { spy, fetchImpl } = fetchSpy((_url, init) =>
+      jsonResponse(pages[Number(JSON.parse(String(init?.body)).page) - 1]),
+    );
+    const client = new UsaspendingClient({
+      fetchImpl,
+      sleep: noSleep,
+      pageSize: 4, // page1 fills a full page -> forces the page-2 request
+      maxPages: 5,
+    });
+
+    const leads = await client.searchRecipients({
+      naicsCodes: [...AEROSPACE_NAICS],
+      timePeriod: FY_WINDOW,
+    });
+
+    expect(spy.calls).toHaveLength(2);
+    expect(spy.calls[0]!.url).toBe(USASPENDING_SEARCH_URL);
+
+    // 6 award rows collapse into 4 distinct recipients.
+    expect(leads).toHaveLength(4);
+
+    // Multi-award aggregate case spanning both pages:
+    const aero = leads.find(
+      (l) => l.rawName === "Aero Structures Manufacturing Inc",
+    );
+    expect(aero).toMatchObject({
+      uei: "AAA111111111",
+      awardCount: 3,
+      totalAwardValueUsd: 220_500.0, // 120000.00 + 80500.25 + 19999.75
+      freshestAwardDate: "2025-02-20",
+      source: "usaspending",
+    });
+    expect(aero!.sourceLocator).toContain("recipient_name=Aero+Structures");
+
+    const desert = leads.find(
+      (l) => l.rawName === "Desert Tooling & Machine Co",
+    );
+    expect(desert).toMatchObject({
+      awardCount: 1,
+      totalAwardValueUsd: 7_250.5,
+      freshestAwardDate: "2021-08-02",
+    });
+    // Recipient with no UEI still yields a candidate; locator omits uei.
+    expect(desert!.uei).toBeUndefined();
+    expect(desert!.sourceLocator).not.toContain("uei=");
+  });
+
+  it("respects the maxPages budget bound even when more pages exist", async () => {
+    const { spy, fetchImpl } = fetchSpy(() =>
+      // Server has >= 3 pages of results (every response is a full page).
+      jsonResponse(loadFixture("usaspending-page1")),
+    );
+    const client = new UsaspendingClient({
+      fetchImpl,
+      sleep: noSleep,
+      pageSize: 2, // fixtures hold >2 rows so pagination wants to continue
+      maxPages: 2,
+    });
+
+    const leads = await client.searchRecipients({ timePeriod: FY_WINDOW });
+
+    expect(spy.calls).toHaveLength(2);
+    // Aggregated exactly from the two served (identical full) pages: an
+    // unbounded loop would have kept fetching and inflated these counts.
+    const aero = leads.find(
+      (l) => l.rawName === "Aero Structures Manufacturing Inc",
+    );
+    expect(aero!.awardCount).toBe(4); // 2 rows/page x 2 pages
+    expect(aero!.totalAwardValueUsd).toBe(401_000.5);
+  });
+
+  it("rate-limit sleeps at least 1000ms between pages but not after the last", async () => {
+    const sleeps: number[] = [];
+    const { fetchImpl } = fetchSpy(() =>
+      jsonResponse(loadFixture("usaspending-page1")),
+    );
+    const client = new UsaspendingClient({
+      fetchImpl,
+      sleep: async (ms) => {
+        sleeps.push(ms);
+      },
+      pageSize: 2,
+      maxPages: 2,
+      requestDelayMs: 50, // clamped up to the contractual minimum
+    });
+
+    await client.searchRecipients({ timePeriod: FY_WINDOW });
+    expect(sleeps).toHaveLength(1); // only between page 1 and page 2
+    expect(sleeps[0]).toBeGreaterThanOrEqual(1000);
+  });
+});
+
+describe("UsaspendingClient error taxonomy", () => {
+  it("classifies HTTP 429 as transient and retries until success", async () => {
+    let callCount = 0;
+    const { spy, fetchImpl } = fetchSpy(() => {
+      callCount += 1;
+      return callCount === 1
+        ? jsonResponse({ error: "throttled" }, 429)
+        : jsonResponse(loadFixture("usaspending-page1"));
+    });
+    const client = new UsaspendingClient({ fetchImpl, sleep: noSleep });
+
+    const leads = await client.searchRecipients({ timePeriod: FY_WINDOW });
+    expect(leads.length).toBeGreaterThan(0);
+    expect(spy.calls).toHaveLength(2); // retried once after the 429
+  });
+
+  it("classifies HTTP 5xx as transient and exhausts retries before failing", async () => {
+    const { spy, fetchImpl } = fetchSpy(() =>
+      jsonResponse({ error: "boom" }, 503),
+    );
+    const client = new UsaspendingClient({
+      fetchImpl,
+      sleep: noSleep,
+      maxRetries: 2,
+    });
+
+    await expect(
+      client.searchRecipients({ timePeriod: FY_WINDOW }),
+    ).rejects.toMatchObject({ transient: true, status: 503 });
+    expect(spy.calls).toHaveLength(3); // initial + 2 retries
+  });
+
+  it("classifies other 4xx as permanent and does not retry", async () => {
+    const { spy, fetchImpl } = fetchSpy(() =>
+      jsonResponse({ error: "bad filter" }, 400),
+    );
+    const client = new UsaspendingClient({
+      fetchImpl,
+      sleep: noSleep,
+      maxRetries: 2,
+    });
+
+    await expect(
+      client.searchRecipients({ timePeriod: FY_WINDOW }),
+    ).rejects.toBeInstanceOf(SourceFetchError);
+    await expect(
+      client.searchRecipients({ timePeriod: FY_WINDOW }),
+    ).rejects.toMatchObject({ transient: false, status: 400 });
+    expect(spy.calls).toHaveLength(2); // one per search attempt, zero retries
+  });
+});
+
+describe("UsaspendingClient schema validation", () => {
+  it("rejects a mutated fixture missing Recipient Name (permanent)", async () => {
+    const broken = structuredClone(loadFixture("usaspending-page1")) as {
+      results: Record<string, unknown>[];
+    };
+    delete broken.results[0]!["Recipient Name"];
+    const { fetchImpl } = fetchSpy(() => jsonResponse(broken));
+    const client = new UsaspendingClient({ fetchImpl, sleep: noSleep });
+
+    await expect(
+      client.searchRecipients({ timePeriod: FY_WINDOW }),
+    ).rejects.toMatchObject({ transient: false });
+  });
+
+  it("sends the documented request shape (award types, fields, limit, page)", async () => {
+    const { spy, fetchImpl } = fetchSpy(() => jsonResponse({ results: [] }));
+    const client = new UsaspendingClient({ fetchImpl, sleep: noSleep });
+
+    await client.searchRecipients({
+      naicsCodes: ["336411"],
+      pscCodes: [...AIRCRAFT_COMPONENT_PSC],
+      timePeriod: { startDate: "2024-01-01", endDate: "2025-01-01" },
+      placeOfPerformanceLocations: [{ state: "KS" }],
+    });
+
+    const body = JSON.parse(String(spy.calls[0]!.init?.body));
+    expect(body).toEqual({
+      filters: {
+        award_type_codes: ["A", "B", "C", "D"],
+        naics_codes: ["336411"],
+        product_or_service_code: [...AIRCRAFT_COMPONENT_PSC],
+        place_of_performance_locations: [{ state: "KS" }],
+        time_period: [{ start_date: "2024-01-01", end_date: "2025-01-01" }],
+      },
+      fields: [
+        "Recipient Name",
+        "Recipient UEI",
+        "Recipient UEI Count",
+        "Award Amount",
+        "Awarding Agency",
+        "Start Date",
+        "Description",
+      ],
+      limit: 100,
+      page: 1,
+    });
+  });
+});
+
+describe("SamEntityClient", () => {
+  it("throws the typed non-transient error when no API key is configured", async () => {
+    const { spy, fetchImpl } = fetchSpy(() => {
+      throw new Error("network must not be touched without a key");
+    });
+    const client = new SamEntityClient({ fetchImpl });
+
+    await expect(client.search({ q: "fastener" })).rejects.toBeInstanceOf(
+      SamApiKeyMissingError,
+    );
+    await expect(client.search({ q: "fastener" })).rejects.toMatchObject({
+      transient: false,
+    });
+    expect(spy.calls).toHaveLength(0); // never fabricated, never called
+  });
+
+  it("maps records onto LeadCandidate and caps page size at 100", async () => {
+    const { spy, fetchImpl } = fetchSpy((url) => {
+      expect(url).toContain("api.sam.gov/entity-information/v3/search");
+      expect(url).toContain("api_key=test-key");
+      return jsonResponse(loadFixture("sam-search"));
+    });
+    const client = new SamEntityClient({
+      apiKey: "test-key",
+      fetchImpl,
+      pageSize: 250, // must be capped to the API's 100
+    });
+
+    const { totalRecords, leads } = await client.search({ q: "aerospace" });
+
+    expect(totalRecords).toBe(2);
+    expect(leads).toHaveLength(2);
+    expect(
+      new URLSearchParams(spy.calls[0]!.url.split("?")[1]).get("size"),
+    ).toBe("100");
+
+    expect(leads[0]).toEqual({
+      rawName: "Helix Fastener Systems Inc",
+      uei: "EEE555555555",
+      cageCode: "8X2Y4",
+      addressLine: "1200 Industrial Pkwy",
+      city: "Wichita",
+      state: "KS",
+      zip: "67209",
+      naics: ["336413", "332722"],
+      awardCount: 0, // registry source: no award data asserted
+      totalAwardValueUsd: 0,
+      source: "sam_gov",
+      sourceLocator: "sam://entity-information/v3/search?uei=EEE555555555",
+    });
+    // Minimal record maps with optional fields absent.
+    expect(leads[1]).toEqual({
+      rawName: "Cascade Hydraulics LLC",
+      uei: "FFF666666666",
+      awardCount: 0,
+      totalAwardValueUsd: 0,
+      source: "sam_gov",
+      sourceLocator: "sam://entity-information/v3/search?uei=FFF666666666",
+    });
+  });
+});
+
+describe("SOURCE_CATALOG", () => {
+  it("registers exactly the five seeded canonical data sources", () => {
+    expect(Object.keys(SOURCE_CATALOG).sort()).toEqual([
+      "Boeing Illustrated Parts Catalog (IPC)",
+      "Online Aerospace Supplier Information System (OASIS)",
+      "Performance Review Institute",
+      "System for Award Management (SAM)",
+      "USAspending",
+    ]);
+  });
+
+  it("marks exactly SAM + USAspending as searchable today", () => {
+    const searchable = getSearchableSources();
+    expect(Object.keys(searchable).sort()).toEqual([
+      "System for Award Management (SAM)",
+      "USAspending",
+    ]);
+    expect(searchable["USAspending"]).toEqual({
+      adapterAvailable: true,
+      accessModel: "public_no_auth",
+      notes: expect.any(String),
+    });
+    expect(searchable["System for Award Management (SAM)"]).toMatchObject({
+      accessModel: "api_key_required",
+    });
+    expect(SOURCE_CATALOG["Performance Review Institute"]).toMatchObject({
+      adapterAvailable: false,
+      accessModel: "paid_subscription",
+    });
+  });
+});
+
+// Live smoke test — opt-in only (ASI_LIVE_SOURCES=1), budget-bounded to a
+// single request (maxRetries 0, maxPages 1).
+describe.skipIf(!process.env.ASI_LIVE_SOURCES)("live USAspending", () => {
+  it("parses at least one real recipient from a bounded query", async () => {
+    const client = new UsaspendingClient({
+      maxPages: 1,
+      maxRetries: 0,
+      timeoutMs: 15_000,
+    });
+    const leads = await client.searchRecipients({
+      naicsCodes: ["3364"],
+      timePeriod: { startDate: "2024-10-01", endDate: "2025-09-30" },
+    });
+    expect(leads.length).toBeGreaterThanOrEqual(1);
+    console.log(
+      `[live] usaspending recipients: ${leads.length}, first: ${JSON.stringify(leads[0])}`,
+    );
+  }, 30_000);
+});

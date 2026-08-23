@@ -1,0 +1,41 @@
+{
+  "page": 1,
+  "results": [
+    {
+      "Recipient Name": "Aero Structures Manufacturing Inc",
+      "Recipient UEI": "AAA111111111",
+      "Recipient UEI Count": 1,
+      "Award Amount": "$120,000.00",
+      "Awarding Agency": "Department of the Air Force",
+      "Start Date": "2023-03-15",
+      "Description": "Machined airframe structural components, firm fixed price"
+    },
+    {
+      "Recipient Name": "Aero Structures Manufacturing Inc",
+      "Recipient UEI": "AAA111111111",
+      "Recipient UEI Count": 1,
+      "Award Amount": "$80,500.25",
+      "Awarding Agency": "Department of the Navy",
+      "Start Date": "2024-06-01",
+      "Description": "Wing spar fittings, second delivery order"
+    },
+    {
+      "Recipient Name": "Precision Gears LLC",
+      "Recipient UEI": "BBB222222222",
+      "Recipient UEI Count": 1,
+      "Award Amount": "$45,000.00",
+      "Awarding Agency": "Department of the Army",
+      "Start Date": "2022-11-30",
+      "Description": "Spare actuator gearing, CAGE-based recipient"
+    },
+    {
+      "Recipient Name": "Sky Avionics Corp",
+      "Recipient UEI": null,
+      "Recipient UEI Count": 0,
+      "Award Amount": "$250,000.00",
+      "Awarding Agency": "Federal Aviation Administration",
+      "Start Date": "2024-01-10",
+      "Description": "Instrument navigation bench evaluation"
+    }
+  ]
+}

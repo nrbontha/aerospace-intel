@@ -1,0 +1,25 @@
+{
+  "totalRecords": 2,
+  "records": [
+    {
+      "ueiUEI": "EEE555555555",
+      "cageCode": "8X2Y4",
+      "legalBusinessName": "Helix Fastener Systems Inc",
+      "registrationStatus": "Active",
+      "physicalAddress": {
+        "addressLine1": "1200 Industrial Pkwy",
+        "city": "Wichita",
+        "stateOrProvinceCode": "KS",
+        "zipCode": "67209",
+        "countryCode": "USA"
+      },
+      "naicsCodes": ["336413", "332722"],
+      "businessTypes": "Manufacturer, Small Business"
+    },
+    {
+      "ueiUEI": "FFF666666666",
+      "legalBusinessName": "Cascade Hydraulics LLC",
+      "registrationStatus": "Active"
+    }
+  ]
+}
