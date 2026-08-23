@@ -1,4 +1,4 @@
-import { eq, inArray, sql } from "drizzle-orm";
+import { inArray, sql } from "drizzle-orm";
 
 import type { FeedbackCreate } from "@asi/contracts";
 
@@ -107,11 +107,13 @@ export async function listFeedbackRecords(
   filters: FeedbackListFilters,
 ): Promise<FeedbackListPage> {
   const conditions = [];
-  if (filters.channel !== undefined) conditions.push(eq(feedback.channel, filters.channel as never));
+  // Conditions reference the raw-SQL alias `feedback f` below; drizzle eq() would
+  // emit table-qualified columns that do not resolve against the alias.
+  if (filters.channel !== undefined) conditions.push(sql`f.channel = ${filters.channel}`);
   if (filters.candidateId !== undefined) {
-    conditions.push(eq(feedback.candidateId, filters.candidateId));
+    conditions.push(sql`f.candidate_id = ${filters.candidateId}`);
   }
-  if (filters.companyId !== undefined) conditions.push(eq(feedback.companyId, filters.companyId));
+  if (filters.companyId !== undefined) conditions.push(sql`f.company_id = ${filters.companyId}`);
   const whereClause =
     conditions.length === 0 ? sql`` : sql` WHERE ${sql.join(conditions, sql` AND `)}`;
   const offset = (filters.page - 1) * filters.pageSize;

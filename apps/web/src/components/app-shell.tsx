@@ -27,7 +27,8 @@ type NavigationItem = Readonly<{
 }>;
 
 const navigation: readonly NavigationItem[] = [
-  { href: "/dashboard", label: "Dashboard" },
+  { href: "/feed", label: "Target Feed" },
+  { href: "/partner-review", label: "Partner Review" },
   { href: "/companies", label: "Companies" },
   { href: "/merges", label: "Merges" },
   { href: "/facilities", label: "Facilities" },

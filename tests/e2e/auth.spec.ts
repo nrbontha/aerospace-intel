@@ -10,7 +10,7 @@ async function signIn(page: Page): Promise<void> {
   await page.getByLabel("Username").fill(email);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.waitForURL(/\/dashboard$/);
+  await page.waitForURL(/\/(dashboard|feed)$/);
 }
 
 test.describe("unauthenticated health", () => {
@@ -50,6 +50,10 @@ test.describe("authentication", () => {
 
   test("signs in and reaches the analyst catalog", async ({ page }) => {
     await signIn(page);
+    await expect(
+      page.getByRole("heading", { name: "Target Feed", exact: true }),
+    ).toBeVisible();
+    await page.goto("/dashboard");
     await expect(
       page.getByRole("heading", { name: "Dashboard", exact: true }),
     ).toBeVisible();

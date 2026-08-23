@@ -59,7 +59,10 @@ export async function GET(request: NextRequest): Promise<Response> {
   try {
     await requireUser();
     const params = request.nextUrl.searchParams;
-    const paging = paginatedQuerySchema.safeParse(Object.fromEntries(params));
+    const paging = paginatedQuerySchema.safeParse({
+      page: params.get("page") ?? undefined,
+      pageSize: params.get("pageSize") ?? undefined,
+    });
     if (!paging.success) {
       return jsonError("validation_failed", "Invalid paging parameters", 400);
     }
