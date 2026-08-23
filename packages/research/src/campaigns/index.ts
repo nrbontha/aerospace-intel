@@ -4,3 +4,4 @@ export * from "./lifecycle.js";
 export * from "./frontier-runner.js";
 export * from "./budget.js";
 export * from "./strategies/index.js";
+export * from "./candidate-research.js";

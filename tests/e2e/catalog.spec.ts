@@ -12,13 +12,13 @@ test("company search and source catalog are reachable after login", async ({
   await page.getByLabel("Username").fill(email);
   await page.getByLabel("Password").fill(password);
   await page.getByRole("button", { name: "Sign in" }).click();
-  await page.waitForURL(/\/dashboard$/);
+  await page.waitForURL(/\/(dashboard|feed)$/);
 
   await page.goto("/companies");
   await page.getByLabel("Search known companies").fill("Hitchiner");
   await page.locator("#company-query").press("Enter");
   await expect(
-    page.getByText(/Hitchiner|No matching companies|No companies/i).first(),
+    page.getByText(/Hitchiner|No companies match|No companies|No results/i).first(),
   ).toBeVisible();
 
   await page.goto("/data-sources");

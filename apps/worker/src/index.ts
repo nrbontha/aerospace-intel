@@ -7,6 +7,7 @@ import { OpenRouterClient } from "@asi/research";
 import { startHealthServer, type HealthServer } from "./health.js";
 import {
   createCampaignProcessHandler,
+  createCandidateResearchHandler,
   createCompanyResearchHandler,
   createDiscoverResearchHandler,
   createLeadsIngestHandler,
@@ -220,6 +221,7 @@ export async function startWorker(): Promise<WorkerRuntime> {
     "research.platform.v1": createPlatformResearchHandler(shared),
     "research.part.v1": createPartResearchHandler(shared),
     "research.discover.v1": createDiscoverResearchHandler(shared),
+    "candidate-research.v1": createCandidateResearchHandler(shared),
     "research.refresh.v1": createRefreshResearchHandler(shared),
   }) satisfies ResearchJobHandlerRegistry;
   let healthServer: HealthServer | undefined;

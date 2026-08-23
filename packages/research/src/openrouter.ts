@@ -3,6 +3,13 @@ import { z } from "zod";
 
 const ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
 const MAX_RESPONSE_BYTES = 5 * 1024 * 1024;
+/**
+ * Some gateways/providers ignore response_format json_schema and reply with
+ * markdown-fenced JSON or prose. The contract line is a no-op for compliant
+ * models; the parse-side repair (parseJsonWithRepair) recovers fenced output.
+ */
+const STRUCTURED_OUTPUT_CONTRACT =
+  "\n\nOutput contract: reply with exactly one raw JSON object that validates against the provided JSON schema. No markdown fences, no prose before or after.";
 
 export type OpenRouterModelRoute = "fast" | "deep";
 export interface OpenRouterModelRouting {
@@ -330,7 +337,7 @@ export class OpenRouterClient {
         body: JSON.stringify({
           model,
           messages: [
-            { role: "system", content: request.systemPrompt },
+            { role: "system", content: request.systemPrompt + STRUCTURED_OUTPUT_CONTRACT },
             { role: "user", content: request.prompt },
           ],
           response_format: {
@@ -416,7 +423,7 @@ async function parseResponse<T>(
     const value =
       message?.parsed !== undefined
         ? message.parsed
-        : parseJson(message?.content ?? null);
+        : parseJsonWithRepair(message?.content ?? null);
     const output = canonicalJson(value);
     const details = responseDetails(envelope, sha256(output));
     if (raw.includes(key) || output.includes(key))
@@ -552,6 +559,25 @@ function parseJson(value: string | null): unknown {
   } catch {
     return undefined;
   }
+}
+/**
+ * Single repair fallback: direct JSON.parse first (compliant-model path,
+ * unchanged), then strip one markdown code fence / surrounding prose.
+ */
+function parseJsonWithRepair(value: string | null): unknown {
+  const direct = parseJson(value);
+  if (direct !== undefined) return direct;
+  const repaired = stripMarkdownFence(value);
+  return repaired === null ? undefined : parseJson(repaired);
+}
+function stripMarkdownFence(value: string | null): string | null {
+  if (value === null) return null;
+  const fenced = value.match(/```(?:json)?\s*([\s\S]*?)```/iu);
+  const body = (fenced?.[1] ?? value).trim();
+  const start = body.indexOf("{");
+  const end = body.lastIndexOf("}");
+  if (start === -1 || end <= start) return null;
+  return body.slice(start, end + 1);
 }
 function canonicalJson(value: unknown): string {
   if (value === null || typeof value !== "object")

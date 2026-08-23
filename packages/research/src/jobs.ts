@@ -15,6 +15,7 @@ export const researchJobNameValues = [
   "research.refresh.v1",
   "campaign-process.v1",
   "leads.ingest.v1",
+  "candidate-research.v1",
 ] as const;
 
 export const researchJobNameSchema = z.enum(researchJobNameValues);
@@ -74,6 +75,13 @@ export const leadsIngestJobPayloadSchema = z.strictObject({
   campaignId: uuidSchema,
 });
 
+export const candidateResearchJobPayloadSchema = z.strictObject({
+  name: z.literal("candidate-research.v1"),
+  researchRunId: uuidSchema,
+  companyId: uuidSchema,
+  domain: z.string().trim().min(1).max(253),
+});
+
 export const researchJobPayloadSchema = z.discriminatedUnion("name", [
   companyResearchJobPayloadSchema,
   sourceResearchJobPayloadSchema,
@@ -83,6 +91,7 @@ export const researchJobPayloadSchema = z.discriminatedUnion("name", [
   refreshResearchJobPayloadSchema,
   campaignProcessJobPayloadSchema,
   leadsIngestJobPayloadSchema,
+  candidateResearchJobPayloadSchema,
 ]);
 
 export type CampaignProcessJobPayload = z.infer<
@@ -110,6 +119,10 @@ export type RefreshResearchJobPayload = z.infer<
 export type ResearchJobPayload = z.infer<typeof researchJobPayloadSchema>;
 
 export type LeadsIngestJobPayload = z.infer<typeof leadsIngestJobPayloadSchema>;
+
+export type CandidateResearchJobPayload = z.infer<
+  typeof candidateResearchJobPayloadSchema
+>;
 
 const jobIdentityShape = {
   name: researchJobNameSchema,
