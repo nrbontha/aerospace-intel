@@ -1,0 +1,2857 @@
+{
+  "generatedAt": "2026-08-23T06:14:01.640Z",
+  "totals": {
+    "companies": 18,
+    "completed": 18,
+    "failed": 0,
+    "cacheHits": 18,
+    "fetchCount": 0,
+    "totalTokens": 61831,
+    "totalCostUsd": 0,
+    "runtimeMs": 9,
+    "aborted": false,
+    "abortReason": null
+  },
+  "perCompany": [
+    {
+      "name": "ACMT",
+      "domain": "acmt-usa.com",
+      "fetchedUrls": [
+        "https://acmt-usa.com/",
+        "https://acmt-usa.com/contact/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "ACMT - Aerospace Manufacturing Technologies",
+          "domain": "acmt-usa.com",
+          "hqState": "CT",
+          "hqCity": "Manchester"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "not stated on fetched pages"
+        },
+        "business": {
+          "descriptionOneLiner": "Aerospace manufacturer providing OEM component fabrication, MRO, 3D printing, and adhesive formatting/packaging services.",
+          "manufacturesProducts": true,
+          "distributes": false,
+          "services": true,
+          "pmaMentioned": false,
+          "proprietaryLanguage": false
+        },
+        "provenance": [
+          {
+            "field": "legalName",
+            "url": "https://acmt-usa.com/",
+            "excerpt": "ACMT - Aerospace Manufacturing Technologies"
+          },
+          {
+            "field": "domain",
+            "url": "https://acmt-usa.com/",
+            "excerpt": "\"@type\":\"WebSite\",\"@id\":\"https:\\/\\/acmt-usa.com\\/#website\",\"url\":\"https:\\/\\/acmt-usa.com\\/\",\"name\":\"ACMT\""
+          },
+          {
+            "field": "hqState",
+            "url": "https://acmt-usa.com/contact/",
+            "excerpt": "369 Progress Drive Manchester, CT 06042 USA"
+          },
+          {
+            "field": "hqCity",
+            "url": "https://acmt-usa.com/contact/",
+            "excerpt": "ACMT Flagship Campus 369 Progress Drive Manchester, CT 06042 USA"
+          },
+          {
+            "field": "descriptionOneLiner",
+            "url": "https://acmt-usa.com/",
+            "excerpt": "Services OEM Component Fabrication Maintenance, Repair and Overhaul (MRO) 3D Printing Formatting & Packaging of Adhesives"
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": "connecticut",
+          "grata": "connecticut",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "state exact after normalization"
+        },
+        {
+          "field": "hq_city",
+          "ours": "manchester",
+          "grata": "manchester",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "city exact after normalization"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "absent on both sides"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "unknown",
+          "grata": "bootstrapped",
+          "verdict": "mismatch",
+          "disagreement": "source_conflict",
+          "note": "keyword mapping diverged (\"not stated on fetched pages\" → unknown, \"Bootstrapped\" → bootstrapped)"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state distribution"
+        },
+        {
+          "field": "services",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": false,
+          "grata": true,
+          "verdict": "mismatch",
+          "disagreement": "unresolved",
+          "note": "grata indicates proprietary language; our extraction said no"
+        },
+        {
+          "field": "description",
+          "ours": "Aerospace manufacturer providing OEM component fabrication, MRO, 3D printing, and adhesive formatting/packaging services.",
+          "grata": "ACMT manufactures aerospace components and delivers engineering-led production services for aviation industry clients; they provide OEM component fabrication, MRO, additive manufacturing, laser processing, robotics/automation, and custom turnkey solutions and position themselves on engineering capability and proprietary automation technology.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 4132,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "ADPma, LLC",
+      "domain": "adpma.com",
+      "fetchedUrls": [
+        "https://adpma.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "ADPma, LLC",
+          "domain": "adpma.com",
+          "hqState": "TN",
+          "hqCity": "Piney Flats"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "privately held (LLC)"
+        },
+        "business": {
+          "descriptionOneLiner": "Leading OEM and FAA-PMA aftermarket supplier of precision proprietary aircraft parts to the global commercial aviation and defense sectors.",
+          "manufacturesProducts": true,
+          "distributes": false,
+          "services": false,
+          "pmaMentioned": true,
+          "proprietaryLanguage": true
+        },
+        "provenance": [
+          {
+            "field": "legalName",
+            "url": "https://adpma.com/",
+            "excerpt": "ADPma, LLC | Delivering Advanced Solutions"
+          },
+          {
+            "field": "domain",
+            "url": "https://adpma.com/",
+            "excerpt": "ADPma, LLC | Delivering Advanced Solutions"
+          },
+          {
+            "field": "hqState",
+            "url": "https://adpma.com/",
+            "excerpt": "Address : 401 Century Court, Piney Flats, TN 37686"
+          },
+          {
+            "field": "hqCity",
+            "url": "https://adpma.com/",
+            "excerpt": "Address : 401 Century Court, Piney Flats, TN 37686"
+          },
+          {
+            "field": "ownershipType",
+            "url": "https://adpma.com/",
+            "excerpt": "Copyright © 2022 ADPma, LLC . All Rights Reserved."
+          },
+          {
+            "field": "descriptionOneLiner",
+            "url": "https://adpma.com/",
+            "excerpt": "ADPma is a leading OEM and FAA-PMA aftermarket supplier of precision proprietary aircraft parts to the global commercial aviation and defense sectors."
+          },
+          {
+            "field": "manufacturesProducts",
+            "url": "https://adpma.com/",
+            "excerpt": "We specialize in the design, engineering, certification, manufacturing, and sale of proprietary precision aircraft parts and components."
+          },
+          {
+            "field": "pmaMentioned",
+            "url": "https://adpma.com/",
+            "excerpt": "ADPma is a leading OEM and FAA-PMA aftermarket supplier of precision proprietary aircraft parts"
+          },
+          {
+            "field": "proprietaryLanguage",
+            "url": "https://adpma.com/",
+            "excerpt": "We focus heavily on new PMA development using our own intellectual property and innovative technology"
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": "tennessee",
+          "grata": "tennessee",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "state exact after normalization"
+        },
+        {
+          "field": "hq_city",
+          "ours": "piney flats",
+          "grata": "piney flats",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "city exact after normalization"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "bootstrapped",
+          "grata": "sponsor_backed",
+          "verdict": "mismatch",
+          "disagreement": "source_conflict",
+          "note": "keyword mapping diverged (\"privately held (LLC)\" → bootstrapped, \"Investor Backed\" → sponsor_backed)"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": false,
+          "grata": true,
+          "verdict": "mismatch",
+          "disagreement": "our_likely_error",
+          "note": "grata indicates distribution; our extraction said no"
+        },
+        {
+          "field": "services",
+          "ours": false,
+          "grata": true,
+          "verdict": "mismatch",
+          "disagreement": "our_likely_error",
+          "note": "grata indicates services; our extraction said no"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate proprietary language"
+        },
+        {
+          "field": "description",
+          "ours": "Leading OEM and FAA-PMA aftermarket supplier of precision proprietary aircraft parts to the global commercial aviation and defense sectors.",
+          "grata": "Adpma, Llc manufactures and supplies proprietary aircraft parts and FAA-PMA aftermarket components to businesses in commercial aviation and defense, serving airlines, OEMs, MROs, distributors, resellers, and leasing companies. They claim engineering-focused capabilities across simple mechanical parts to sensors and complete assemblies, emphasize PMA development using their own intellectual property, and offer low-volume, high-mix manufacturing and OEM product support under license or acquisition.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 2875,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "Aerospace Manufacturing Corporation",
+      "domain": "aero-space.us",
+      "fetchedUrls": [
+        "https://aero-space.us/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "Aerospace Manufacturing Corporation",
+          "domain": "aero-space.us",
+          "hqState": "NJ",
+          "hqCity": "Wallington"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "not stated on fetched pages"
+        },
+        "business": {
+          "descriptionOneLiner": "Manufactures aerospace fasteners including high-strength bolts, screws, pins, studs, and threaded rods for world-class OEM leaders; 100% USA-manufactured.",
+          "manufacturesProducts": true,
+          "distributes": false,
+          "services": false,
+          "pmaMentioned": false,
+          "proprietaryLanguage": false
+        },
+        "provenance": [
+          {
+            "field": "identity.legalName",
+            "url": "https://aero-space.us/",
+            "excerpt": "To achieve this, Aerospace Manufacturing Corp. is committed to continual improvement of our quality management system."
+          },
+          {
+            "field": "identity.domain",
+            "url": "https://aero-space.us/",
+            "excerpt": "\"url\": \"https://aero-space.us/\", \"name\": \"Aerospace Manufacturing\""
+          },
+          {
+            "field": "identity.hqState",
+            "url": "https://aero-space.us/",
+            "excerpt": "P.O. Box 3398, 80 Van Winkle Ave. Wallington, NJ 07057 Tel: 973-472-2300"
+          },
+          {
+            "field": "identity.hqCity",
+            "url": "https://aero-space.us/",
+            "excerpt": "P.O. Box 3398, 80 Van Winkle Ave. Wallington, NJ 07057 Tel: 973-472-2300"
+          },
+          {
+            "field": "business.descriptionOneLiner",
+            "url": "https://aero-space.us/",
+            "excerpt": "We manufacture quality aerospace fasteners, high-strength fasteners, bolts, screws, & threaded rods for world-class OEM leaders. 100% USA-manufactured."
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": "new jersey",
+          "grata": "new jersey",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "state exact after normalization"
+        },
+        {
+          "field": "hq_city",
+          "ours": "wallington",
+          "grata": "wallington",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "city exact after normalization"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "unknown",
+          "grata": "bootstrapped",
+          "verdict": "mismatch",
+          "disagreement": "source_conflict",
+          "note": "keyword mapping diverged (\"not stated on fetched pages\" → unknown, \"Bootstrapped\" → bootstrapped)"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state distribution"
+        },
+        {
+          "field": "services",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state proprietary language"
+        },
+        {
+          "field": "description",
+          "ours": "Manufactures aerospace fasteners including high-strength bolts, screws, pins, studs, and threaded rods for world-class OEM leaders; 100% USA-manufactured.",
+          "grata": "Aerospace Manufacturing Corporation manufactures specialized aerospace fasteners (bolts, screws, pins, studs, threaded rods) and offers built-to-print production using vertically integrated in-house processes. They supply OEMs, helicopter and aircraft manufacturers, defense and maritime fleets, and market themselves as a licensed producer of specific aviation drive-system fasteners and a supplier for mission-critical and spaceflight applications.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 5493,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "Armstrong Manufacturing & Engineering",
+      "domain": "armstrong-mfg.com",
+      "fetchedUrls": [
+        "https://www.armstrong-mfg.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "Armstrong Manufacturing & Engineering",
+          "domain": "armstrong-mfg.com",
+          "hqState": "CA",
+          "hqCity": "Auburn"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "not stated on fetched pages"
+        },
+        "business": {
+          "descriptionOneLiner": "Designs and produces precision machined parts, custom assemblies, and high life-cycle aviation pumps.",
+          "manufacturesProducts": true,
+          "distributes": false,
+          "services": true,
+          "pmaMentioned": false,
+          "proprietaryLanguage": false
+        },
+        "provenance": [
+          {
+            "field": "legalName",
+            "url": "https://www.armstrong-mfg.com/",
+            "excerpt": "Armstrong Manufacturing & Engineering (AME) designs and produces precision machined parts, custom assemblies, and high life-cycle aviation pumps."
+          },
+          {
+            "field": "hqState",
+            "url": "https://www.armstrong-mfg.com/",
+            "excerpt": "Address 12780 Earhart Ave. Auburn CA 95602"
+          },
+          {
+            "field": "hqCity",
+            "url": "https://www.armstrong-mfg.com/",
+            "excerpt": "Address 12780 Earhart Ave. Auburn CA 95602"
+          },
+          {
+            "field": "descriptionOneLiner",
+            "url": "https://www.armstrong-mfg.com/",
+            "excerpt": "Armstrong Manufacturing & Engineering (AME) designs and produces precision machined parts, custom assemblies, and high life-cycle aviation pumps."
+          },
+          {
+            "field": "manufacturesProducts",
+            "url": "https://www.armstrong-mfg.com/",
+            "excerpt": "AME has designed and manufactured our own line of high quality, highly reliable, precision aviation pumps."
+          },
+          {
+            "field": "services",
+            "url": "https://www.armstrong-mfg.com/",
+            "excerpt": "Since 1968 we have provided the highest level of quality, personalized support and value in all facets of the manufacturing process."
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": "california",
+          "grata": "california",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "state exact after normalization"
+        },
+        {
+          "field": "hq_city",
+          "ours": "auburn",
+          "grata": "auburn",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "city exact after normalization"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "unknown",
+          "grata": "bootstrapped",
+          "verdict": "mismatch",
+          "disagreement": "source_conflict",
+          "note": "keyword mapping diverged (\"not stated on fetched pages\" → unknown, \"Bootstrapped\" → bootstrapped)"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state distribution"
+        },
+        {
+          "field": "services",
+          "ours": true,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": false,
+          "grata": true,
+          "verdict": "mismatch",
+          "disagreement": "unresolved",
+          "note": "grata indicates proprietary language; our extraction said no"
+        },
+        {
+          "field": "description",
+          "ours": "Designs and produces precision machined parts, custom assemblies, and high life-cycle aviation pumps.",
+          "grata": "Armstrong Tech Inc designs and manufactures precision machined parts, custom assemblies, and a proprietary line of aviation pumps for aerospace and other industrial customers; they position themselves as a manufacturing and engineering provider with a long operational history and in-house pump design capabilities.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 1836,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "Cole Instrument Corporation",
+      "domain": "cole-switches.com",
+      "fetchedUrls": [
+        "https://cole-switches.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "Cole Instrument",
+          "domain": "cole-switches.com",
+          "hqState": "CA",
+          "hqCity": "Santa Ana"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "not stated on fetched pages"
+        },
+        "business": {
+          "descriptionOneLiner": "AS9100D-certified designer and manufacturer of precision rotary, keylock, illuminated and custom switches for aerospace, commercial and military applications.",
+          "manufacturesProducts": true,
+          "distributes": false,
+          "services": false,
+          "pmaMentioned": false,
+          "proprietaryLanguage": false
+        },
+        "provenance": [
+          {
+            "field": "legalName",
+            "url": "https://cole-switches.com/",
+            "excerpt": "{\"@type\":\"Organization\",\"@id\":\"https://cole-switches.com/#organization\",\"name\":\"Cole Instrument\""
+          },
+          {
+            "field": "domain",
+            "url": "https://cole-switches.com/",
+            "excerpt": "\"url\":\"https://cole-switches.com/\",\"foundingDate\":\"1965\""
+          },
+          {
+            "field": "hqCity",
+            "url": "https://cole-switches.com/",
+            "excerpt": "\"address\":{\"@type\":\"PostalAddress\",\"streetAddress\":\"2650 South Croddy Way, Santa Ana, CA 92704\"}"
+          },
+          {
+            "field": "hqState",
+            "url": "https://cole-switches.com/",
+            "excerpt": "\"address\":{\"@type\":\"PostalAddress\",\"streetAddress\":\"2650 South Croddy Way, Santa Ana, CA 92704\"}"
+          },
+          {
+            "field": "descriptionOneLiner",
+            "url": "https://cole-switches.com/",
+            "excerpt": "AS9100D-certified designer and manufacturer of precision rotary, keylock, illuminated and custom switches for aerospace, commercial and military applications."
+          },
+          {
+            "field": "manufacturesProducts",
+            "url": "https://cole-switches.com/",
+            "excerpt": "After 53 years in the industry, Cole still boasts the title as an industry leader in the engineering and manufacture of switching solutions."
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": "california",
+          "grata": "california",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "state exact after normalization"
+        },
+        {
+          "field": "hq_city",
+          "ours": "santa ana",
+          "grata": "santa ana",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "city exact after normalization"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "unknown",
+          "grata": "bootstrapped",
+          "verdict": "mismatch",
+          "disagreement": "source_conflict",
+          "note": "keyword mapping diverged (\"not stated on fetched pages\" → unknown, \"Bootstrapped\" → bootstrapped)"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state distribution"
+        },
+        {
+          "field": "services",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": false,
+          "grata": true,
+          "verdict": "mismatch",
+          "disagreement": "unresolved",
+          "note": "grata indicates proprietary language; our extraction said no"
+        },
+        {
+          "field": "description",
+          "ours": "AS9100D-certified designer and manufacturer of precision rotary, keylock, illuminated and custom switches for aerospace, commercial and military applications.",
+          "grata": "Cole Instrument Corporation manufactures electromechanical switches and related components for aerospace, military, and commercial customers and offers FAA-certified avionics repair and custom switch solutions. They emphasize decades of industry experience, engineering-focused product development, and the ability to supply switches and encoders tailored for demanding applications.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 1949,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "DAC Engineered Products",
+      "domain": "dac-ep.com",
+      "fetchedUrls": [
+        "https://dac-ep.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "DAC Engineered Products",
+          "domain": "dac-ep.com"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "not stated on fetched pages"
+        },
+        "business": {
+          "descriptionOneLiner": "A leader in the development of FAA PMA parts and CMM repairs, DAC is your cost-saving engineered alternatives to OEM parts, MRO/DER repairs, and OOP Parts.",
+          "manufacturesProducts": true,
+          "distributes": false,
+          "services": true,
+          "pmaMentioned": true,
+          "proprietaryLanguage": false
+        },
+        "provenance": [
+          {
+            "field": "legalName",
+            "url": "https://dac-ep.com/",
+            "excerpt": "\"@type\":[\"Person\",\"Organization\"],\"@id\":\"https://dac-ep.com/#person\",\"name\":\"DAC Engineered Products\""
+          },
+          {
+            "field": "domain",
+            "url": "https://dac-ep.com/",
+            "excerpt": "{\"@type\":\"WebSite\",\"@id\":\"https://dac-ep.com/#website\",\"url\":\"https://dac-ep.com\",\"name\":\"DAC Engineered Products\""
+          },
+          {
+            "field": "descriptionOneLiner",
+            "url": "https://dac-ep.com/",
+            "excerpt": "A leader in the development of FAA PMA parts and CMM repairs, DAC is your cost-saving engineered alternatives to OEM parts, MRO/DER repairs, and OOP Parts."
+          },
+          {
+            "field": "pmaMentioned",
+            "url": "https://dac-ep.com/",
+            "excerpt": "FAA PMA Parts & MRO/DER Repairs - DAC-EP A leader in the development of FAA PMA parts and CMM repairs"
+          },
+          {
+            "field": "services",
+            "url": "https://dac-ep.com/",
+            "excerpt": "Specializing in DER Repairs, PMA components, and PMA brakes"
+          },
+          {
+            "field": "manufacturesProducts",
+            "url": "https://dac-ep.com/",
+            "excerpt": "Specializing in DER Repairs, PMA components, and PMA brakes"
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "hq_city",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "unknown",
+          "grata": "sponsor_backed",
+          "verdict": "mismatch",
+          "disagreement": "source_conflict",
+          "note": "keyword mapping diverged (\"not stated on fetched pages\" → unknown, \"Investor Backed\" → sponsor_backed)"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state distribution"
+        },
+        {
+          "field": "services",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state proprietary language"
+        },
+        {
+          "field": "description",
+          "ours": "A leader in the development of FAA PMA parts and CMM repairs, DAC is your cost-saving engineered alternatives to OEM parts, MRO/DER repairs, and OOP Parts.",
+          "grata": "DAC Engineered Products supplies FAA PMA aftermarket aircraft components and offers MRO/DER repair services, with a focus on PMA brakes and engineered replacements that they present as cost-saving alternatives to OEM parts. They sell primarily to airlines, MRO providers and aircraft operators and position themselves as a partner that delivers certified PMA parts and DER repairs to meet customer requirements while claiming reduced costs and improved reliability.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 4003,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "Fiber Dynamics, Inc.",
+      "domain": "fiberdynamics.net",
+      "fetchedUrls": [
+        "https://fiberdynamics.net/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "Fiber Dynamics Inc.",
+          "domain": "fiberdynamics.net",
+          "hqState": "KS",
+          "hqCity": "Wichita"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "not stated on fetched pages"
+        },
+        "business": {
+          "descriptionOneLiner": "Solution provider for complex aerospace composite challenges, delivering high-performance composites manufacturing for aviation and defense.",
+          "manufacturesProducts": true,
+          "distributes": false,
+          "services": true,
+          "pmaMentioned": false,
+          "proprietaryLanguage": true
+        },
+        "provenance": [
+          {
+            "field": "legalName",
+            "url": "https://fiberdynamics.net/",
+            "excerpt": "© 2026 All Rights Reserved | Fiber Dynamics Inc."
+          },
+          {
+            "field": "hqState",
+            "url": "https://fiberdynamics.net/",
+            "excerpt": "3730 Midco – Wichita, KS 67215"
+          },
+          {
+            "field": "hqCity",
+            "url": "https://fiberdynamics.net/",
+            "excerpt": "3730 Midco – Wichita, KS 67215"
+          },
+          {
+            "field": "descriptionOneLiner",
+            "url": "https://fiberdynamics.net/",
+            "excerpt": "Located in Wichita, Fiber Dynamics is the premier solution provider for complex aerospace composite challenges, delivering innovative, high-performance composites manufacturing for aviation and defens"
+          },
+          {
+            "field": "manufacturesProducts",
+            "url": "https://fiberdynamics.net/",
+            "excerpt": "Aerospace Composite Parts Manufacturing Company, Wichita ... delivering innovative, high-performance composites manufacturing for aviation and defense"
+          },
+          {
+            "field": "services",
+            "url": "https://fiberdynamics.net/",
+            "excerpt": "Composite Solutions Prototyping Design and Testing Production Finishing Delivery"
+          },
+          {
+            "field": "proprietaryLanguage",
+            "url": "https://fiberdynamics.net/",
+            "excerpt": "Exceed your expectations with our proprietary manufacturing process for complex composite or carbon fiber parts with hollow interiors and internal stiffeners."
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": "kansas",
+          "grata": "kansas",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "state exact after normalization"
+        },
+        {
+          "field": "hq_city",
+          "ours": "wichita",
+          "grata": "wichita",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "city exact after normalization"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "unknown",
+          "grata": "sponsor_backed",
+          "verdict": "mismatch",
+          "disagreement": "source_conflict",
+          "note": "keyword mapping diverged (\"not stated on fetched pages\" → unknown, \"Private Equity Add-On\" → sponsor_backed)"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state distribution"
+        },
+        {
+          "field": "services",
+          "ours": true,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate proprietary language"
+        },
+        {
+          "field": "description",
+          "ours": "Solution provider for complex aerospace composite challenges, delivering high-performance composites manufacturing for aviation and defense.",
+          "grata": "Fiber Dynamics, Inc. designs and manufactures engineered composite and carbon-fiber parts for aerospace, aviation, and military customers, providing prototyping, production (using a proprietary LCRTM process), finishing, and delivery. They position themselves as a one-stop provider for complex composite structures and claim capabilities in producing hollow, internally stiffened parts with reduced cycle time, weight savings, and economical certification paths.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 2917,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "Jay- Em Aerospace Corporation",
+      "domain": "jay-em.com",
+      "fetchedUrls": [
+        "https://jay-em.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "Jay-Em Aerospace Corporation",
+          "domain": "jay-em.com",
+          "hqState": "Ohio",
+          "hqCity": "Cuyahoga Falls"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "not stated on fetched pages"
+        },
+        "business": {
+          "descriptionOneLiner": "Production, R&D, and lifecycle support of safety-critical components, parts and assemblies for aviation, space and defense, plus build-to-print solutions.",
+          "manufacturesProducts": true,
+          "distributes": false,
+          "services": true,
+          "pmaMentioned": false,
+          "proprietaryLanguage": false
+        },
+        "provenance": [
+          {
+            "field": "legalName",
+            "url": "https://jay-em.com/",
+            "excerpt": "© 2025 Jay-Em Aerospace Corporation. All rights reserved."
+          },
+          {
+            "field": "domain",
+            "url": "https://jay-em.com/",
+            "excerpt": "{\"@type\":\"WebSite\",\"@id\":\"https://jay-em.com/#website\",\"url\":\"https://jay-em.com\""
+          },
+          {
+            "field": "hqState",
+            "url": "https://jay-em.com/",
+            "excerpt": "75 Marc Avenue • Cuyahoga Falls, Ohio 44223"
+          },
+          {
+            "field": "hqCity",
+            "url": "https://jay-em.com/",
+            "excerpt": "75 Marc Avenue • Cuyahoga Falls, Ohio 44223"
+          },
+          {
+            "field": "descriptionOneLiner",
+            "url": "https://jay-em.com/",
+            "excerpt": "Jay-Em Aerospace Production, R&D, and Lifecycle Support for the Aviation, Space & Defense, Automotive, Oil & Gas industries and more."
+          },
+          {
+            "field": "manufacturesProducts",
+            "url": "https://jay-em.com/",
+            "excerpt": "Because our products are manufactured in-house, Jay-Em has the capability of ensuring products meet our top-level standards."
+          },
+          {
+            "field": "services",
+            "url": "https://jay-em.com/",
+            "excerpt": "SERVICES & CAPABILITIES QMS SPECIAL PROCESSES MANUFACTURING TURNKEY STANDUP PRODUCTION ENGINEERING & TECHNICAL SUPPORT QUALIFICATION TESTING MILITARY AIRCRAFT WHEEL & BRAKE SYSTEMS MRO SUPPORTED AIRFR"
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": "ohio",
+          "grata": "ohio",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "state exact after normalization"
+        },
+        {
+          "field": "hq_city",
+          "ours": "cuyahoga falls",
+          "grata": "cuyahoga falls",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "city exact after normalization"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "unknown",
+          "grata": "bootstrapped",
+          "verdict": "mismatch",
+          "disagreement": "source_conflict",
+          "note": "keyword mapping diverged (\"not stated on fetched pages\" → unknown, \"Bootstrapped\" → bootstrapped)"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state distribution"
+        },
+        {
+          "field": "services",
+          "ours": true,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state proprietary language"
+        },
+        {
+          "field": "description",
+          "ours": "Production, R&D, and lifecycle support of safety-critical components, parts and assemblies for aviation, space and defense, plus build-to-print solutions.",
+          "grata": "Jay- Em Aerospace Corporation manufactures safety‑critical components and assemblies and provides sustainment, prototyping, qualification, and lifecycle support for aviation, space, and defense customers, while also serving automotive and oil & gas manufacturers. They offer build‑to‑print and turnkey production solutions and position themselves around in‑house manufacturing to support rapid prototyping and production process development.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 4241,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "Jet Parts Engineering, LLC",
+      "domain": "jetpartsengineering.com",
+      "fetchedUrls": [
+        "https://www.jetpartsengineering.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "Jet Parts Engineering",
+          "domain": "jetpartsengineering.com",
+          "hqCity": "Seattle"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "not stated on fetched pages"
+        },
+        "business": {
+          "descriptionOneLiner": "Provider of FAA-approved PMA parts, DER repairs, and MRO services for airframe, component, and engine parts.",
+          "manufacturesProducts": true,
+          "distributes": false,
+          "services": true,
+          "pmaMentioned": true,
+          "proprietaryLanguage": false
+        },
+        "provenance": [
+          {
+            "field": "legalName",
+            "url": "https://www.jetpartsengineering.com/",
+            "excerpt": "© 2026 Jet Parts Engineering. All Rights Reserved."
+          },
+          {
+            "field": "domain",
+            "url": "https://www.jetpartsengineering.com/",
+            "excerpt": "https://www.jetpartsengineering.com/"
+          },
+          {
+            "field": "hqCity",
+            "url": "https://www.jetpartsengineering.com/",
+            "excerpt": "In addition to our Seattle headquarters, Jet Parts Engineering has offices around the globe."
+          },
+          {
+            "field": "descriptionOneLiner",
+            "url": "https://www.jetpartsengineering.com/",
+            "excerpt": "With PMA parts, DER repairs, and MRO services, we help airlines and operators minimize downtime and maintain safe, efficient fleets."
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "hq_city",
+          "ours": "seattle",
+          "grata": "seattle",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "city exact after normalization"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "unknown",
+          "grata": "public_subsidiary",
+          "verdict": "mismatch",
+          "disagreement": "source_conflict",
+          "note": "keyword mapping diverged (\"not stated on fetched pages\" → unknown, \"Public Subsidiary\" → public_subsidiary)"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state distribution"
+        },
+        {
+          "field": "services",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state proprietary language"
+        },
+        {
+          "field": "description",
+          "ours": "Provider of FAA-approved PMA parts, DER repairs, and MRO services for airframe, component, and engine parts.",
+          "grata": "Jet Parts Engineering, LLC (JPE) specializes in PMA parts, DER repairs, and MRO services for the aviation industry. The company provides PMA parts for airframe, component, and engine applications, DER repairs for piece part components, and MRO services for accessory component repairs. Its customers include aviation operators and maintenance providers requiring supplemental type certified aircraft parts and repairs.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 2258,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "McNeil Industries",
+      "domain": "mcneilindustries.com",
+      "fetchedUrls": [
+        "https://mcneilindustries.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "McNeil Industries",
+          "domain": "mcneilindustries.com",
+          "hqState": "Ohio",
+          "hqCity": "Painesville"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "privately held"
+        },
+        "business": {
+          "descriptionOneLiner": "Privately held manufacturer specializing in MAXAM® bearings, precision CNC machining, precision guide systems, and sealing & distributed products.",
+          "manufacturesProducts": true,
+          "distributes": true,
+          "services": true,
+          "pmaMentioned": false,
+          "proprietaryLanguage": true
+        },
+        "provenance": [
+          {
+            "field": "legalName",
+            "url": "https://mcneilindustries.com/",
+            "excerpt": "\"@type\": \"Organization\", \"name\": \"McNeil Industries\""
+          },
+          {
+            "field": "domain",
+            "url": "https://mcneilindustries.com/",
+            "excerpt": "\"@type\": \"WebSite\", \"id\": \"https://mcneilindustries.com/#website\", \"url\": \"https://mcneilindustries.com/\", \"name\": \"McNeil Industries\""
+          },
+          {
+            "field": "hqCity",
+            "url": "https://mcneilindustries.com/",
+            "excerpt": "835 Richmond Road Painesville, Ohio 44077 Phone: 440.721.0400"
+          },
+          {
+            "field": "hqState",
+            "url": "https://mcneilindustries.com/",
+            "excerpt": "835 Richmond Road Painesville, Ohio 44077 Phone: 440.721.0400"
+          },
+          {
+            "field": "ownershipType",
+            "url": "https://mcneilindustries.com/",
+            "excerpt": "a leading, privately-held manufacturer headquartered in Painesville, Ohio"
+          },
+          {
+            "field": "descriptionOneLiner",
+            "url": "https://mcneilindustries.com/",
+            "excerpt": "We specialize in precision machining, including CNC milling, turning and multi–axis capabilities to high-performance bearing & sealing products and value-added assembly services"
+          },
+          {
+            "field": "distributes",
+            "url": "https://mcneilindustries.com/",
+            "excerpt": "Our Sealing & Distributed Products ... McNeil offers a vast inventory of sealing products."
+          },
+          {
+            "field": "services",
+            "url": "https://mcneilindustries.com/",
+            "excerpt": "we offer comprehensive value-added assembly services. This includes the assembly and welding of components to form specialized subassemblies and fabrications."
+          },
+          {
+            "field": "proprietaryLanguage",
+            "url": "https://mcneilindustries.com/",
+            "excerpt": "McNeil Industries introduces MAXAM® Bearings, celebrated as “The Problem Solver” in industrial settings."
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": "ohio",
+          "grata": "ohio",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "state exact after normalization"
+        },
+        {
+          "field": "hq_city",
+          "ours": "painesville",
+          "grata": "painesville",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "city exact after normalization"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "bootstrapped",
+          "grata": "bootstrapped",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "same ownership group after keyword mapping"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": true,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state distribution"
+        },
+        {
+          "field": "services",
+          "ours": true,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": true,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state proprietary language"
+        },
+        {
+          "field": "description",
+          "ours": "Privately held manufacturer specializing in MAXAM® bearings, precision CNC machining, precision guide systems, and sealing & distributed products.",
+          "grata": "McNeil Industries manufactures MAXAM® industrial bearings and provides precision CNC machining, guide systems, sealing products, value-added assembly, and inventory management for industrial and aerospace/defense customers. They position themselves as a strategic partner offering engineered bearing solutions that operate in harsh conditions and precision components that reduce downtime and support production requirements.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 5691,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "Romco Manufacturing",
+      "domain": "romco.net",
+      "fetchedUrls": [
+        "https://www.romco.net/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "ROMCO Manufacturing",
+          "domain": "romco.net",
+          "hqState": "Texas",
+          "hqCity": "Deer Park"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "Family owned and run at founding (1975); current ownership structure not stated on page"
+        },
+        "business": {
+          "descriptionOneLiner": "Precision-machined parts manufacturer serving gas/steam turbine customers in oil & gas plus military, aerospace, and packaging/brewing industries.",
+          "manufacturesProducts": true,
+          "distributes": false,
+          "services": true,
+          "pmaMentioned": false,
+          "proprietaryLanguage": false
+        },
+        "provenance": [
+          {
+            "field": "legalName",
+            "url": "https://www.romco.net/",
+            "excerpt": "© Copyright 2001-2021, All Rights Reserved ROMCO Manufacturing"
+          },
+          {
+            "field": "hqState",
+            "url": "https://www.romco.net/",
+            "excerpt": "Romco Manufacturing is located about twenty minutes South East of Houston, Texas in Deer Park, Texas."
+          },
+          {
+            "field": "hqCity",
+            "url": "https://www.romco.net/",
+            "excerpt": "Romco Manufacturing is located about twenty minutes South East of Houston, Texas in Deer Park, Texas."
+          },
+          {
+            "field": "ownershipType",
+            "url": "https://www.romco.net/",
+            "excerpt": "We started in 1975 as a small, family owned and run, repair machine shop."
+          },
+          {
+            "field": "descriptionOneLiner",
+            "url": "https://www.romco.net/",
+            "excerpt": "We have since grown into a full service manufacturing facility that is currently satisfying Gas/Steam turbine customers in the Oil and Gas industry"
+          },
+          {
+            "field": "manufacturesProducts",
+            "url": "https://www.romco.net/",
+            "excerpt": "Your custom manufactured and/or Machined replacement part needs are our business"
+          },
+          {
+            "field": "services",
+            "url": "https://www.romco.net/",
+            "excerpt": "We have since grown into a full service manufacturing facility"
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": "texas",
+          "grata": "texas",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "state exact after normalization"
+        },
+        {
+          "field": "hq_city",
+          "ours": "deer park",
+          "grata": "deer park",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "city exact after normalization"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "absent on both sides"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "bootstrapped",
+          "grata": "bootstrapped",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "same ownership group after keyword mapping"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state distribution"
+        },
+        {
+          "field": "services",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state proprietary language"
+        },
+        {
+          "field": "description",
+          "ours": "Precision-machined parts manufacturer serving gas/steam turbine customers in oil & gas plus military, aerospace, and packaging/brewing industries.",
+          "grata": "Romco Manufacturing provides custom precision machined parts and contract manufacturing services for business customers in industrial sectors including oil and gas, military/defense, aerospace, packaging/brewing, power generation, medical, and food processing. They market themselves as a full-service manufacturing facility that can meet urgent delivery needs and remain operational during disruptions.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 2600,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "Rosen Aviation",
+      "domain": "rosenaviation.com",
+      "fetchedUrls": [
+        "https://www.rosenaviation.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "Rosen Aviation, LLC",
+          "domain": "rosenaviation.com",
+          "hqState": "Oregon",
+          "hqCity": "Eugene"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "Limited liability company (LLC)"
+        },
+        "business": {
+          "descriptionOneLiner": "Specializes in building and designing custom aircraft cabin displays and cabin management systems for private and chartered jets.",
+          "manufacturesProducts": true,
+          "distributes": false,
+          "services": false,
+          "pmaMentioned": false,
+          "proprietaryLanguage": false
+        },
+        "provenance": [
+          {
+            "field": "legalName",
+            "url": "https://www.rosenaviation.com/",
+            "excerpt": "\"@type\": \"ProfessionalService\", \"name\": \"Rosen Aviation, LLC\""
+          },
+          {
+            "field": "domain",
+            "url": "https://www.rosenaviation.com/",
+            "excerpt": "\"url\":\"https:\\/\\/www.rosenaviation.com\\/\","
+          },
+          {
+            "field": "hqState",
+            "url": "https://www.rosenaviation.com/",
+            "excerpt": "\"streetAddress\":\"1020 Owen Loop South\",\"postalCode\":\"97402\",\"addressLocality\":\"Eugene\",\"addressRegion\":\"Oregon\",\"addressCountry\":\"US\""
+          },
+          {
+            "field": "hqCity",
+            "url": "https://www.rosenaviation.com/",
+            "excerpt": "\"streetAddress\":\"1020 Owen Loop South\",\"postalCode\":\"97402\",\"addressLocality\":\"Eugene\",\"addressRegion\":\"Oregon\",\"addressCountry\":\"US\""
+          },
+          {
+            "field": "ownershipType",
+            "url": "https://www.rosenaviation.com/",
+            "excerpt": "Rosen Aviation, LLC 1020 Owen Loop South Eugene, Oregon 97402"
+          },
+          {
+            "field": "descriptionOneLiner",
+            "url": "https://www.rosenaviation.com/",
+            "excerpt": "Rosen specializes in building and designing custom aircraft cabin displays & cabin management systems for private and chartered jets."
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": "oregon",
+          "grata": "oregon",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "state exact after normalization"
+        },
+        {
+          "field": "hq_city",
+          "ours": "eugene",
+          "grata": "eugene",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "city exact after normalization"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "absent on both sides"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "unknown",
+          "grata": "public_subsidiary",
+          "verdict": "mismatch",
+          "disagreement": "source_conflict",
+          "note": "keyword mapping diverged (\"Limited liability company (LLC)\" → unknown, \"Public Subsidiary\" → public_subsidiary)"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state distribution"
+        },
+        {
+          "field": "services",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state proprietary language"
+        },
+        {
+          "field": "description",
+          "ours": "Specializes in building and designing custom aircraft cabin displays and cabin management systems for private and chartered jets.",
+          "grata": "Rosen Aviation, LLC supplies custom aircraft cabin electronics and passenger entertainment systems to airlines and aviation customers, offering IFE platforms, cabin displays, audio solutions, and related software while positioning themselves as a specialized cabin-technology partner that provides custom-designed solutions and R&D for cabin experiences.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 3539,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "Servotronics, Inc.",
+      "domain": "servotronics.com",
+      "fetchedUrls": [
+        "https://www.servotronics.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "Servotronics Inc",
+          "domain": "servotronics.com",
+          "hqState": "NY",
+          "hqCity": "Elma"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "not stated on fetched pages"
+        },
+        "business": {
+          "descriptionOneLiner": "Premier manufacturer of single and two-stage servo valves serving the aerospace industry.",
+          "manufacturesProducts": true,
+          "distributes": false,
+          "services": false,
+          "pmaMentioned": false,
+          "proprietaryLanguage": false
+        },
+        "provenance": [
+          {
+            "field": "legalName",
+            "url": "https://www.servotronics.com/",
+            "excerpt": "© 2025 Servotronics Inc | www.servotronics.com | Your Partner for Performance."
+          },
+          {
+            "field": "hqState",
+            "url": "https://www.servotronics.com/",
+            "excerpt": "Corporate Office: 1110 Maple Road PO Box 300 Elma, NY 14059"
+          },
+          {
+            "field": "hqCity",
+            "url": "https://www.servotronics.com/",
+            "excerpt": "Corporate Office: 1110 Maple Road PO Box 300 Elma, NY 14059"
+          },
+          {
+            "field": "descriptionOneLiner",
+            "url": "https://www.servotronics.com/",
+            "excerpt": "Servotronics is a premier manufacturer of single and two-stage servo valves."
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": "new york",
+          "grata": "new york",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "state exact after normalization"
+        },
+        {
+          "field": "hq_city",
+          "ours": "elma",
+          "grata": "elma",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "city exact after normalization"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "absent on both sides"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "unknown",
+          "grata": "public_subsidiary",
+          "verdict": "mismatch",
+          "disagreement": "source_conflict",
+          "note": "keyword mapping diverged (\"not stated on fetched pages\" → unknown, \"Public Subsidiary\" → public_subsidiary)"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state distribution"
+        },
+        {
+          "field": "services",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state proprietary language"
+        },
+        {
+          "field": "description",
+          "ours": "Premier manufacturer of single and two-stage servo valves serving the aerospace industry.",
+          "grata": "Servotronics, Inc. designs and manufactures servo drives, motion controllers, power electronics, and embedded control modules for OEMs and system integrators in industries that require integrated motion control. They offer off-the-shelf products (drives, controllers, power supplies, evaluation boards) alongside custom engineering and turnkey motion system development, and they position themselves around providing both standard components and tailored OEM solutions for equipment manufacturers.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 2030,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "Skybolt Aerospace Fasteners",
+      "domain": "skybolt.com",
+      "fetchedUrls": [
+        "https://www.skybolt.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "Skybolt Aerospace Fasteners",
+          "domain": "skybolt.com"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "Independent manufacturer; page states it is not affiliated with Howmet Aerospace Inc. or Southco, Inc."
+        },
+        "business": {
+          "descriptionOneLiner": "U.S. manufacturer and distributor of high-grade stainless steel quarter-turn panel fasteners, grommets, and receptacles for aerospace.",
+          "manufacturesProducts": true,
+          "distributes": true,
+          "services": false,
+          "pmaMentioned": false,
+          "proprietaryLanguage": true
+        },
+        "provenance": [
+          {
+            "field": "identity.legalName",
+            "url": "https://www.skybolt.com/",
+            "excerpt": "\"@type\":\"Organization\",\"@id\":\"https://www.skybolt.com/#/schema/Organization\",\"name\":\"Skybolt Aerospace Fasteners\""
+          },
+          {
+            "field": "identity.domain",
+            "url": "https://www.skybolt.com/",
+            "excerpt": "\"@type\":\"WebSite\",\"@id\":\"https://www.skybolt.com/#/schema/WebSite\",\"url\":\"https://www.skybolt.com/\""
+          },
+          {
+            "field": "ownership.ownershipType",
+            "url": "https://www.skybolt.com/",
+            "excerpt": "Skybolt® and its products is not affiliated with Howmet Aerospace Inc. or Southco, Inc. Skybolt Aerospace Fasteners is an independent manufacturer."
+          },
+          {
+            "field": "business.descriptionOneLiner",
+            "url": "https://www.skybolt.com/",
+            "excerpt": "As a U.S. Manufacturer & Distributor of the Highest Grade Stainless Steel Quarter Turn Panel Fasteners, Grommets, & Receptacles, and Other Fastening Solutions"
+          },
+          {
+            "field": "business.manufacturesProducts",
+            "url": "https://www.skybolt.com/",
+            "excerpt": "As a U.S. Manufacturer & Distributor of the Highest Grade Stainless Steel Quarter Turn Panel Fasteners, Grommets, & Receptacles"
+          },
+          {
+            "field": "business.distributes",
+            "url": "https://www.skybolt.com/",
+            "excerpt": "As a U.S. Manufacturer & Distributor of the Highest Grade Stainless Steel Quarter Turn Panel Fasteners, Grommets, & Receptacles"
+          },
+          {
+            "field": "business.proprietaryLanguage",
+            "url": "https://www.skybolt.com/",
+            "excerpt": "Patents That Are out of This World...Literally! Designs Tier I, II, and III Approved with Commercial & Defense Industries"
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "hq_city",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "bootstrapped",
+          "grata": "bootstrapped",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "same ownership group after keyword mapping"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate distribution"
+        },
+        {
+          "field": "services",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate proprietary language"
+        },
+        {
+          "field": "description",
+          "ours": "U.S. manufacturer and distributor of high-grade stainless steel quarter-turn panel fasteners, grommets, and receptacles for aerospace.",
+          "grata": "Skybolt Aerospace Fasteners designs, manufactures, and distributes aerospace-grade quarter-turn panel fasteners, grommets, and receptacles for aviation, defense, and high-performance vehicle applications. They sell to OEMs, military programs, general aviation maintenance organizations, and racing teams, and emphasize rapid lead times, a lightweight product line (Skytanium), patented designs, and tools to simplify fastener selection.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 7614,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "Skylock Industries",
+      "domain": "skylock.com",
+      "fetchedUrls": [
+        "https://www.skylock.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "Skylock Industries, Inc.",
+          "domain": "skylock.com"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "not stated on fetched pages"
+        },
+        "business": {
+          "descriptionOneLiner": "Leader in designing and manufacturing superior quality operating hardware for both commercial and military applications since 1974.",
+          "manufacturesProducts": true,
+          "distributes": false,
+          "services": true,
+          "pmaMentioned": true,
+          "proprietaryLanguage": false
+        },
+        "provenance": [
+          {
+            "field": "legalName",
+            "url": "https://www.skylock.com/",
+            "excerpt": "© Skylock Industries, Inc. All Rights Reserved."
+          },
+          {
+            "field": "domain",
+            "url": "https://www.skylock.com/",
+            "excerpt": "{\"url\":\"https://www.skylock.com\",\"name\":\"Skylock\""
+          },
+          {
+            "field": "descriptionOneLiner",
+            "url": "https://www.skylock.com/",
+            "excerpt": "Skylock has been a leader in designing and manufacturing superior quality operating hardware for both commercial and military applications since 1974."
+          },
+          {
+            "field": "manufacturesProducts",
+            "url": "https://www.skylock.com/",
+            "excerpt": "We engineer and fabricate parts for Boeing, Spirit AeroSystems and Bell Helicopters to name a few"
+          },
+          {
+            "field": "services",
+            "url": "https://www.skylock.com/",
+            "excerpt": "Our engineering department has decades of industry experience. Developing a product from SCD (Source Control Drawings) to PMA (Parts Manufacturer Approval)"
+          },
+          {
+            "field": "pmaMentioned",
+            "url": "https://www.skylock.com/",
+            "excerpt": "Developing a product from SCD (Source Control Drawings) to PMA (Parts Manufacturer Approval), our engineers are equipped to create your part"
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "hq_city",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "unknown",
+          "grata": "bootstrapped",
+          "verdict": "mismatch",
+          "disagreement": "source_conflict",
+          "note": "keyword mapping diverged (\"not stated on fetched pages\" → unknown, \"Bootstrapped\" → bootstrapped)"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state distribution"
+        },
+        {
+          "field": "services",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state proprietary language"
+        },
+        {
+          "field": "description",
+          "ours": "Leader in designing and manufacturing superior quality operating hardware for both commercial and military applications since 1974.",
+          "grata": "Skylock Industries manufactures and engineers precision metal components and operating hardware for aerospace and defense customers. They provide end-to-end services from engineering and tooling to machining and fabrication of difficult-to-machine materials like titanium and Inconel, and they claim capabilities to shorten lead times and produce parts to SCD or PMA requirements with military approvals.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 2244,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "Southwest Antennas",
+      "domain": "southwestantennas.com",
+      "fetchedUrls": [
+        "https://southwestantennas.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "Southwest Antennas",
+          "domain": "southwestantennas.com"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "not stated on fetched pages"
+        },
+        "business": {
+          "descriptionOneLiner": "High Performance RF and Microwave Antennas & Custom Antenna Manufacturing",
+          "manufacturesProducts": true,
+          "distributes": false,
+          "services": false,
+          "pmaMentioned": false,
+          "proprietaryLanguage": false
+        },
+        "provenance": [
+          {
+            "field": "legalName",
+            "url": "https://southwestantennas.com/",
+            "excerpt": "Southwest Antennas - High Performance RF and Microwave Antennas & Custom Antenna Manufacturing"
+          },
+          {
+            "field": "descriptionOneLiner",
+            "url": "https://southwestantennas.com/",
+            "excerpt": "Southwest Antennas - High Performance RF and Microwave Antennas & Custom Antenna Manufacturing"
+          },
+          {
+            "field": "manufacturesProducts",
+            "url": "https://southwestantennas.com/",
+            "excerpt": "High Performance RF and Microwave Antennas & Custom Antenna Manufacturing"
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "hq_city",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "absent on both sides"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "unknown",
+          "grata": "public_subsidiary",
+          "verdict": "mismatch",
+          "disagreement": "source_conflict",
+          "note": "keyword mapping diverged (\"not stated on fetched pages\" → unknown, \"Public Subsidiary\" → public_subsidiary)"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state distribution"
+        },
+        {
+          "field": "services",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state proprietary language"
+        },
+        {
+          "field": "description",
+          "ours": "High Performance RF and Microwave Antennas & Custom Antenna Manufacturing",
+          "grata": "Southwest Antennas, Inc. is a manufacturer of high-performance broadband radio frequency and microwave antennas and accessories, headquartered in Poway, California, United States. The company specializes in designing and producing ruggedized components for mission-critical communication, including omni, directional, body-worn, and concealment antennas, as well as filter modules, amplifiers, and mounting solutions. Military and defense agencies, law enforcement, first responders, and commercial operators in sectors such as broadcast video, maritime, and unmanned systems utilize these products to maintain connectivity in demanding real-world environments.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 1140,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "Tempest Aero Group",
+      "domain": "tempestaero.com",
+      "fetchedUrls": [
+        "https://tempestaero.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "Tempest Aero Group",
+          "domain": "tempestaero.com"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "not stated on fetched pages"
+        },
+        "business": {
+          "descriptionOneLiner": "General aviation company supporting a portfolio of independent brands manufacturing ignition, filtration and pneumatic products, fuel systems, instrumentation sensors and probes, fuel pumps and specialty tools for OEM and aftermarket customers.",
+          "manufacturesProducts": true,
+          "distributes": false,
+          "services": true,
+          "pmaMentioned": false,
+          "proprietaryLanguage": true
+        },
+        "provenance": [
+          {
+            "field": "legalName",
+            "url": "https://tempestaero.com/",
+            "excerpt": "{\"@type\":\"Organization\",\"name\":\"Tempest Aero Group\",\"description\":\"General Aviation Brands\"}"
+          },
+          {
+            "field": "domain",
+            "url": "https://tempestaero.com/",
+            "excerpt": "\"url\":\"https:\\/\\/tempestaero.com\\/#website\",\"url\":\"https:\\/\\/tempestaero.com\\/\""
+          },
+          {
+            "field": "business.descriptionOneLiner",
+            "url": "https://tempestaero.com/",
+            "excerpt": "a leading general aviation company supporting a portfolio of independent brands known for manufacturing high-quality ignition, filtration and pneumatic products, fuel systems and components"
+          },
+          {
+            "field": "business.manufacturesProducts",
+            "url": "https://tempestaero.com/",
+            "excerpt": "independent brands known for manufacturing high-quality ignition, filtration and pneumatic products, fuel systems and components, instrumentation sensors and probes, fuel pumps and specialty tools"
+          },
+          {
+            "field": "business.services",
+            "url": "https://tempestaero.com/",
+            "excerpt": "FAA Repair Station Complete overhaul services for RG Lear Romec® fuel pumps and Continental® fuel injection systems."
+          },
+          {
+            "field": "business.proprietaryLanguage",
+            "url": "https://tempestaero.com/",
+            "excerpt": "world-class brands – including Tempest®, Alcor™, Marvel-Schebler®, Precision Airmotive®, Consolidated Fuel Systems™ and Stratus Tool Technologies™"
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "hq_city",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "unknown",
+          "grata": "private_subsidiary",
+          "verdict": "mismatch",
+          "disagreement": "source_conflict",
+          "note": "keyword mapping diverged (\"not stated on fetched pages\" → unknown, \"Private Subsidiary\" → private_subsidiary)"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state distribution"
+        },
+        {
+          "field": "services",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": true,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state proprietary language"
+        },
+        {
+          "field": "description",
+          "ours": "General aviation company supporting a portfolio of independent brands manufacturing ignition, filtration and pneumatic products, fuel systems, instrumentation sensors and probes, fuel pumps and specialty tools for OEM and aftermarket customers.",
+          "grata": "Tempest Aero Group manufactures and supplies engine- and fuel-related components and tools for general aviation and provides sales and marketing support to a portfolio of affiliated brands. They target OEM and aftermarket aviation businesses and claim to aggregate multiple independent brands offering ignition, filtration, pneumatic systems, fuel systems, instrumentation probes, specialty tools and overhaul services.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 3785,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    },
+    {
+      "name": "The PDI Group",
+      "domain": "thepdigroup.com",
+      "fetchedUrls": [
+        "https://www.thepdigroup.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": true,
+      "profile": {
+        "identity": {
+          "legalName": "The PDI Group",
+          "domain": "thepdigroup.com",
+          "hqState": "Ohio",
+          "hqCity": "Solon"
+        },
+        "size": {},
+        "ownership": {
+          "ownershipType": "not stated on fetched pages"
+        },
+        "business": {
+          "descriptionOneLiner": "Group of four member companies designing and manufacturing weapons handling systems, ground support equipment, aircraft support equipment, defense spares, and flight-critical aerospace components.",
+          "manufacturesProducts": true,
+          "distributes": false,
+          "services": true,
+          "pmaMentioned": false,
+          "proprietaryLanguage": false
+        },
+        "provenance": [
+          {
+            "field": "legalName",
+            "url": "https://www.thepdigroup.com/",
+            "excerpt": "Home | The PDI Group ... © 2025 by The PDI Group"
+          },
+          {
+            "field": "domain",
+            "url": "https://www.thepdigroup.com/",
+            "excerpt": "{\"@context\":\"https://schema.org/\",\"@type\":\"WebSite\",\"name\":\"The PDI Group\",\"url\":\"https://www.thepdigroup.com\"}"
+          },
+          {
+            "field": "hqState",
+            "url": "https://www.thepdigroup.com/",
+            "excerpt": "Mailing Addresses: PDI and KWD 6225 Cochran Rd., Solon, OH 44139"
+          },
+          {
+            "field": "hqCity",
+            "url": "https://www.thepdigroup.com/",
+            "excerpt": "Mailing Addresses: PDI and KWD 6225 Cochran Rd., Solon, OH 44139"
+          },
+          {
+            "field": "descriptionOneLiner",
+            "url": "https://www.thepdigroup.com/",
+            "excerpt": "Today, The PDI Group consists of four member companies - PDI Ground Support Systems, KWD Aircraft Support Equipment , Polytech Defense Spares, and Colinear Aerospace."
+          },
+          {
+            "field": "manufacturesProducts",
+            "url": "https://www.thepdigroup.com/",
+            "excerpt": "a leading designer and manufacturer of weapons handling systems and ground support equipment used primarily by the United States Air Force"
+          },
+          {
+            "field": "services",
+            "url": "https://www.thepdigroup.com/",
+            "excerpt": "Engineering teams within The PDI Group consist of mechanical, industrial and process engineers. We offer full 3D modeling capabilities utilizing SolidWorks software. Custom Engineering"
+          }
+        ]
+      },
+      "extractError": null,
+      "comparisons": [
+        {
+          "field": "hq_state",
+          "ours": "ohio",
+          "grata": "ohio",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "state exact after normalization"
+        },
+        {
+          "field": "hq_city",
+          "ours": "solon",
+          "grata": "solon",
+          "verdict": "match",
+          "disagreement": null,
+          "note": "city exact after normalization"
+        },
+        {
+          "field": "revenue_estimate_usd",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "employees",
+          "ours": null,
+          "grata": null,
+          "verdict": "our_missing",
+          "disagreement": null,
+          "note": "our profile omitted this field"
+        },
+        {
+          "field": "ownership_class",
+          "ours": "unknown",
+          "grata": "bootstrapped",
+          "verdict": "mismatch",
+          "disagreement": "source_conflict",
+          "note": "keyword mapping diverged (\"not stated on fetched pages\" → unknown, \"Bootstrapped\" → bootstrapped)"
+        },
+        {
+          "field": "manufactures_products",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate manufacturing"
+        },
+        {
+          "field": "distributes",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state distribution"
+        },
+        {
+          "field": "services",
+          "ours": true,
+          "grata": true,
+          "verdict": "match",
+          "disagreement": null,
+          "note": "both sides indicate services"
+        },
+        {
+          "field": "pma_mentioned",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state PMA mention"
+        },
+        {
+          "field": "proprietary_language",
+          "ours": false,
+          "grata": null,
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "grata reference does not state proprietary language"
+        },
+        {
+          "field": "description",
+          "ours": "Group of four member companies designing and manufacturing weapons handling systems, ground support equipment, aircraft support equipment, defense spares, and flight-critical aerospace components.",
+          "grata": "The PDI Group designs and manufactures weapons handling systems, aircraft ground support equipment, and defense-grade replacement components for military and aerospace customers. They serve military and government defense organizations and allied air forces, and claim to differentiate through multi-unit manufacturing capabilities, engineering services including 3D modeling, certified quality systems, and an extensive ERP-backed parts database.",
+          "verdict": "incomparable",
+          "disagreement": "incomparable",
+          "note": "free-text descriptions are recorded for coverage only, never scored"
+        }
+      ],
+      "tokens": 3484,
+      "costUsd": 0,
+      "model": "stealth/ox-alpha"
+    }
+  ],
+  "aggregate": {
+    "fieldCoverage": {
+      "hq_state": 0.6666666666666666,
+      "hq_city": 0.7222222222222222,
+      "revenue_estimate_usd": 0,
+      "employees": 0,
+      "ownership_class": 1,
+      "manufactures_products": 1,
+      "distributes": 1,
+      "services": 1,
+      "pma_mentioned": 1,
+      "proprietary_language": 1,
+      "description": 1
+    },
+    "matchRatesByField": {
+      "hq_state": 1,
+      "hq_city": 1,
+      "revenue_estimate_usd": null,
+      "employees": null,
+      "ownership_class": 0.16666666666666666,
+      "manufactures_products": 1,
+      "distributes": 0.5,
+      "services": 0.875,
+      "pma_mentioned": 1,
+      "proprietary_language": 0.5,
+      "description": null
+    },
+    "comparableByField": {
+      "hq_state": 12,
+      "hq_city": 13,
+      "revenue_estimate_usd": 0,
+      "employees": 0,
+      "ownership_class": 18,
+      "manufactures_products": 17,
+      "distributes": 2,
+      "services": 8,
+      "pma_mentioned": 4,
+      "proprietary_language": 6,
+      "description": 0
+    },
+    "disagreementCounts": {
+      "our_likely_error": 2,
+      "grata_likely_error": 0,
+      "date_mismatch": 0,
+      "source_conflict": 15,
+      "incomparable": 76,
+      "unresolved": 3
+    },
+    "overallMatchRate": 0.75
+  }
+}

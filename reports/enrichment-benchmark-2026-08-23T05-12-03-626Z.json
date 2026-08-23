@@ -1,0 +1,338 @@
+{
+  "generatedAt": "2026-08-23T05:12:03.623Z",
+  "totals": {
+    "companies": 18,
+    "completed": 0,
+    "failed": 18,
+    "cacheHits": 0,
+    "fetchCount": 19,
+    "totalTokens": null,
+    "totalCostUsd": null,
+    "runtimeMs": 2422706,
+    "aborted": false,
+    "abortReason": null
+  },
+  "perCompany": [
+    {
+      "name": "ACMT",
+      "domain": "acmt-usa.com",
+      "fetchedUrls": [
+        "https://acmt-usa.com/",
+        "https://acmt-usa.com/contact/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter returned invalid structured output",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "ADPma, LLC",
+      "domain": "adpma.com",
+      "fetchedUrls": [
+        "https://adpma.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter returned invalid structured output",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "Aerospace Manufacturing Corporation",
+      "domain": "aero-space.us",
+      "fetchedUrls": [
+        "https://aero-space.us/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter request was rate limited",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "Armstrong Manufacturing & Engineering",
+      "domain": "armstrong-mfg.com",
+      "fetchedUrls": [
+        "https://www.armstrong-mfg.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter returned invalid structured output",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "Cole Instrument Corporation",
+      "domain": "cole-switches.com",
+      "fetchedUrls": [
+        "https://cole-switches.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter returned invalid structured output",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "DAC Engineered Products",
+      "domain": "dac-ep.com",
+      "fetchedUrls": [
+        "https://dac-ep.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter request was rate limited",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "Fiber Dynamics, Inc.",
+      "domain": "fiberdynamics.net",
+      "fetchedUrls": [
+        "https://fiberdynamics.net/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter request was rate limited",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "Jay- Em Aerospace Corporation",
+      "domain": "jay-em.com",
+      "fetchedUrls": [
+        "https://jay-em.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter returned invalid structured output",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "Jet Parts Engineering, LLC",
+      "domain": "jetpartsengineering.com",
+      "fetchedUrls": [
+        "https://www.jetpartsengineering.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter returned invalid structured output",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "McNeil Industries",
+      "domain": "mcneilindustries.com",
+      "fetchedUrls": [
+        "https://mcneilindustries.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter returned invalid structured output",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "Romco Manufacturing",
+      "domain": "romco.net",
+      "fetchedUrls": [
+        "https://www.romco.net/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter request was rate limited",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "Rosen Aviation",
+      "domain": "rosenaviation.com",
+      "fetchedUrls": [
+        "https://www.rosenaviation.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter returned invalid structured output",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "Servotronics, Inc.",
+      "domain": "servotronics.com",
+      "fetchedUrls": [
+        "https://www.servotronics.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter request was rate limited",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "Skybolt Aerospace Fasteners",
+      "domain": "skybolt.com",
+      "fetchedUrls": [
+        "https://www.skybolt.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter request was rate limited",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "Skylock Industries",
+      "domain": "skylock.com",
+      "fetchedUrls": [
+        "https://www.skylock.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter returned invalid structured output",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "Southwest Antennas",
+      "domain": "southwestantennas.com",
+      "fetchedUrls": [
+        "https://southwestantennas.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter returned invalid structured output",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "Tempest Aero Group",
+      "domain": "tempestaero.com",
+      "fetchedUrls": [
+        "https://tempestaero.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter returned invalid structured output",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    },
+    {
+      "name": "The PDI Group",
+      "domain": "thepdigroup.com",
+      "fetchedUrls": [
+        "https://www.thepdigroup.com/"
+      ],
+      "fetchErrors": [],
+      "fromCache": false,
+      "profile": null,
+      "extractError": "OpenRouter returned invalid structured output",
+      "comparisons": [],
+      "tokens": null,
+      "costUsd": null,
+      "model": null
+    }
+  ],
+  "aggregate": {
+    "fieldCoverage": {
+      "hq_state": 0,
+      "hq_city": 0,
+      "revenue_estimate_usd": 0,
+      "employees": 0,
+      "ownership_class": 0,
+      "manufactures_products": 0,
+      "distributes": 0,
+      "services": 0,
+      "pma_mentioned": 0,
+      "proprietary_language": 0,
+      "description": 0
+    },
+    "matchRatesByField": {
+      "hq_state": null,
+      "hq_city": null,
+      "revenue_estimate_usd": null,
+      "employees": null,
+      "ownership_class": null,
+      "manufactures_products": null,
+      "distributes": null,
+      "services": null,
+      "pma_mentioned": null,
+      "proprietary_language": null,
+      "description": null
+    },
+    "comparableByField": {
+      "hq_state": 0,
+      "hq_city": 0,
+      "revenue_estimate_usd": 0,
+      "employees": 0,
+      "ownership_class": 0,
+      "manufactures_products": 0,
+      "distributes": 0,
+      "services": 0,
+      "pma_mentioned": 0,
+      "proprietary_language": 0,
+      "description": 0
+    },
+    "disagreementCounts": {
+      "our_likely_error": 0,
+      "grata_likely_error": 0,
+      "date_mismatch": 0,
+      "source_conflict": 0,
+      "incomparable": 0,
+      "unresolved": 0
+    },
+    "overallMatchRate": null
+  }
+}
