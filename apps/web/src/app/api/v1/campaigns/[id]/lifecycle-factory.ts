@@ -6,6 +6,7 @@ import type { NextRequest } from "next/server";
 
 import { jsonError, jsonSuccess } from "@/lib/api";
 import { requireRole, verifyCsrfRequest } from "@/lib/auth";
+import { enqueueCampaignProcess } from "@/lib/research-queue";
 
 import { handleCampaignRouteError } from "../shared";
 
@@ -59,6 +60,18 @@ export function createLifecycleRoute(action: "start" | "pause" | "resume" | "can
           ...(body.data.note === undefined ? {} : { note: body.data.note }),
         },
       });
+      // `start` and `resume` must kick the self-perpetuating
+      // campaign-process heartbeat; nothing else enqueues the first job.
+      // If the queue producer fails, compensate by pausing again so the
+      // campaign cannot sit in `running` with no processor.
+      if (action === "start" || action === "resume") {
+        try {
+          await enqueueCampaignProcess(id.data);
+        } catch (enqueueError) {
+          await applyLifecycleAction(id.data, "pause").catch(() => undefined);
+          throw enqueueError;
+        }
+      }
       return jsonSuccess(result.campaign);
     } catch (error) {
       return handleCampaignRouteError(error);

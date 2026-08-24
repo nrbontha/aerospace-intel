@@ -191,12 +191,25 @@ export async function startWorker(): Promise<WorkerRuntime> {
       isQueueReady: () => queue?.isReady() ?? false,
     });
 
-    if (researchWritesAllowed) {
-      const databaseUrl = env.DATABASE_URL;
-      if (databaseUrl === undefined) {
-        throw new Error("DATABASE_URL is required to start the worker");
-      }
+    const databaseUrl = env.DATABASE_URL;
+    if (databaseUrl === undefined) {
+      throw new Error("DATABASE_URL is required to start the worker");
+    }
 
+    // Storage-free pipeline: campaign discovery and lead ingestion touch
+    // only PostgreSQL plus public no-auth APIs (USAspending) — they never
+    // write document bytes, so they run regardless of
+    // RESEARCH_SHARED_STORAGE. Document-dependent research handlers stay
+    // gated below.
+    const handlers: ResearchJobHandlerRegistry = {
+      "leads.ingest.v1": createLeadsIngestHandler({ logger: log }),
+      "campaign-process.v1": createCampaignProcessHandler({
+        queueName: env.RESEARCH_QUEUE_NAME,
+        logger: log,
+      }),
+    };
+
+    if (researchWritesAllowed) {
       const openRouterApiKey = env.OPENROUTER_API_KEY;
       if (openRouterApiKey === undefined) {
         throw new Error("OPENROUTER_API_KEY is required to start the worker");
@@ -213,12 +226,7 @@ export async function startWorker(): Promise<WorkerRuntime> {
           fast: env.OPENROUTER_MODEL_FAST,
         },
       } as const;
-      const handlers = Object.freeze({
-        "leads.ingest.v1": createLeadsIngestHandler({ logger: log }),
-        "campaign-process.v1": createCampaignProcessHandler({
-          queueName: env.RESEARCH_QUEUE_NAME,
-          logger: log,
-        }),
+      Object.assign(handlers, {
         "research.company.v1": createCompanyResearchHandler({
           ...shared,
           maxCostPerDayUsd: env.OPENROUTER_MAX_COST_PER_DAY_USD,
@@ -234,23 +242,23 @@ export async function startWorker(): Promise<WorkerRuntime> {
         "research.discover.v1": createDiscoverResearchHandler(shared),
         "candidate-research.v1": createCandidateResearchHandler(shared),
         "research.refresh.v1": createRefreshResearchHandler(shared),
-      }) satisfies ResearchJobHandlerRegistry;
-
-      log("info", "worker.starting", {
-        concurrency: env.RESEARCH_CONCURRENCY,
-        healthPort: env.PORT,
-        queueName: env.RESEARCH_QUEUE_NAME,
       });
-
-      queue = createWorkerQueue({
-        concurrency: env.RESEARCH_CONCURRENCY,
-        databaseUrl,
-        handlers,
-        logger: log,
-        queueName: env.RESEARCH_QUEUE_NAME,
-      });
-      await queue.start();
     }
+
+    log("info", "worker.starting", {
+      concurrency: env.RESEARCH_CONCURRENCY,
+      healthPort: env.PORT,
+      queueName: env.RESEARCH_QUEUE_NAME,
+    });
+
+    queue = createWorkerQueue({
+      concurrency: env.RESEARCH_CONCURRENCY,
+      databaseUrl,
+      handlers,
+      logger: log,
+      queueName: env.RESEARCH_QUEUE_NAME,
+    });
+    await queue.start();
 
     if (
       process.env.AGENT_SUPERVISOR_ENABLED !== "false" &&
@@ -275,7 +283,7 @@ export async function startWorker(): Promise<WorkerRuntime> {
 
   log("info", "worker.started", {
     healthPort: env.PORT,
-    queueName: researchWritesAllowed ? env.RESEARCH_QUEUE_NAME : undefined,
+    queueName: env.RESEARCH_QUEUE_NAME,
     researchHandlers: researchWritesAllowed,
   });
 

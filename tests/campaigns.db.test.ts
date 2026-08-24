@@ -257,6 +257,149 @@ describe.skipIf(!DB_TESTS_ENABLED)("campaign engine (DB)", () => {
     for (const item of items) expect(item.status).toBe("done");
   });
 
+  it("requeues a query item in place when the strategy proposes self-continuation", async () => {
+    // Mirrors the USAspending topology: a source expands to ONE query
+    // item; the query item paginates ITSELF via self-continuation
+    // (same itemType + normalizedValue, payload advanced) while emitting
+    // one leaf per slice.
+    class PaginatingQueryStrategy implements DiscoveryStrategy {
+      readonly id = "paginating-query";
+
+      seedsSupported(): boolean {
+        return true;
+      }
+
+      async proposeFrontierItems(
+        _campaign: CampaignView,
+        item: FrontierItemView,
+      ): Promise<FrontierProposal[]> {
+        if (item.itemType === "source") {
+          return [
+            {
+              itemType: "query",
+              normalizedValue: `${item.normalizedValue}-query`,
+              estimatedCostUsd: 0,
+              payload: { page: 1 },
+            },
+          ];
+        }
+        if (item.itemType !== "query") return [];
+        const page = (item.payload["page"] as number | undefined) ?? 1;
+        const proposals: FrontierProposal[] = [
+          {
+            itemType: "company",
+            normalizedValue: `${item.normalizedValue}-leaf-${page}`,
+            estimatedCostUsd: 0,
+          },
+        ];
+        if (page < 3) {
+          proposals.push({
+            itemType: "query",
+            normalizedValue: item.normalizedValue,
+            estimatedCostUsd: 0,
+            payload: { page: page + 1 },
+          });
+        }
+        return proposals;
+      }
+    }
+
+    const campaignId = await createTestCampaign({ maxDepth: 2 });
+    const root = await insertRootItem(campaignId, "requeue-root");
+    await applyLifecycleAction(campaignId, "start");
+
+    const result = await processDueItems(campaignId, {
+      ...processOptions(),
+      strategy: new PaginatingQueryStrategy(),
+    });
+
+    expect(result.childrenInserted).toBe(4); // 1 query child + 3 leaves
+    expect(result.stopReason).toBe("frontier_exhausted");
+
+    // The source completed normally; the query advanced its cursor across
+    // slices and only then completed.
+    const sourceRow = await loadItem(root.id);
+    expect(sourceRow.status).toBe("done");
+    const queryRow = (
+      await getDatabase()
+        .select()
+        .from(frontierItems)
+        .where(eq(frontierItems.campaignId, campaignId))
+    ).find((item) => item.normalizedValue === "requeue-root-query");
+    expect(queryRow?.status).toBe("done");
+    expect(queryRow?.payload).toEqual({ page: 3 });
+
+    const items = await getDatabase()
+      .select()
+      .from(frontierItems)
+      .where(eq(frontierItems.campaignId, campaignId));
+    expect(items).toHaveLength(5); // source + query + 3 leaves
+    for (const item of items) expect(item.status).toBe("done");
+  });
+
+  it("completes instead of looping when a continuation does not advance", async () => {
+    class StuckQueryStrategy implements DiscoveryStrategy {
+      readonly id = "stuck-query";
+
+      seedsSupported(): boolean {
+        return true;
+      }
+
+      async proposeFrontierItems(
+        _campaign: CampaignView,
+        item: FrontierItemView,
+      ): Promise<FrontierProposal[]> {
+        if (item.itemType === "source") {
+          return [
+            {
+              itemType: "query",
+              normalizedValue: `${item.normalizedValue}-query`,
+              estimatedCostUsd: 0,
+              payload: {},
+            },
+          ];
+        }
+        if (item.itemType !== "query") return [];
+        return [
+          {
+            itemType: "company",
+            normalizedValue: `${item.normalizedValue}-leaf`,
+            estimatedCostUsd: 0,
+          },
+          // Identical (non-advancing) payload every time.
+          {
+            itemType: "query",
+            normalizedValue: item.normalizedValue,
+            estimatedCostUsd: 0,
+            payload: {},
+          },
+        ];
+      }
+    }
+
+    const campaignId = await createTestCampaign({ maxDepth: 2 });
+    const root = await insertRootItem(campaignId, "stuck-root");
+    await applyLifecycleAction(campaignId, "start");
+
+    const result = await processDueItems(campaignId, {
+      ...processOptions(),
+      strategy: new StuckQueryStrategy(),
+    });
+
+    expect(result.stopReason).toBe("frontier_exhausted");
+    const items = await getDatabase()
+      .select()
+      .from(frontierItems)
+      .where(eq(frontierItems.campaignId, campaignId));
+    const queryRow = items.find(
+      (item) => item.normalizedValue === "stuck-root-query",
+    );
+    expect(queryRow?.status).toBe("done"); // completed, not requeued forever
+    expect(queryRow?.payload).toEqual({}); // payload untouched
+    const stuckSource = await loadItem(root.id);
+    expect(stuckSource.status).toBe("done");
+  });
+
   it("survives a simulated crash: rerun reclaims stale claims with zero duplicate children", async () => {
     const campaignId = await createTestCampaign();
     const rootA = await insertRootItem(campaignId, "crash-root-A");

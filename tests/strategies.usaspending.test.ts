@@ -45,7 +45,10 @@ function makeFixtureFetch() {
   return { impl, calls };
 }
 
-function makeStrategy(maxPages = 2): {
+function makeStrategy(
+  maxPages = 2,
+  clientOverrides: Partial<ConstructorParameters<typeof UsaspendingClient>[0]> = {},
+): {
   strategy: UsaspendingDiscoveryStrategy;
   calls: string[];
 } {
@@ -57,6 +60,7 @@ function makeStrategy(maxPages = 2): {
     maxRetries: 0,
     fetchImpl: impl,
     sleep: () => Promise.resolve(),
+    ...clientOverrides,
   });
   return {
     strategy: new UsaspendingDiscoveryStrategy({ client }),
@@ -104,18 +108,21 @@ function queryItem(overrides: Partial<FrontierItemView> = {}): FrontierItemView 
 }
 
 describe("UsaspendingDiscoveryStrategy", () => {
-  it("expands a usaspending query item into one company proposal per recipient", async () => {
+  it("expands a query item into company proposals plus one self-continuation", async () => {
     const { strategy, calls } = makeStrategy();
     const proposals = await strategy.proposeFrontierItems(campaign, queryItem());
 
-    // Fixtures aggregate to 4 distinct recipients across both pages.
-    expect(proposals).toHaveLength(4);
+    // Fixtures aggregate to 4 distinct recipients across both pages; both
+    // pages are full, so the slice also proposes a self-continuation that
+    // resumes at page 3 (the runner requeues the item with its payload).
+    expect(proposals).toHaveLength(5);
     // maxPages=2 bounds pagination at the second fixture page.
     expect(calls).toEqual(["page-1", "page-2"]);
     for (const proposal of proposals) {
-      expect(proposal.itemType).toBe("company");
-      expect(proposal.estimatedCostUsd).toBe(0);
-      expect(proposal.normalizedValue.length).toBeGreaterThan(0);
+      if (proposal.itemType === "company") {
+        expect(proposal.estimatedCostUsd).toBe(0);
+        expect(proposal.normalizedValue.length).toBeGreaterThan(0);
+      }
     }
 
     const aero = proposals.find((p) => p.normalizedValue === "uei:AAA111111111");
@@ -131,6 +138,23 @@ describe("UsaspendingDiscoveryStrategy", () => {
       p.normalizedValue.startsWith("name:"),
     );
     expect(byName).toBeDefined();
+
+    // The continuation: same identity as the item itself, payload advanced.
+    const continuation = proposals.find(
+      (p) =>
+        p.itemType === "query" &&
+        p.normalizedValue === queryItem().normalizedValue,
+    );
+    expect(continuation).toBeDefined();
+    expect(continuation?.estimatedCostUsd).toBe(0);
+    expect(continuation?.priority).toBe(5);
+    expect(continuation?.payload?.["resumePage"]).toBe(3);
+    // The concrete window is baked so later slices search the same period.
+    expect(continuation?.payload?.["timePeriod"]).toEqual({
+      startDate: "2025-01-01",
+      endDate: "2025-12-31",
+    });
+    expect(Array.isArray(continuation?.payload?.["naics"])).toBe(true);
   });
 
   it("is deterministic and idempotent across repeated invocations", async () => {
@@ -171,6 +195,55 @@ describe("UsaspendingDiscoveryStrategy", () => {
       payload: {},
     });
     expect(again[0]?.normalizedValue).toBe(proposals[0]?.normalizedValue);
+  });
+
+  it("proposes no continuation when the result set is exhausted", async () => {
+    // pageSize 10 exceeds the fixture page size: page 1 comes back partial,
+    // which is the API's end-of-results signal.
+    const { strategy } = makeStrategy(2, { pageSize: 10 });
+    const proposals = await strategy.proposeFrontierItems(campaign, queryItem());
+    expect(proposals.every((p) => p.itemType === "company")).toBe(true);
+  });
+
+  it("resumes at payload.resumePage instead of restarting from page 1", async () => {
+    const { strategy, calls } = makeStrategy();
+    const item = queryItem({
+      payload: {
+        naics: ["336413"],
+        psc: ["1560"],
+        timePeriod: { startDate: "2025-01-01", endDate: "2025-12-31" },
+        resumePage: 2,
+      },
+    });
+    const proposals = await strategy.proposeFrontierItems(campaign, item);
+
+    // The slice runs pages 2..3 (maxPages=2); page 1 is never requested.
+    // Page 3 serves no fixture rows, so the walk ends inside this slice.
+    expect(calls).toEqual(["page-2", "page-3"]);
+    const continuation = proposals.find((p) => p.itemType === "query");
+    expect(continuation).toBeUndefined();
+    expect(proposals.filter((p) => p.itemType === "company")).toHaveLength(2);
+  });
+
+  it("degrades to single-slice behavior with a legacy stub client", async () => {
+    // Agent ticks inject exactly this shape ({ searchRecipients }); those
+    // clients cannot report more pages, so no continuation may be proposed.
+    const recipients = [
+      {
+        rawName: "Stub Aero Parts Inc",
+        uei: "STUB00000001",
+        awardCount: 1,
+        totalAwardValueUsd: 1_000,
+        source: "usaspending" as const,
+        sourceLocator: "usaspending://spending_by_award?recipient_name=Stub",
+      },
+    ];
+    const strategy = new UsaspendingDiscoveryStrategy({
+      client: { searchRecipients: () => Promise.resolve(recipients) },
+    });
+    const proposals = await strategy.proposeFrontierItems(campaign, queryItem());
+    expect(proposals).toHaveLength(1);
+    expect(proposals[0]?.itemType).toBe("company");
   });
 
   it("ignores items it does not own", async () => {

@@ -463,9 +463,23 @@ async function runUsaspendingExpansion(
       psc: [...seeds.psc],
     } as Record<string, unknown>,
   };
-  const proposals = (
-    await strategy.proposeFrontierItems(campaignStub, queryView)
-  ).slice(0, MAX_LEADS_PER_TICK);
+  const allProposals = await strategy.proposeFrontierItems(
+    campaignStub,
+    queryView,
+  );
+  // Agents execute exactly ONE bounded page-set per tick and record their
+  // items as done. Self-continuation proposals (same type + value as the
+  // query item) are the campaign runner's requeue signal — recording them
+  // here would create dead items, so drop them.
+  const proposals = allProposals
+    .filter(
+      (proposal) =>
+        !(
+          proposal.itemType === "query" &&
+          proposal.normalizedValue === queryProposal.normalizedValue
+        ),
+    )
+    .slice(0, MAX_LEADS_PER_TICK);
   return { queryRan: true, proposals, queryValue: queryProposal.normalizedValue };
 }
 

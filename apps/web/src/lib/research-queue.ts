@@ -167,6 +167,35 @@ export async function enqueueSourceResearchJob(
   return enqueueResearchJob(payload);
 }
 
+/**
+ * Kick off (or resume) the self-perpetuating campaign-process heartbeat for
+ * one campaign. Campaign discovery is a storage-free pipeline — it writes
+ * PostgreSQL rows and reads public no-auth APIs only — so unlike the
+ * document research jobs above it does NOT depend on
+ * RESEARCH_SHARED_STORAGE and must not be gated on it.
+ */
+export async function enqueueCampaignProcess(
+  campaignId: string,
+): Promise<{ jobId: string | null }> {
+  const boss = await startProducer();
+  if (state.stopped) {
+    throw new Error("The research queue producer is shutting down");
+  }
+
+  const queueName = getServerEnv().RESEARCH_QUEUE_NAME;
+  const jobId = await boss.send(
+    queueName,
+    { name: "campaign-process.v1", campaignId },
+    {
+      // Matches the handler's own re-enqueue singleton key so a manual
+      // kickoff can never double-book an already-beating campaign.
+      singletonKey: `campaign-process:${campaignId}`,
+    },
+  );
+  return { jobId };
+}
+
+
 export async function enqueueCompanyResearchJob(
   payload: CompanyResearchJobPayload,
 ): Promise<{ jobId: string | null; duplicate: boolean }> {

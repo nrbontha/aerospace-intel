@@ -243,6 +243,82 @@ function childDiscoveryPath(parent: FrontierItem): string {
   return parentPath.slice(-10_000);
 }
 
+/**
+ * Partition proposals into regular children and at most one SELF-
+ * continuation: a proposal whose itemType AND normalizedValue equal the
+ * parent's own identity. Strategies use it to paginate stateful sources —
+ * "requeue me with this advanced payload" (next page / cursor) instead of
+ * completing. Everything else is a normal child.
+ */
+function splitSelfContinuation(
+  item: FrontierItem,
+  proposals: FrontierProposal[],
+): { children: FrontierProposal[]; continuationPayload: Record<string, unknown> | null } {
+  let continuationPayload: Record<string, unknown> | null = null;
+  const children: FrontierProposal[] = [];
+  for (const proposal of proposals) {
+    if (
+      continuationPayload === null &&
+      proposal.payload !== undefined &&
+      proposal.itemType === item.itemType &&
+      proposal.normalizedValue === item.normalizedValue
+    ) {
+      continuationPayload = proposal.payload;
+      continue;
+    }
+    children.push(proposal);
+  }
+  return { children, continuationPayload };
+}
+
+/**
+ * Deterministic JSON: object keys sorted, undefined dropped. Used to prove
+ * a continuation actually advances the payload — a strategy bug that
+ * re-proposes an identical payload would otherwise requeue forever.
+ */
+function canonicalJson(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(canonicalJson).join(",")}]`;
+  }
+  if (value !== null && typeof value === "object") {
+    const entries = Object.entries(value).filter(([, v]) => v !== undefined);
+    entries.sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0));
+    return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${canonicalJson(v)}`).join(",")}}`;
+  }
+  return JSON.stringify(value ?? null);
+}
+
+/**
+ * Requeue an in-progress item as pending with an advanced payload. The
+ * attempt budget resets: the slice made forward progress and the item
+ * continues as a fresh unit (retry/backoff still applies when a future
+ * slice THROWS). Guarded on status=in_progress so a concurrent stale
+ * reclaim can never clobber an already re-claimed row — worst case there
+ * is one redundant re-run, which child idempotency keys absorb.
+ */
+async function requeueItemWithPayload(
+  item: FrontierItem,
+  payload: Record<string, unknown>,
+  now: Date,
+): Promise<void> {
+  await getDatabase()
+    .update(frontierItems)
+    .set({
+      status: "pending",
+      payload,
+      attemptCount: 0,
+      nextAttemptAt: null,
+      lastAttemptAt: now,
+      failureReason: null,
+    })
+    .where(
+      and(
+        eq(frontierItems.id, item.id),
+        eq(frontierItems.status, "in_progress"),
+      ),
+    );
+}
+
 async function insertChildren(
   parent: FrontierItem,
   proposals: FrontierProposal[],
@@ -504,14 +580,26 @@ export async function processDueItems(
           toCampaignView(freshRow),
           toItemView(item),
         );
+        const { children, continuationPayload } =
+          splitSelfContinuation(item, proposals);
         const inserted = await insertChildren(
           item,
-          proposals,
+          children,
           toCampaignView(freshRow).maxDepth,
         );
-        await completeItem(item, nowFn());
         totals.childrenInserted += inserted;
-        totals.completed += 1;
+        // Complete only when the strategy did not ask to continue; a
+        // continuation whose payload does not advance (strategy bug) is
+        // treated as completion so the frontier always terminates.
+        const advanced =
+          continuationPayload !== null &&
+          canonicalJson(continuationPayload) !== canonicalJson(item.payload);
+        if (advanced && continuationPayload !== null) {
+          await requeueItemWithPayload(item, continuationPayload, nowFn());
+        } else {
+          await completeItem(item, nowFn());
+          totals.completed += 1;
+        }
         if (Number(item.estimatedCostUsd) > 0) {
           // Book the item-level estimated cost; concrete strategies record
           // their actual model_usage spend through recordSpend separately.

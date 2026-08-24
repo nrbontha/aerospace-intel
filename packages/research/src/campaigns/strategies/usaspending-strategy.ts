@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   AEROSPACE_NAICS,
   AIRCRAFT_COMPONENT_PSC,
+  USASPENDING_API_MAX_PAGE,
   UsaspendingClient,
   type LeadCandidate,
 } from "../../sources/index.js";
@@ -20,10 +21,18 @@ import type {
  *  - `source` items naming USAspending expand to ONE deterministic default
  *    `query` item (aerospace NAICS/PSC seed lists, trailing-365-day window).
  *  - `query` items whose payload carries USAspending query parameters
- *    ({ naics?, psc?, timePeriod? }) run a bounded recipient search
- *    (maxPages 2 per item) and propose one `company` frontier item per
- *    aggregated recipient with estimatedCostUsd 0 (public API, no model
- *    spend).
+ *    ({ naics?, psc?, timePeriod?, resumePage? }) run a bounded recipient
+ *    search (maxPages 2 per item) and propose one `company` frontier item
+ *    per aggregated recipient with estimatedCostUsd 0 (public API, no
+ *    model spend).
+ *  - When more result pages remain, the query item additionally proposes a
+ *    SELF-continuation: same itemType + normalizedValue, payload advanced
+ *    to `resumePage`. The frontier runner interprets that as "requeue me
+ *    with this payload" instead of completing, so one query item walks the
+ *    entire result stream slice by slice — including past the API's
+ *    50k-record page ceiling via the sequential cursor. Clients without
+ *    pagination support (test/agent stubs) degrade to single-slice
+ *    behavior with no continuation.
  *
  * Proposals are deterministic and idempotent: `normalizedValue` is derived
  * only from stable recipient identity (UEI, else domain, else normalized
@@ -44,6 +53,19 @@ export interface UsaspendingSearchClient {
     pscCodes?: readonly string[];
     timePeriod: { startDate: string; endDate: string };
   }): Promise<LeadCandidate[]>;
+  /**
+   * Pagination-aware variant used for cursor-based full coverage; optional
+   * so stub clients (agents, tests) keep working as single-slice searches.
+   */
+  searchRecipientsPage?(query: {
+    naicsCodes?: readonly string[];
+    pscCodes?: readonly string[];
+    timePeriod: { startDate: string; endDate: string };
+    startPage?: number;
+  }): Promise<{
+    leads: LeadCandidate[];
+    nextPage: number | null;
+  }>;
 }
 
 export interface UsaspendingStrategyOptions {
@@ -66,6 +88,8 @@ const usaspendingQueryPayloadSchema = z
     naics: z.array(z.string().trim().min(1)).optional(),
     psc: z.array(z.string().trim().min(1)).optional(),
     timePeriod: z.union([timePeriodSchema, z.array(timePeriodSchema)]).optional(),
+    // Cursor for multi-slice full coverage: the page this slice starts from.
+    resumePage: z.number().int().min(1).max(USASPENDING_API_MAX_PAGE).optional(),
   });
 
 /** Trailing-365-day window ending "today" (UTC date strings). */
@@ -168,7 +192,11 @@ export class UsaspendingDiscoveryStrategy implements DiscoveryStrategy {
   }
 
   /**
-   * Run a bounded recipient search for a USAspending-shaped query payload.
+   * Run a bounded recipient search slice for a USAspending-shaped query
+   * payload, resuming at payload.resumePage when present. When the client
+   * reports more pages, proposes a self-continuation (same itemType +
+   * normalizedValue) whose payload advances resumePage — the frontier
+   * runner requeues the item with that payload instead of completing it.
    * Source/client failures propagate — the runner owns retry/backoff.
    */
   async #runQueryItem(item: FrontierItemView): Promise<FrontierProposal[]> {
@@ -184,12 +212,46 @@ export class UsaspendingDiscoveryStrategy implements DiscoveryStrategy {
       return [];
     }
 
-    const candidates = await this.#client.searchRecipients({
+    // Bake the concrete window once so every continuation slice searches
+    // the same period instead of drifting with the calendar.
+    const timePeriod = resolveTimePeriod(query.timePeriod);
+    const startPage = query.resumePage ?? 1;
+    const search = {
       ...(query.naics === undefined ? {} : { naicsCodes: query.naics }),
       ...(query.psc === undefined ? {} : { pscCodes: query.psc }),
-      timePeriod: resolveTimePeriod(query.timePeriod),
+      timePeriod,
+    };
+
+    if (this.#client.searchRecipientsPage === undefined) {
+      // Stub clients (agents/tests): legacy single-slice behavior.
+      const candidates = await this.#client.searchRecipients(search);
+      return candidates.map(leadCandidateToProposal);
+    }
+
+    const result = await this.#client.searchRecipientsPage({
+      ...search,
+      startPage,
     });
-    return candidates.map(leadCandidateToProposal);
+    const proposals = result.leads.map(leadCandidateToProposal);
+    if (
+      result.nextPage !== null &&
+      result.nextPage <= USASPENDING_API_MAX_PAGE
+    ) {
+      proposals.push({
+        itemType: "query",
+        normalizedValue: item.normalizedValue,
+        estimatedCostUsd: 0,
+        priority: 5,
+        payload: {
+          source: "usaspending",
+          ...(query.naics === undefined ? {} : { naics: [...query.naics] }),
+          ...(query.psc === undefined ? {} : { psc: [...query.psc] }),
+          timePeriod,
+          resumePage: result.nextPage,
+        },
+      });
+    }
+    return proposals;
   }
 }
 
