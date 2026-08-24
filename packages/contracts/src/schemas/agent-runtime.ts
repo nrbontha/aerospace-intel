@@ -11,6 +11,7 @@ export const agentTypeValues = [
   "monitor_ownership",
   "refresh_stale",
   "golden_neighbor",
+  "resolve_domain",
 ] as const;
 export const agentStatusValues = ["idle", "running", "paused", "failed"] as const;
 export const tickOutcomeValues = [

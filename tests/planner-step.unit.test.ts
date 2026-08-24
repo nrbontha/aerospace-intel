@@ -86,6 +86,7 @@ describe("planner-step action manifests", () => {
         "monitor_ownership",
         "refresh_stale",
         "golden_neighbor",
+        "resolve_domain",
       ].sort(),
     );
   });

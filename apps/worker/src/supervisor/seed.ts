@@ -12,7 +12,8 @@ export interface DefaultAgentSeed {
     | "enrich_candidate"
     | "monitor_ownership"
     | "refresh_stale"
-    | "golden_neighbor";
+    | "golden_neighbor"
+    | "resolve_domain";
   goal: string;
   cadenceSeconds: number;
   budgetSharePct: string;
@@ -26,7 +27,7 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     agentType: "discover_source",
     goal: "Continuously expand the candidate universe from federal aerospace award recipients; ingest and resolve new leads.",
     cadenceSeconds: 3600,
-    budgetSharePct: "30.00",
+    budgetSharePct: "25.00",
     status: "running",
   },
   {
@@ -44,7 +45,7 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     agentType: "enrich_candidate",
     goal: "Deep-research queued candidates oldest-first until evidence supports a routing decision.",
     cadenceSeconds: 300,
-    budgetSharePct: "40.00",
+    budgetSharePct: "30.00",
     status: "running",
   },
   {
@@ -73,6 +74,15 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     cadenceSeconds: 86400,
     budgetSharePct: "5.00",
     status: "paused",
+  },
+  {
+    key: "resolve-domains",
+    name: "Domain Resolver",
+    agentType: "resolve_domain",
+    goal: "Find and verify official websites for discovered leads lacking domains, then attach and promote them.",
+    cadenceSeconds: 600,
+    budgetSharePct: "15.00",
+    status: "running",
   },
 ] as const;
 

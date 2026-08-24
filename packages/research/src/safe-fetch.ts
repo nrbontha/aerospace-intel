@@ -62,7 +62,13 @@ export interface SafeFetchResult {
 
 export async function safeFetchUrl(
   url: string,
-  options: { readonly signal?: AbortSignal } = {},
+  options: {
+    readonly signal?: AbortSignal;
+    /** Override the default ASI-Research UA (browser-like fetches for WAF'd sites). */
+    readonly userAgent?: string;
+    /** Override the default Accept header value. */
+    readonly accept?: string;
+  } = {},
 ): Promise<SafeFetchResult> {
   const started = Date.now();
   const controller = new AbortController();
@@ -83,7 +89,7 @@ export async function safeFetchUrl(
       redirectCount += 1
     ) {
       const addresses = await resolvePublic(current, controller.signal);
-      const response = await makeRequest(current, addresses, controller.signal);
+      const response = await makeRequest(current, addresses, controller.signal, options);
       if (isRedirect(response.statusCode)) {
         const location = response.headers.location;
         response.resume();
@@ -196,6 +202,7 @@ function makeRequest(
   url: URL,
   addresses: readonly { address: string; family: 4 | 6 }[],
   signal: AbortSignal,
+  options: { readonly userAgent?: string; readonly accept?: string } = {},
 ): Promise<IncomingMessage> {
   const selected = addresses[0];
   if (selected === undefined) throw new SafeFetchError("dns_failed");
@@ -216,8 +223,8 @@ function makeRequest(
       lookup: pinnedLookup,
       signal,
       headers: {
-        accept: "text/html, text/plain, application/json",
-        "user-agent": "ASI-Research/1.0",
+        accept: options.accept ?? "text/html, text/plain, application/json",
+        "user-agent": options.userAgent ?? "ASI-Research/1.0",
       },
     },
     resolve,

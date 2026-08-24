@@ -77,6 +77,11 @@ export const neighborActionSchema = z.strictObject({
   ),
 });
 
+/** resolve_domain: one lead whose official website should be found. */
+export const resolveDomainActionSchema = z.strictObject({
+  leadId: nonEmptyString,
+});
+
 /**
  * agent_type → action manifest. Adding a new agent type means adding its
  * enum value in @asi/database and an entry here.
@@ -87,6 +92,7 @@ export const AGENT_ACTION_SCHEMAS = {
   monitor_ownership: monitorActionSchema,
   refresh_stale: refreshActionSchema,
   golden_neighbor: neighborActionSchema,
+  resolve_domain: resolveDomainActionSchema,
 } as const satisfies Record<AgentType, z.ZodType>;
 
 /** The action manifest for one agent type. */
@@ -101,13 +107,15 @@ export type EnrichCandidateAction = z.infer<typeof enrichActionSchema>;
 export type MonitorOwnershipAction = z.infer<typeof monitorActionSchema>;
 export type RefreshStaleAction = z.infer<typeof refreshActionSchema>;
 export type GoldenNeighborAction = z.infer<typeof neighborActionSchema>;
+export type ResolveDomainAction = z.infer<typeof resolveDomainActionSchema>;
 
 export type PlannedAction =
   | DiscoverSourceAction
   | EnrichCandidateAction
   | MonitorOwnershipAction
   | RefreshStaleAction
-  | GoldenNeighborAction;
+  | GoldenNeighborAction
+  | ResolveDomainAction;
 
 /** Plan envelope the LLM must return for a given action manifest. */
 export function planEnvelopeSchema<A extends z.ZodType>(actionSchema: A) {
@@ -190,6 +198,7 @@ const ACTION_HINTS: Record<AgentType, string> = {
   refresh_stale: '{"evidenceId": "<evidence document id>"}',
   golden_neighbor:
     '{"archetypeFilters": {"<axis>": <string|number|boolean>, ...}}',
+  resolve_domain: '{"leadId": "<lead id>"}',
 };
 
 /** Human-readable rendering of recent ticks for the prompt. */
@@ -306,6 +315,10 @@ export function fallbackActions(
         {};
       return [{ archetypeFilters: filters }];
     }
+    case "resolve_domain":
+      return stringList(stateSlice["pendingLeadIds"])
+        .slice(0, maxActions)
+        .map((leadId) => ({ leadId }));
   }
 }
 

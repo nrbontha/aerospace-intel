@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 
 import {
@@ -17,10 +17,18 @@ import {
   ownershipObservations,
   researchRuns,
   sourceDocuments,
+  leads,
+  resolveLeadDomain,
   type AgentType,
   type Database,
+  type DomainJudge,
+  type DomainProber,
+  type IdentityJudgment,
   type LeadCandidateInput,
+  type LeadDomainDeps,
   type ResearchAgent,
+  type ResolutionLogger,
+  type ResolutionResult,
 } from "@asi/database";
 import {
   AEROSPACE_NAICS,
@@ -32,6 +40,7 @@ import {
   planTick,
   rescoreCandidateAfterResearch,
   safeFetchUrl,
+  SafeFetchError,
   UsaspendingDiscoveryStrategy,
   wrapUntrustedSourceJson,
   type AgentPlan,
@@ -110,6 +119,22 @@ export interface TickHandlerDeps {
    * (tests / explicit refresh runs); default honors the 24h idempotency.
    */
   readonly researchForceRefresh?: boolean;
+  /** Domain-prober override (tests); default probes with browser-like headers. */
+  readonly domainProber?: DomainProber;
+  /** Domain-judge override (tests); default is the OpenRouter prompt-contract judge. */
+  readonly domainJudge?: DomainJudge;
+  /**
+   * Per-lead resolver override (tests); default is the real resolveLeadDomain
+   * service call. Exists because the service deliberately degrades on
+   * model/fetch failures — tests need a deterministic throw point to prove
+   * per-lead error isolation.
+   */
+  readonly resolveLead?: (
+    db: Database,
+    leadId: string,
+    resolutionDeps: LeadDomainDeps,
+    options?: { readonly maxCandidates?: number },
+  ) => Promise<ResolutionResult>;
 }
 
 /** safe-fetch takes an options bag; normalize the handler-side signature. */
@@ -177,6 +202,7 @@ const AGENT_HANDLERS: Record<
   monitor_ownership: createMonitorOwnershipHandler,
   refresh_stale: createRefreshStaleHandler,
   golden_neighbor: createGoldenNeighborHandler,
+  resolve_domain: createResolveDomainHandler,
 };
 
 export function createV1TickHandlerRegistry(
@@ -1590,6 +1616,346 @@ function createGoldenNeighborHandler(deps: Partial<TickHandlerDeps>): TickHandle
         duplicateSkipped: summary.duplicateSkipped,
         discoveryOrigin: "golden-neighbor",
       },
+    };
+  };
+}
+
+// ---------------------------------------------------------------------------
+// resolve_domain.
+// ---------------------------------------------------------------------------
+
+/** Budget gates: ≤5 leads per tick, ≤3 candidate domains per lead, ≤2 model
+ * calls per candidate (one + one fence-repair retry inside the judge). */
+const MAX_DOMAIN_LEADS_PER_TICK = 5;
+const MAX_DOMAIN_CANDIDATES_PER_LEAD = 3;
+
+/**
+ * WAF-protected sites (yulista.com returns 406 to non-browser user agents)
+ * require browser-like request headers. Only the domain prober opts in; the
+ * safe-fetch default is untouched for every other caller.
+ */
+const BROWSER_USER_AGENT =
+  "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+const BROWSER_ACCEPT =
+  "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8";
+
+/** Identity text is capped so model prompts and overlap math stay bounded. */
+const MAX_IDENTITY_TEXT_CHARS = 2_000;
+/** Hard cap on fetched HTML considered per page (safe-fetch allows 5 MiB). */
+const MAX_HTML_BYTES = 256 * 1024;
+
+function stripTags(html: string): string {
+  return html
+    .replace(/<script[\s\S]*?<\/script/giu, " ")
+    .replace(/<style[\s\S]*?<\/style/giu, " ")
+    .replace(/<[^>]+>/gu, " ");
+}
+
+function collapse(value: string): string {
+  return value.replace(/\s+/gu, " ").trim();
+}
+
+function matchAll(html: string, pattern: RegExp): string[] {
+  const out: string[] = [];
+  for (const match of html.matchAll(pattern)) {
+    const text = collapse(decodeEntities(match[1] ?? ""));
+    if (text.length > 0) out.push(text);
+  }
+  return out;
+}
+
+function decodeEntities(value: string): string {
+  return value
+    .replace(/&amp;/gu, "&")
+    .replace(/&lt;/gu, "<")
+    .replace(/&gt;/gu, ">")
+    .replace(/&quot;/gu, '"')
+    .replace(/&#0?39;/gu, "'")
+    .replace(/&nbsp;/giu, " ");
+}
+
+/**
+ * Homepage → identity text: title + meta description + h1/h2 first (~2000
+ * chars); falls back to stripped body text for JS-shell pages whose markup
+ * carries nothing else.
+ */
+export function homepageIdentityText(html: string): string {
+  const parts = [
+    ...matchAll(html, /<title[^>]*>([\s\S]*?)<\/title/giu),
+    ...matchAll(
+      html,
+      /<meta[^>]+name\s*=\s*["']description["'][^>]*content\s*=\s*["']([^"']*)["']/giu,
+    ),
+    ...matchAll(
+      html,
+      /<meta[^>]+content\s*=\s*["']([^"']*)["'][^>]*name\s*=\s*["']description["']/giu,
+    ),
+    ...matchAll(html, /<h1[^>]*>([\s\S]*?)<\/h1/giu),
+    ...matchAll(html, /<h2[^>]*>([\s\S]*?)<\/h2/giu),
+  ];
+  const focused = collapse(parts.join(" ")).slice(0, MAX_IDENTITY_TEXT_CHARS);
+  if (focused.length >= 40) return focused;
+  return collapse(stripTags(html)).slice(0, MAX_IDENTITY_TEXT_CHARS);
+}
+
+class SafeFetchDomainProber implements DomainProber {
+  async fetchText(url: string) {
+    try {
+      // 10s ceiling here; safe-fetch itself aborts at 15s but the faster
+      // deadline wins.
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 10_000);
+      let result;
+      try {
+        result = await safeFetchUrl(url, {
+          signal: controller.signal,
+          userAgent: BROWSER_USER_AGENT,
+          accept: BROWSER_ACCEPT,
+        });
+      } finally {
+        clearTimeout(timer);
+      }
+      return {
+        ok: true as const,
+        finalUrl: result.finalUrl,
+        text: homepageIdentityText(result.content.slice(0, MAX_HTML_BYTES)),
+      };
+    } catch (error) {
+      if (error instanceof SafeFetchError) return { ok: false as const, error: error.code };
+      if (error instanceof Error && error.name === "AbortError") {
+        return { ok: false as const, error: "timeout" };
+      }
+      return { ok: false as const, error: "network_error" };
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Judge/proposer: OpenRouter prompt-contract + one fence-repair retry (the
+// gateway's structured-output enforcement is provider-dependent). Mirrors the
+// resolve-domain route construction; cost accumulates for the tick report.
+// ---------------------------------------------------------------------------
+
+const proposedDomainsSchema = z.strictObject({
+  domains: z.array(z.string().min(3)).max(5),
+});
+
+const identityJudgmentSchema = z.strictObject({
+  matches: z.boolean(),
+  confidence: z.number().min(0).max(1),
+  reason: z.string().min(1).max(500),
+});
+
+const PROPOSE_SYSTEM_PROMPT =
+  "You propose candidate website domains for an industrial company named by " +
+  "the user. If the name starts with a brand word that likely belongs to a " +
+  "larger parent organization (e.g. \"ACME Aviation, Inc.\" under ACME " +
+  "Corp), ALWAYS list that parent brand's root domain FIRST — parent " +
+  "companies often host their subsidiaries' web presence under one domain. " +
+  "Otherwise, cover DIFFERENT compact styles: the full word-mark (all words " +
+  "joined), an initialism/acronym (initials joined, optionally prefixed by " +
+  "the company's first word, e.g. \"York Precision Machining Hydraulics\" → " +
+  "ypmh.com or yorkpmh.com), and one other plausible variant. Reply with " +
+  "exactly ONE raw JSON object (no prose, no markdown fences) of shape " +
+  '{"domains":["example.com", ...]} containing at most 3 plausible domains, ' +
+  "most likely first. Never invent subdomains or paths.";
+
+const JUDGE_SYSTEM_PROMPT =
+  "You decide whether a fetched webpage belongs to the company named by the " +
+  "user. Reply with exactly ONE raw JSON object (no prose, no markdown " +
+  'fences) of shape {"matches":boolean,"confidence":number,"reason":string} ' +
+  "where confidence is between 0 and 1. Be conservative: only matches=true " +
+  "when the page clearly represents that specific company.";
+
+class CostTrackingOpenRouterDomainJudge implements DomainJudge {
+  private spentUsd = 0;
+
+  constructor(private readonly model: ResolvedModelDeps) {}
+
+  totalCostUsd(): number {
+    return this.spentUsd;
+  }
+
+  private async callModel<T>(
+    schema: z.ZodType<T>,
+    schemaName: string,
+    systemPrompt: string,
+    prompt: string,
+  ): Promise<{ data: T; costUsd: number }> {
+    const result = await this.model.client.generateStructured({
+      route: "fast",
+      models: this.model.models,
+      schemaName,
+      schema,
+      systemPrompt,
+      prompt,
+      temperature: 0,
+      maxOutputTokens: 512,
+      maxAttempts: 1,
+    });
+    return { data: result.data, costUsd: result.telemetry.costUsd ?? 0 };
+  }
+
+  /** Exactly one repair retry — ≤2 model calls per logical call. */
+  private async callWithRepair<T>(
+    schema: z.ZodType<T>,
+    schemaName: string,
+    systemPrompt: string,
+    prompt: string,
+  ): Promise<T | null> {
+    let lastError = "";
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const fullPrompt =
+        attempt === 0
+          ? prompt
+          : `${prompt}\n\nREPAIR: your previous reply failed validation (${lastError}). Reply again with exactly one raw JSON object matching the required shape.`;
+      try {
+        const result = await this.callModel(schema, schemaName, systemPrompt, fullPrompt);
+        this.spentUsd += result.costUsd;
+        return result.data;
+      } catch (error) {
+        lastError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    return null;
+  }
+
+  async proposeDomains(leadName: string, locationHint?: string | null): Promise<string[]> {
+    const prompt =
+      `Company name: ${leadName}` +
+      (locationHint === null || locationHint === undefined || locationHint.length === 0
+        ? ""
+        : `\nLocation hint: ${locationHint}`) +
+      "\nPropose its most likely official website domains.";
+    const parsed = await this.callWithRepair(
+      proposedDomainsSchema,
+      "lead_domain_proposal_v1",
+      PROPOSE_SYSTEM_PROMPT,
+      prompt,
+    );
+    return parsed?.domains ?? [];
+  }
+
+  async judgeIdentity(leadName: string, pageText: string): Promise<IdentityJudgment> {
+    const prompt =
+      `Company name: ${leadName}\n\nWebpage text:\n"""\n${pageText}\n"""` +
+      "\nDoes this page represent that specific company?";
+    const parsed = await this.callWithRepair(
+      identityJudgmentSchema,
+      "lead_identity_judgment_v1",
+      JUDGE_SYSTEM_PROMPT,
+      prompt,
+    );
+    // Conservative anti-fabrication default: no usable judgment ⇒ no match.
+    return parsed ?? { matches: false, confidence: 0, reason: "identity judge unavailable" };
+  }
+}
+
+export interface DomainResolutionRuntime {
+  readonly deps: LeadDomainDeps;
+  /** The judge in use (cost-tracking unless a test override replaced it). */
+  readonly judge: DomainJudge;
+}
+
+/** Production domain-resolution deps; null ⇒ the agent idles honestly. */
+export function buildDomainResolutionDeps(
+  deps: Partial<TickHandlerDeps> = {},
+): DomainResolutionRuntime | null {
+  const model = resolveModelDeps(deps);
+  if (model === null) return null;
+  const resolutionLogger: ResolutionLogger = {
+    debug: (message, meta) => console.debug(`[resolve_domain] ${message}`, meta ?? ""),
+    info: (message, meta) => console.info(`[resolve_domain] ${message}`, meta ?? ""),
+    warn: (message, meta) => console.warn(`[resolve_domain] ${message}`, meta ?? ""),
+  };
+  const judge = deps.domainJudge ?? new CostTrackingOpenRouterDomainJudge(model);
+  return {
+    deps: {
+      prober: deps.domainProber ?? new SafeFetchDomainProber(),
+      judge,
+      logger: resolutionLogger,
+    },
+    judge,
+  };
+}
+
+/** Model-call spend for the runtime's judge (0 for non-costing test judges). */
+export function judgeCostUsd(judge: DomainJudge): number {
+  return judge instanceof CostTrackingOpenRouterDomainJudge ? judge.totalCostUsd() : 0;
+}
+
+/** Oldest-first unresolved leads still missing a possible domain. */
+export async function selectDomainResolutionBatch(
+  db: Database,
+  limit: number = MAX_DOMAIN_LEADS_PER_TICK,
+): Promise<Array<{ id: string; rawName: string; possibleLocation: string | null }>> {
+  return db
+    .select({
+      id: leads.id,
+      rawName: leads.rawName,
+      possibleLocation: leads.possibleLocation,
+    })
+    .from(leads)
+    .where(and(eq(leads.status, "unresolved_lead"), isNull(leads.possibleDomain)))
+    .orderBy(asc(leads.createdAt))
+    .limit(limit);
+}
+
+function createResolveDomainHandler(deps: Partial<TickHandlerDeps>): TickHandler {
+  return async (): Promise<TickResult> => {
+    const runtime = buildDomainResolutionDeps(deps);
+    if (runtime === null) {
+      return { outcome: "stuck", findings: { idleReason: "openrouter_not_configured" } };
+    }
+
+    const db = getDatabase();
+    const batch = await selectDomainResolutionBatch(db);
+    if (batch.length === 0) {
+      return {
+        outcome: "done",
+        findings: { note: "no unresolved_lead leads without a possible_domain" },
+      };
+    }
+
+    const verified: Array<{ leadId: string; domain: string; companyId: string }> = [];
+    const errors: Array<{ leadId: string; error: string }> = [];
+    let noDomain = 0;
+    let mismatched = 0;
+    for (const lead of batch) {
+      // Per-lead isolation: one poisoned lead never fails the batch.
+      try {
+        const resolveOne = deps.resolveLead ?? resolveLeadDomain;
+        const result: ResolutionResult = await resolveOne(db, lead.id, runtime.deps, {
+          maxCandidates: MAX_DOMAIN_CANDIDATES_PER_LEAD,
+        });
+        if (
+          result.outcome === "domain_verified" &&
+          result.domain !== undefined &&
+          result.companyId !== undefined
+        ) {
+          verified.push({ leadId: result.leadId, domain: result.domain, companyId: result.companyId });
+        } else if (result.outcome === "no_domain_found") {
+          noDomain += 1;
+        } else if (result.outcome === "identity_mismatch") {
+          mismatched += 1;
+        }
+        // already_resolved: raced with another resolver; counts as neither.
+      } catch (error) {
+        errors.push({
+          leadId: lead.id,
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+    }
+
+    const processed = verified.length + noDomain + mismatched;
+    const outcome: TickOutcomeReported =
+      processed > 0 || errors.length < batch.length ? "executed" : "stuck";
+    return {
+      outcome,
+      actionsExecuted: processed,
+      findings: { verified, noDomain, mismatched, errors },
+      costUsd: judgeCostUsd(runtime.judge),
     };
   };
 }
