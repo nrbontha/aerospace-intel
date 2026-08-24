@@ -95,6 +95,27 @@ const DEFAULT_PAGE_SIZE = 100;
 const DEFAULT_TIMEOUT_MS = 20_000;
 const DEFAULT_MAX_RETRIES = 2;
 
+/**
+ * Explicit stable result ordering. Omitting `sort`/`order` makes the API
+ * walk recipients in near-alphabetical DESCENDING order, so a bounded
+ * crawl samples only the tail of the alphabet (verified 2026-08-24: the
+ * unsorted stream starts at "ZOTIQUE TOWELS & SCRUBS"). Pinning an
+ * ascending recipient-name order makes every pagination window
+ * deterministic, which cursor-based full coverage requires — amount-based
+ * ordering shifts between calls as award records change.
+ */
+export const USASPENDING_SORT_FIELD = "Recipient Name";
+export const USASPENDING_SORT_ORDER = "asc";
+
+/**
+ * Hard API ceiling: `page * limit` may not exceed 50_000 records via the
+ * page parameter alone (page 550 at limit=100 is rejected with "over the
+ * maximum result limit 50000"; verified 2026-08-24). Deeper traversal
+ * resumes through the `last_record_sort_value`/`last_record_unique_id`
+ * cursor params carried by UsaspendingCursor.
+ */
+export const USASPENDING_API_MAX_PAGE = 500;
+
 /** USAspending renders amounts as strings like "$1,234.56" or null. */
 function parseAmountUsd(raw: unknown): number | null {
   if (raw === null || raw === undefined || raw === "") return null;
@@ -119,8 +140,16 @@ const rowSchema = z.object({
   Description: z.union([z.string(), z.null()]).optional(),
 });
 
+const pageMetadataSchema = z.object({
+  page: z.number().optional(),
+  hasNext: z.boolean().optional(),
+  last_record_unique_id: z.number().optional(),
+  last_record_sort_value: z.string().nullable().optional(),
+});
+
 const responseSchema = z.object({
   results: z.array(rowSchema),
+  page_metadata: pageMetadataSchema.optional(),
 });
 
 export interface UsaspendingTimePeriod {
@@ -134,6 +163,27 @@ export interface UsaspendingPlaceOfPerformance {
   readonly city?: string;
 }
 
+
+/** Resume anchor returned by the API for sequential pagination. */
+export interface UsaspendingCursor {
+  readonly sortValue: string;
+  readonly uniqueId: number;
+}
+
+export interface UsaspendingPageQuery extends UsaspendingQuery {
+  /** First page to fetch (default 1). */
+  readonly startPage?: number;
+  /** Resume anchor from a previous slice when walking past the ceiling. */
+  readonly cursor?: UsaspendingCursor | null;
+}
+
+export interface UsaspendingPageResult {
+  readonly leads: LeadCandidate[];
+  /** Page to resume from when more results remain; null when exhausted or at the API ceiling. */
+  readonly nextPage: number | null;
+  /** Cursor for the resume point; null when the API did not report one. */
+  readonly cursor: UsaspendingCursor | null;
+}
 export interface UsaspendingQuery {
   readonly naicsCodes?: readonly string[];
   readonly pscCodes?: readonly string[];
@@ -160,10 +210,21 @@ interface AggRow {
   count: number;
   freshestDate?: string;
 }
+
+interface UsaspendingPage {
+  readonly rows: z.output<typeof rowSchema>[];
+  readonly metadata?: {
+    readonly hasNext?: boolean;
+    /** Present when the API reported both cursor fields. */
+    readonly lastRecordCursor?: UsaspendingCursor | null;
+  };
+}
+
 function buildRequestBody(
   pageSize: number,
   query: UsaspendingQuery,
   page: number,
+  cursor?: UsaspendingCursor | null,
 ): object {
   const timePeriods = Array.isArray(query.timePeriod)
     ? query.timePeriod
@@ -184,7 +245,20 @@ function buildRequestBody(
       ...query.placeOfPerformanceLocations,
     ];
   if (query.keyword) filters.keywords = [query.keyword];
-  return { filters, fields: [...FIELDS], limit: pageSize, page };
+  return {
+    filters,
+    fields: [...FIELDS],
+    limit: pageSize,
+    page,
+    sort: USASPENDING_SORT_FIELD,
+    order: USASPENDING_SORT_ORDER,
+    ...(cursor === undefined || cursor === null
+      ? {}
+      : {
+          last_record_sort_value: cursor.sortValue,
+          last_record_unique_id: cursor.uniqueId,
+        }),
+  };
 }
 
 
@@ -223,12 +297,35 @@ export class UsaspendingClient {
   /**
    * Run an award search and aggregate rows into one LeadCandidate per
    * recipient (summed amounts, counted awards, freshest award date).
+   * Reads at most #maxPages pages starting from page 1.
    */
   async searchRecipients(query: UsaspendingQuery): Promise<LeadCandidate[]> {
+    const result = await this.searchRecipientsPage(query);
+    return result.leads;
+  }
+
+  /**
+   * Pagination-aware variant of {@link searchRecipients}: starts at
+   * `startPage` (optionally resuming after `cursor`) and reports how to
+   * continue — `nextPage` while page-param traversal is possible, plus the
+   * API's sequential cursor for walking past the 50k-record ceiling.
+   */
+  async searchRecipientsPage(
+    query: UsaspendingPageQuery,
+  ): Promise<UsaspendingPageResult> {
     const byRecipient = new Map<string, AggRow>();
-    let page = 1;
-    while (page <= this.#maxPages) {
-      const rows = await this.#fetchPageWithRetry(query, page);
+    const startPage = Math.max(1, query.startPage ?? 1);
+    let cursor = query.cursor ?? null;
+    let page = startPage;
+    let nextPage: number | null = null;
+    let nextCursor: UsaspendingCursor | null = null;
+
+    while (page < startPage + this.#maxPages) {
+      const { rows, metadata } = await this.#fetchPageWithRetry(
+        query,
+        page,
+        cursor,
+      );
       for (const row of rows) {
         const key = `${row["Recipient Name"]}|${row["Recipient UEI"] ?? ""}`;
         const agg = byRecipient.get(key) ?? { totalUsd: 0, count: 0 };
@@ -243,12 +340,35 @@ export class UsaspendingClient {
         }
         byRecipient.set(key, agg);
       }
-      // Stop when the API returns a partial page (end of results).
-      if (rows.length < this.#pageSize) break;
-      if (page < this.#maxPages) await this.#sleep(this.#requestDelayMs);
+
+      // Continue only past a full page; an explicit hasNext=false wins even
+      // when the page happens to be full. No metadata (fixtures) falls back
+      // to the full-page heuristic.
+      const moreAvailable =
+        rows.length >= this.#pageSize && metadata?.hasNext !== false;
+      if (!moreAvailable) {
+        nextPage = null;
+        nextCursor = null;
+        break;
+      }
+      // The page parameter cannot advance past the API record ceiling.
+      if (page >= USASPENDING_API_MAX_PAGE) {
+        nextPage = null;
+        nextCursor = metadata?.lastRecordCursor ?? null;
+        break;
+      }
+      nextPage = page + 1;
+      nextCursor = metadata?.lastRecordCursor ?? null;
+      if (page + 1 < startPage + this.#maxPages) {
+        await this.#sleep(this.#requestDelayMs);
+      }
       page += 1;
     }
 
+    return { leads: this.#toCandidates(byRecipient), nextPage, cursor: nextCursor };
+  }
+
+  #toCandidates(byRecipient: Map<string, AggRow>): LeadCandidate[] {
     return [...byRecipient.entries()].map(([key, agg]) => {
       const [rawNameKey, ueiKey] = key.split("|");
       const rawName = rawNameKey!;
@@ -276,12 +396,13 @@ export class UsaspendingClient {
   async #fetchPageWithRetry(
     query: UsaspendingQuery,
     page: number,
-  ): Promise<z.output<typeof rowSchema>[]> {
+    cursor?: UsaspendingCursor | null,
+  ): Promise<UsaspendingPage> {
     let attempt = 0;
     // eslint-disable-next-line no-constant-condition
     while (true) {
       try {
-        return await this.#fetchPage(query, page);
+        return await this.#fetchPage(query, page, cursor);
       } catch (error) {
         const retryable =
           error instanceof SourceFetchError && error.transient;
@@ -295,11 +416,12 @@ export class UsaspendingClient {
   async #fetchPage(
     query: UsaspendingQuery,
     page: number,
-  ): Promise<z.output<typeof rowSchema>[]> {
+    cursor?: UsaspendingCursor | null,
+  ): Promise<UsaspendingPage> {
     const response = await this.#fetchImpl(USASPENDING_SEARCH_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
-      body: JSON.stringify(buildRequestBody(this.#pageSize, query, page)),
+      body: JSON.stringify(buildRequestBody(this.#pageSize, query, page, cursor)),
       signal: AbortSignal.timeout(this.#timeoutMs),
     }).catch((cause: unknown) => {
       // Network failures and timeouts are inherently retryable.
@@ -336,6 +458,25 @@ export class UsaspendingClient {
         cause: parsed.error,
       });
     }
-    return parsed.data.results;
+    const meta = parsed.data.page_metadata;
+    if (meta === undefined) {
+      return { rows: parsed.data.results };
+    }
+    const lastRecordCursor =
+      meta.last_record_unique_id !== undefined &&
+      typeof meta.last_record_sort_value === "string"
+        ? {
+            sortValue: meta.last_record_sort_value,
+            uniqueId: meta.last_record_unique_id,
+          }
+        : null;
+    return {
+      rows: parsed.data.results,
+      metadata: {
+        ...(meta.hasNext === undefined ? {} : { hasNext: meta.hasNext }),
+        lastRecordCursor,
+      },
+    };
   }
 }
+

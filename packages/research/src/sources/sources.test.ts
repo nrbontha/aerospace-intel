@@ -245,6 +245,122 @@ describe("UsaspendingClient schema validation", () => {
       ],
       limit: 100,
       page: 1,
+      // Explicit stable ordering: without it the API walks recipients
+      // Z→A and bounded crawls only ever sample the alphabet tail.
+      sort: "Recipient Name",
+      order: "asc",
+    });
+  });
+});
+
+describe("UsaspendingClient cursor pagination", () => {
+  it("reports nextPage and the API cursor from page_metadata", async () => {
+    const { spy, fetchImpl } = fetchSpy(() =>
+      jsonResponse({
+        results: loadFixture("usaspending-page1").results,
+        page_metadata: {
+          page: 1,
+          hasNext: true,
+          last_record_unique_id: 359759755,
+          last_record_sort_value: "Aero Structures Manufacturing Inc",
+        },
+      }),
+    );
+    const client = new UsaspendingClient({
+      fetchImpl,
+      sleep: noSleep,
+      pageSize: 2,
+      maxPages: 1,
+    });
+
+    const result = await client.searchRecipientsPage({ timePeriod: FY_WINDOW });
+
+    expect(spy.calls).toHaveLength(1);
+    expect(result.nextPage).toBe(2);
+    expect(result.cursor).toEqual({
+      sortValue: "Aero Structures Manufacturing Inc",
+      uniqueId: 359759755,
+    });
+  });
+
+  it("stops without nextPage when hasNext is explicitly false", async () => {
+    const { spy, fetchImpl } = fetchSpy(() =>
+      jsonResponse({
+        results: loadFixture("usaspending-page1").results,
+        page_metadata: { page: 1, hasNext: false },
+      }),
+    );
+    const client = new UsaspendingClient({
+      fetchImpl,
+      sleep: noSleep,
+      pageSize: 2,
+      maxPages: 3,
+    });
+
+    const result = await client.searchRecipientsPage({ timePeriod: FY_WINDOW });
+
+    expect(spy.calls).toHaveLength(1); // no second page requested
+    expect(result.nextPage).toBeNull();
+  });
+
+  it("resumes at startPage and forwards the cursor in the request body", async () => {
+    const { spy, fetchImpl } = fetchSpy((_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      return jsonResponse({
+        results: loadFixture("usaspending-page1").results,
+        page_metadata: { page: body.page, hasNext: true },
+      });
+    });
+    const client = new UsaspendingClient({
+      fetchImpl,
+      sleep: noSleep,
+      pageSize: 2,
+      maxPages: 1,
+    });
+
+    const result = await client.searchRecipientsPage({
+      timePeriod: FY_WINDOW,
+      startPage: 42,
+      cursor: { sortValue: "KIT PACK CO., INC.", uniqueId: 123456789 },
+    });
+
+    const body = JSON.parse(String(spy.calls[0]!.init?.body));
+    expect(body.page).toBe(42);
+    expect(body.last_record_sort_value).toBe("KIT PACK CO., INC.");
+    expect(body.last_record_unique_id).toBe(123456789);
+    expect(result.nextPage).toBe(43);
+  });
+
+  it("refuses to advance past the API's 50k-record page ceiling", async () => {
+    const { spy, fetchImpl } = fetchSpy(() =>
+      jsonResponse({
+        results: loadFixture("usaspending-page1").results,
+        page_metadata: {
+          page: 500,
+          hasNext: true,
+          last_record_unique_id: 999,
+          last_record_sort_value: "ZEPHYR INTERNATIONAL LLC",
+        },
+      }),
+    );
+    const client = new UsaspendingClient({
+      fetchImpl,
+      sleep: noSleep,
+      pageSize: 2,
+      maxPages: 2,
+    });
+
+    const result = await client.searchRecipientsPage({
+      timePeriod: FY_WINDOW,
+      startPage: 500,
+    });
+
+    expect(spy.calls).toHaveLength(1); // page 501 would be rejected by the API
+    expect(result.nextPage).toBeNull();
+    // The cursor still hands off so deeper traversal can resume sequentially.
+    expect(result.cursor).toEqual({
+      sortValue: "ZEPHYR INTERNATIONAL LLC",
+      uniqueId: 999,
     });
   });
 });
