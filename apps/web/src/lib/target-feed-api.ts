@@ -42,7 +42,7 @@ function envelopeError(payload: unknown, status: number): Error {
   return new Error(`Request failed (${status}).`);
 }
 
-async function fetchEnvelope<T>(url: string, signal: AbortSignal): Promise<T> {
+export async function fetchEnvelope<T>(url: string, signal: AbortSignal): Promise<T> {
   const response = await fetch(url, {
     cache: "no-store",
     credentials: "same-origin",

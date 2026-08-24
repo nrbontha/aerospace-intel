@@ -12,6 +12,8 @@ import { companies, identityMatchCandidates, leads } from "../schema.js";
 export interface LeadListQuery {
   campaignId?: string;
   status?: string;
+  /** Server-side text search across lead name, possible domain and resolved company display name. */
+  query?: string;
   page: number;
   pageSize: number;
 }
@@ -45,6 +47,13 @@ export async function listLeads(
       ? []
       : [eq(leads.campaignId, query.campaignId)]),
     ...(query.status === undefined ? [] : [sql`${leads.status} = ${query.status}`]),
+    ...(query.query === undefined || query.query.length === 0
+      ? []
+      : [
+          sql`(${leads.rawName} ilike ${`%${query.query}%`}
+            or ${leads.possibleDomain} ilike ${`%${query.query}%`}
+            or ${companies.displayName} ilike ${`%${query.query}%`})`,
+        ]),
   ];
   const where = filters.length === 0 ? undefined : and(...filters);
 
@@ -69,6 +78,8 @@ export async function listLeads(
       identityMatchCandidates,
       eq(identityMatchCandidates.leadId, leads.id),
     )
+    // Search may match the resolved company's display name.
+    .leftJoin(companies, eq(companies.id, leads.resolvedCompanyId))
     .where(where)
     .groupBy(leads.id)
     .orderBy(sql`${leads.createdAt} desc`)
@@ -78,6 +89,7 @@ export async function listLeads(
   const [totalRow] = await db
     .select({ total: count() })
     .from(leads)
+    .leftJoin(companies, eq(companies.id, leads.resolvedCompanyId))
     .where(where);
 
   return {

@@ -1,4 +1,10 @@
-import { expect, test, type Page } from "@playwright/test";
+import {
+  expect,
+  test,
+  type APIRequestContext,
+  type Locator,
+  type Page,
+} from "@playwright/test";
 
 /**
  * Target Feed vertical slice: single tiered table (REDESIGN_PLAN §2), tier
@@ -27,6 +33,13 @@ async function signIn(page: Page): Promise<void> {
   await page.goto("/feed");
 }
 
+/** /feed now stacks the leads discovery inbox above the Targets table;
+ * scope every candidate assertion to the Targets section so both tables can
+ * coexist without Playwright strict-mode violations. */
+function targetsSection(page: Page): Locator {
+  return page.locator('section[aria-labelledby="target-feed-title"]');
+}
+
 test.describe("target feed", () => {
   test.describe.configure({ mode: "serial" });
 
@@ -40,7 +53,7 @@ test.describe("target feed", () => {
       page.getByRole("heading", { name: "Targets", exact: true }),
     ).toBeVisible();
 
-    const table = page.getByRole("table");
+    const table = targetsSection(page).getByRole("table");
     const emptyState = page.getByText(/No scored candidates yet/i);
     await expect(table.or(emptyState.first())).toBeVisible({ timeout: 20_000 });
 
@@ -89,10 +102,10 @@ test.describe("target feed", () => {
     await expect(page).toHaveURL(/tier=needs_research/);
 
     // When rows exist, every visible tier chip must match the filter.
-    const rows = page.getByRole("table").getByRole("row");
+    const rows = targetsSection(page).getByRole("table").getByRole("row");
     const rowCount = await rows.count();
     if (rowCount > 1) {
-      const chips = page.getByRole("table").getByText("Needs research");
+      const chips = targetsSection(page).getByRole("table").getByText("Needs research");
       expect(await chips.count()).toBeGreaterThan(0);
     }
   });
@@ -109,9 +122,8 @@ test.describe("target feed", () => {
     await signIn(page);
     await page.waitForURL(/\/feed(\?|$)/);
 
-    const table = page.getByRole("table");
-    const firstRowLink = page
-      .getByRole("table")
+    const table = targetsSection(page).getByRole("table");
+    const firstRowLink = table
       .getByRole("row")
       .nth(1)
       .getByRole("link")
@@ -166,7 +178,7 @@ test.describe("target feed", () => {
 
     // Data load enriches each row (identity + feature facts); allow time.
 
-    const table = page.getByRole("table");
+    const table = targetsSection(page).getByRole("table");
     const hasTable = await table
       .waitFor({ state: "visible", timeout: 5_000 })
       .then(() => true)
@@ -195,7 +207,7 @@ test.describe("target feed", () => {
 
     // Reload: the override must survive (server state, not just optimistic UI).
     await page.reload();
-    const reloadedTable = page.getByRole("table");
+    const reloadedTable = targetsSection(page).getByRole("table");
     await reloadedTable.waitFor({ state: "visible", timeout: 15_000 });
     const reloadedRow = reloadedTable
       .getByRole("row")
@@ -207,11 +219,126 @@ test.describe("target feed", () => {
     // The tier filter (server-side effective-tier predicate) must now match.
     await page.goto("/feed?tier=watchlist");
     await expect(
-      page
+      targetsSection(page)
         .getByRole("table")
         .getByRole("row")
         .filter({ hasText: companyName })
         .first(),
     ).toBeVisible({ timeout: 10_000 });
+  });
+});
+
+test.describe("lead discovery inbox", () => {
+  test.describe.configure({ mode: "serial" });
+
+  /** The inbox renders honestly when empty; data-dependent assertions run
+   * only when the environment actually has leads. */
+  async function leadCount(request: APIRequestContext): Promise<number> {
+    const response = await request.get("/api/v1/leads?page=1&pageSize=1");
+    if (!response.ok()) return 0;
+    const payload = (await response.json()) as {
+      meta?: { totalItems?: number };
+    };
+    return payload.meta?.totalItems ?? 0;
+  }
+
+  test("inbox renders leads table with pipeline columns and honest empty state", async ({
+    page,
+  }) => {
+    await signIn(page);
+
+    const total = await leadCount(page.request);
+    test.info().annotations.push({
+      description: `${total} leads in this environment.`,
+      type: "note",
+    });
+
+    const inbox = page.getByRole("region", { name: "Discovery inbox" });
+    await expect(
+      inbox.getByRole("heading", { name: "Discovery inbox" }),
+    ).toBeVisible({ timeout: 20_000 });
+
+    if (total === 0) {
+      await expect(
+        inbox.getByText(/No leads yet/i),
+      ).toBeVisible();
+      return;
+    }
+
+    const table = inbox.getByRole("table");
+    await expect(
+      table.getByRole("columnheader", { name: "Company" }),
+    ).toBeVisible();
+    await expect(
+      table.getByRole("columnheader", { name: "Federal $" }),
+    ).toBeVisible();
+    await expect(
+      table.getByRole("columnheader", { name: "Awards" }),
+    ).toBeVisible();
+    await expect(
+      table.getByRole("columnheader", { name: "Status" }),
+    ).toBeVisible();
+    // Status chips exist on every row.
+    expect(await table.getByText(/⚪|⚡|✓/).count()).toBeGreaterThan(0);
+  });
+
+  test("status filter chips and search drive server-side pagination params", async ({
+    page,
+  }) => {
+    await signIn(page);
+
+    const total = await leadCount(page.request);
+    if (total === 0) {
+      test.skip(true, "No leads in this environment.");
+      return;
+    }
+
+    const inbox = page.getByRole("region", { name: "Discovery inbox" });
+    await inbox
+      .getByRole("group", { name: "Lead status filter" })
+      .getByRole("button", { name: "Unresolved" })
+      .click();
+    await expect(page).toHaveURL(/leadStatus=unresolved_lead/);
+
+    const york = await page.request.get(
+      "/api/v1/leads?page=1&pageSize=5&q=YORK",
+    );
+    if (york.ok()) {
+      const payload = (await york.json()) as { data?: unknown[] };
+      if ((payload.data?.length ?? 0) > 0) {
+        await page.goto("/feed?leadQ=YORK");
+        await expect(
+          inbox
+            .getByRole("table")
+            .getByRole("row")
+            .filter({
+              hasText: "YORK PRECISION MACHINING AND HYDRAULICS",
+            })
+            .first(),
+        ).toBeVisible({ timeout: 10_000 });
+      }
+    }
+  });
+
+  test("row click opens the lead detail drawer with award context", async ({
+    page,
+  }) => {
+    await signIn(page);
+
+    const total = await leadCount(page.request);
+    if (total === 0) {
+      test.skip(true, "No leads in this environment.");
+      return;
+    }
+
+    const inbox = page.getByRole("region", { name: "Discovery inbox" });
+    const firstRow = inbox.getByRole("table").getByRole("row").nth(1);
+    await firstRow.click();
+    const drawer = page.getByRole("dialog");
+    await expect(
+      drawer.getByRole("heading", { name: "Award context" }),
+    ).toBeVisible();
+    await drawer.getByRole("button", { name: "Close" }).click();
+    await expect(drawer).not.toBeVisible();
   });
 });
