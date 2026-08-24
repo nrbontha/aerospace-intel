@@ -207,7 +207,6 @@ function buildSeedPlanItems(
 ): SeedPlanItem[] {
   const seeds = normalizeSeeds(row.seeds);
   const excluded = new Set(row.excludedSources);
-  const searchable = new Set(searchableSources);
   const items: SeedPlanItem[] = [];
   const seen = new Set<string>();
   const push = (itemType: FrontierItemType, value: string, priority: number) => {
@@ -218,10 +217,16 @@ function buildSeedPlanItems(
     items.push({ itemType, normalizedValue, priority });
   };
 
+  // Registry keys are catalog display names ("USAspending"); seeds may use
+  // any case. Match case-insensitively on trimmed values.
+  const searchableLower = new Set(
+    searchableSources.map((s) => s.trim().toLowerCase()),
+  );
+
   for (const source of seeds.sources) {
     if (excluded.has(source)) continue;
     if (!policy.enabledSources.includes(source)) continue;
-    if (!searchable.has(source)) continue;
+    if (!searchableLower.has(source.trim().toLowerCase())) continue;
     push("source", source, policy.sourcePriorities[source] ?? 0);
   }
   for (const platform of seeds.platforms) push("platform", platform, 0);

@@ -257,7 +257,7 @@ describe("UsaspendingClient cursor pagination", () => {
   it("reports nextPage and the API cursor from page_metadata", async () => {
     const { spy, fetchImpl } = fetchSpy(() =>
       jsonResponse({
-        results: loadFixture("usaspending-page1").results,
+        results: (loadFixture("usaspending-page1") as { results: unknown }).results,
         page_metadata: {
           page: 1,
           hasNext: true,
@@ -286,7 +286,7 @@ describe("UsaspendingClient cursor pagination", () => {
   it("stops without nextPage when hasNext is explicitly false", async () => {
     const { spy, fetchImpl } = fetchSpy(() =>
       jsonResponse({
-        results: loadFixture("usaspending-page1").results,
+        results: (loadFixture("usaspending-page1") as { results: unknown }).results,
         page_metadata: { page: 1, hasNext: false },
       }),
     );
@@ -307,7 +307,7 @@ describe("UsaspendingClient cursor pagination", () => {
     const { spy, fetchImpl } = fetchSpy((_url, init) => {
       const body = JSON.parse(String(init?.body));
       return jsonResponse({
-        results: loadFixture("usaspending-page1").results,
+        results: (loadFixture("usaspending-page1") as { results: unknown }).results,
         page_metadata: { page: body.page, hasNext: true },
       });
     });
@@ -334,7 +334,7 @@ describe("UsaspendingClient cursor pagination", () => {
   it("refuses to advance past the API's 50k-record page ceiling", async () => {
     const { spy, fetchImpl } = fetchSpy(() =>
       jsonResponse({
-        results: loadFixture("usaspending-page1").results,
+        results: (loadFixture("usaspending-page1") as { results: unknown }).results,
         page_metadata: {
           page: 500,
           hasNext: true,
