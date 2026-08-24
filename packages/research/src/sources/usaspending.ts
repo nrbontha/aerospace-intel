@@ -127,8 +127,13 @@ function parseAmountUsd(raw: unknown): number | null {
 }
 
 const rowSchema = z.object({
-  "Recipient Name": z.string().min(1),
-  "Recipient UEI": z.union([z.string(), z.null()]).optional(),
+  // Real pages occasionally carry null/blank recipient cells; such rows are
+  // dropped during aggregation instead of failing the whole 100-row page.
+  "Recipient Name": z.union([z.string(), z.null()]).optional(),
+  "Recipient UEI": z
+    .union([z.string(), z.number(), z.null()])
+    .optional()
+    .transform((v) => (v === null || v === undefined ? undefined : String(v))),
   "Recipient UEI Count": z
     .union([z.number(), z.string(), z.null()])
     .optional(),
@@ -149,7 +154,8 @@ const pageMetadataSchema = z.object({
 
 const responseSchema = z.object({
   results: z.array(rowSchema),
-  page_metadata: pageMetadataSchema.optional(),
+  // The API sometimes emits an explicit null here between pages.
+  page_metadata: pageMetadataSchema.nullish(),
 });
 
 export interface UsaspendingTimePeriod {
@@ -327,7 +333,11 @@ export class UsaspendingClient {
         cursor,
       );
       for (const row of rows) {
-        const key = `${row["Recipient Name"]}|${row["Recipient UEI"] ?? ""}`;
+        const name = row["Recipient Name"];
+        if (name === undefined || name === null || name.trim() === "") {
+          continue;
+        }
+        const key = `${name}|${row["Recipient UEI"] ?? ""}`;
         const agg = byRecipient.get(key) ?? { totalUsd: 0, count: 0 };
         agg.totalUsd += row["Award Amount"] ?? 0;
         agg.count += 1;
@@ -459,7 +469,7 @@ export class UsaspendingClient {
       });
     }
     const meta = parsed.data.page_metadata;
-    if (meta === undefined) {
+    if (meta === undefined || meta === null) {
       return { rows: parsed.data.results };
     }
     const lastRecordCursor =

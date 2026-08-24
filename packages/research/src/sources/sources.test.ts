@@ -201,17 +201,35 @@ describe("UsaspendingClient error taxonomy", () => {
 });
 
 describe("UsaspendingClient schema validation", () => {
-  it("rejects a mutated fixture missing Recipient Name (permanent)", async () => {
+  it("drops rows missing Recipient Name instead of failing the page", async () => {
+    // One malformed row mid-stream used to fail schema validation for the
+    // whole 100-row page, which stalled a running crawl with retry backoff.
     const broken = structuredClone(loadFixture("usaspending-page1")) as {
       results: Record<string, unknown>[];
+      page_metadata?: unknown;
     };
     delete broken.results[0]!["Recipient Name"];
-    const { fetchImpl } = fetchSpy(() => jsonResponse(broken));
+    broken.page_metadata = null; // API emits explicit null between pages
+    const { spy, fetchImpl } = fetchSpy(() => jsonResponse(broken));
     const client = new UsaspendingClient({ fetchImpl, sleep: noSleep });
 
-    await expect(
-      client.searchRecipients({ timePeriod: FY_WINDOW }),
-    ).rejects.toMatchObject({ transient: false });
+    const leads = await client.searchRecipients({
+      naicsCodes: [...AEROSPACE_NAICS],
+      timePeriod: FY_WINDOW,
+    });
+
+    expect(spy.calls).toHaveLength(1);
+    // Page 1 fixture holds 4 rows; the nameless one (row 0) is skipped.
+    expect(leads).toHaveLength(3);
+    // Row 0 belonged to Aero Structures: its aggregate loses that award…
+    const aero = leads.find(
+      (lead) => lead.rawName === "Aero Structures Manufacturing Inc",
+    );
+    expect(aero?.awardCount).toBe(1);
+    // …while the other three recipients survive intact.
+    expect(leads.some((lead) => lead.rawName === "Precision Gears LLC")).toBe(
+      true,
+    );
   });
 
   it("sends the documented request shape (award types, fields, limit, page)", async () => {
