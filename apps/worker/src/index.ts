@@ -16,6 +16,8 @@ import {
   createRefreshResearchHandler,
   createSourceResearchHandler,
 } from "./handlers/index.js";
+import { startCampaignSweep, type CampaignSweepHandle } from "./campaign-sweep.js";
+import { getCampaignPublisher } from "./handlers/campaign-process.js";
 import {
   createWorkerQueue,
   type QueueLogger,
@@ -185,6 +187,7 @@ export async function startWorker(): Promise<WorkerRuntime> {
   let healthServer: HealthServer | undefined;
   let queue: WorkerQueue | undefined;
   let supervisor: SupervisorRuntime | undefined;
+  let sweep: CampaignSweepHandle | undefined;
 
   try {
     healthServer = await startHealthServer(env.PORT, {
@@ -272,6 +275,15 @@ export async function startWorker(): Promise<WorkerRuntime> {
       });
       log("info", "supervisor.started", { instanceId: supervisor.instanceId });
     }
+
+    // Self-healing: revive running campaigns whose heartbeat job died
+    // (crash, redeploy, debounce) instead of leaving them stalled forever.
+    sweep = startCampaignSweep({
+      publisher: () => getCampaignPublisher(databaseUrl),
+      queueName: env.RESEARCH_QUEUE_NAME,
+      logger: log,
+    });
+    log("info", "campaign.sweep_started", {});
   } catch (error) {
     try {
       await stopComponents(healthServer, queue, supervisor);
@@ -280,7 +292,6 @@ export async function startWorker(): Promise<WorkerRuntime> {
     }
     throw error;
   }
-
   log("info", "worker.started", {
     healthPort: env.PORT,
     queueName: env.RESEARCH_QUEUE_NAME,
@@ -292,6 +303,7 @@ export async function startWorker(): Promise<WorkerRuntime> {
     stop(): Promise<void> {
       stopPromise ??= (async () => {
         log("info", "worker.stopping");
+        if (sweep !== undefined) sweep.stop();
         await stopComponents(healthServer, queue, supervisor);
         log("info", "worker.stopped");
       })();

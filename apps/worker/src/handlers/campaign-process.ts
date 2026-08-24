@@ -41,7 +41,7 @@ export interface CampaignProcessHandlerOptions {
 
 let publisherPromise: Promise<PgBoss> | undefined;
 
-function getCampaignPublisher(databaseUrl: string): Promise<PgBoss> {
+export function getCampaignPublisher(databaseUrl: string): Promise<PgBoss> {
   publisherPromise ??= (async () => {
     const boss = new PgBoss({
       application_name: "asi-worker-campaign-publisher",
