@@ -125,11 +125,28 @@ Start:
 railway up --service worker --detach -y
 ```
 
-or `railway redeploy --service worker` when the current image is already the one you want. With `RESEARCH_SHARED_STORAGE=false`, worker `/health` is 200 and `/ready` is **503** (`queue: not_ready`, `researchHandlers=false`). That is the intended fail-closed state, not a reason to set the flag true.
+or `railway redeploy --service worker` when the current image is already the one you want. Since the storage-free campaign handlers were split out, the queue starts whenever `DATABASE_URL` is set, so `/health` and `/ready` are **200** even with `RESEARCH_SHARED_STORAGE=false`; only OpenRouter-backed research handlers stay off (`worker.started` logs `researchHandlers=false`).
 
-## Agent supervisor
+## Campaign discovery pipeline
 
-The worker process also runs the research-agent supervisor (`apps/worker/src/supervisor/supervisor.ts`): it polls due agents every 5s and runs up to 4 concurrent bounded ticks (60s wall time each). Constants: lease 90s, heartbeat every 15s during a tick, failure backoff 15m × 2^n capped at 24h (`apps/worker/src/supervisor/supervisor.ts` defaults).
+- `campaign-process.v1` / `leads.ingest.v1` are storage-free (Postgres plus
+  public no-auth APIs only) and register regardless of
+  `RESEARCH_SHARED_STORAGE`; document-dependent research handlers stay
+  gated behind it.
+- Web `POST /api/v1/campaigns/[id]/{start,resume}` enqueues the heartbeat;
+  a 60s worker sweep re-kicks running campaigns whose heartbeat died.
+  `campaign.sweep_revived` in worker logs means exactly that happened.
+- USAspending walks paginate with an explicit `Recipient Name asc` sort,
+  advance via self-requeued query items (`payload.resumePage` +
+  `cursorSortValue`/`cursorUniqueId`), and treat a partial page as the only
+  in-stream exhaustion signal — the API's `hasNext` flips false at its
+  internal 10k-record window while deeper pages still serve data, and its
+  final page reports null cursor fields. Sustained crawling can trip
+  temporary source-side throttling: month walks fail together with
+  transient errors, back off exponentially (15m base), and resume
+  automatically. `MAX_ITEM_ATTEMPTS` (5) is the point where a month is
+  abandoned; re-running plan/start on the campaign restarts unfinished
+  months from their stored cursors.
 
 Enabling/disabling:
 
