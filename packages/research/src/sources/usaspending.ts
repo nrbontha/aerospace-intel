@@ -363,15 +363,17 @@ export class UsaspendingClient {
         nextCursor = null;
         break;
       }
-      // Without a cursor the page parameter cannot advance past the API
-      // record ceiling; with one, sequential pagination may proceed.
-      if (page >= USASPENDING_API_MAX_PAGE && cursor === null) {
+      // Without a fresh anchor the page parameter cannot advance past the
+      // API record ceiling; with one, sequential pagination may proceed.
+      nextCursor = metadata?.lastRecordCursor ?? null;
+      if (page + 1 > USASPENDING_API_MAX_PAGE && nextCursor === null) {
         nextPage = null;
-        nextCursor = metadata?.lastRecordCursor ?? null;
         break;
       }
       nextPage = page + 1;
-      nextCursor = metadata?.lastRecordCursor ?? null;
+      // Each subsequent fetch anchors on the freshest cursor so deep
+      // sequential requests resume from the true stream position.
+      cursor = nextCursor;
       if (page + 1 < startPage + this.#maxPages) {
         await this.#sleep(this.#requestDelayMs);
       }

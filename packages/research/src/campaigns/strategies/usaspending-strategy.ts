@@ -90,12 +90,23 @@ const usaspendingQueryPayloadSchema = z
     naics: z.array(z.string().trim().min(1)).optional(),
     psc: z.array(z.string().trim().min(1)).optional(),
     timePeriod: z.union([timePeriodSchema, z.array(timePeriodSchema)]).optional(),
-    // Cursor for multi-slice full coverage: the page this slice starts from.
-    resumePage: z.number().int().min(1).max(USASPENDING_API_MAX_PAGE).optional(),
-    // Sequential anchor for traversal past the API's 50k-record ceiling.
+    // Cursor for multi-slice full coverage: the page this slice starts
+    // from. Pages past the API's record ceiling are valid only when the
+    // payload carries the sequential anchor.
+    resumePage: z.number().int().min(1).optional(),
     cursorSortValue: z.string().optional(),
     cursorUniqueId: z.number().int().optional(),
-  });
+  })
+  .refine(
+    (value) =>
+      value.resumePage === undefined ||
+      value.resumePage <= USASPENDING_API_MAX_PAGE ||
+      (value.cursorSortValue !== undefined && value.cursorUniqueId !== undefined),
+    {
+      message:
+        "resumePage past the API ceiling requires cursorSortValue and cursorUniqueId",
+    },
+  );
 
 /** Trailing-365-day window ending "today" (UTC date strings). */
 function defaultTimePeriod(now: Date): { startDate: string; endDate: string } {
@@ -104,6 +115,37 @@ function defaultTimePeriod(now: Date): { startDate: string; endDate: string } {
     .toISOString()
     .slice(0, 10);
   return { startDate: start, endDate: end };
+}
+
+/**
+ * Split [startDate, endDate] into contiguous calendar-month windows
+ * (clamped to the enclosing range, inclusive). A trailing-365-day window
+ * yields 12-13 buckets; each stays far below USAspending's sorted-access
+ * limits so every monthly query can be walked to exhaustion.
+ */
+export function monthWindows(
+  startDate: string,
+  endDate: string,
+): Array<{ startDate: string; endDate: string }> {
+  const end = new Date(`${endDate}T00:00:00Z`);
+  const windows: Array<{ startDate: string; endDate: string }> = [];
+  let cursor = new Date(`${startDate}T00:00:00Z`);
+  while (cursor <= end) {
+    const monthEnd = new Date(
+      Date.UTC(
+        cursor.getUTCFullYear(),
+        cursor.getUTCMonth() + 1,
+        0, // last day of this month
+      ),
+    );
+    const winStart = cursor.toISOString().slice(0, 10);
+    const winEnd = (monthEnd < end ? monthEnd : end).toISOString().slice(0, 10);
+    windows.push({ startDate: winStart, endDate: winEnd });
+    cursor = new Date(
+      Date.UTC(cursor.getUTCFullYear(), cursor.getUTCMonth() + 1, 1),
+    );
+  }
+  return windows;
 }
 
 /** Collapse whitespace and lowercase — stable name identity without UEI/domain. */
@@ -173,27 +215,30 @@ export class UsaspendingDiscoveryStrategy implements DiscoveryStrategy {
   }
 
   /**
-   * A USAspending source item expands to exactly one default query item.
-   * The normalizedValue is constant so re-processing is deduped upstream;
-   * the time window is recomputed at proposal time by design.
+   * A USAspending source item expands to one default query item PER MONTH
+   * of the trailing-365-day window. Sorted API access degrades at large
+   * result volumes (spurious hasNext:false around the internal 10k-record
+   * window; hard 50k-record page-param ceiling), so a single year-long
+   * window cannot be fully walked. Monthly windows keep every crawl far
+   * below all limits while the union covers the whole period.
+   * normalizedValues are distinct per month so re-expansion dedupes.
    */
   #expandSourceItem(item: FrontierItemView): FrontierProposal[] {
     const identity = `${item.normalizedValue}`.trim().toLowerCase();
     if (!identity.includes("usaspending")) return [];
-    return [
-      {
-        itemType: "query",
-        normalizedValue: USASPENDING_DEFAULT_QUERY_VALUE,
-        estimatedCostUsd: 0,
-        priority: 5,
-        payload: {
-          source: "usaspending",
-          naics: [...AEROSPACE_NAICS],
-          psc: [...AIRCRAFT_COMPONENT_PSC],
-          timePeriod: defaultTimePeriod(new Date()),
-        },
+    const { startDate, endDate } = defaultTimePeriod(new Date());
+    return monthWindows(startDate, endDate).map((timePeriod) => ({
+      itemType: "query" as const,
+      normalizedValue: `${USASPENDING_DEFAULT_QUERY_VALUE}:${timePeriod.startDate.slice(0, 7)}`,
+      estimatedCostUsd: 0,
+      priority: 5,
+      payload: {
+        source: "usaspending",
+        naics: [...AEROSPACE_NAICS],
+        psc: [...AIRCRAFT_COMPONENT_PSC],
+        timePeriod,
       },
-    ];
+    }));
   }
 
   /**
@@ -243,10 +288,10 @@ export class UsaspendingDiscoveryStrategy implements DiscoveryStrategy {
       cursor,
     });
     const proposals = result.leads.map(leadCandidateToProposal);
-    if (
-      result.nextPage !== null &&
-      result.nextPage <= USASPENDING_API_MAX_PAGE
-    ) {
+    if (result.nextPage !== null) {
+      // The client only reports nextPage when it holds a valid way to
+      // resume: page-param traversal below the ceiling, or a sequential
+      // cursor past it.
       proposals.push({
         itemType: "query",
         normalizedValue: item.normalizedValue,

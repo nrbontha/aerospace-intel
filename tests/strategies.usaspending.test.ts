@@ -172,7 +172,7 @@ describe("UsaspendingDiscoveryStrategy", () => {
     expect(JSON.stringify(first)).toEqual(JSON.stringify(second));
   });
 
-  it("expands a usaspending source item into exactly one default query item", async () => {
+  it("expands a usaspending source item into monthly default query items", async () => {
     const { strategy } = makeStrategy();
     const proposals = await strategy.proposeFrontierItems(campaign, {
       ...queryItem(),
@@ -180,21 +180,43 @@ describe("UsaspendingDiscoveryStrategy", () => {
       normalizedValue: "usaspending",
       payload: {},
     });
-    expect(proposals).toHaveLength(1);
-    expect(proposals[0]?.itemType).toBe("query");
-    expect(proposals[0]?.normalizedValue).toBe(USASPENDING_DEFAULT_QUERY_VALUE);
-    expect(proposals[0]?.estimatedCostUsd).toBe(0);
-    expect(Array.isArray(proposals[0]?.payload?.["naics"])).toBe(true);
-    expect(Array.isArray(proposals[0]?.payload?.["psc"])).toBe(true);
+    // Trailing-365-day window split into contiguous calendar months.
+    expect(proposals.length).toBeGreaterThanOrEqual(12);
+    for (const proposal of proposals) {
+      expect(proposal.itemType).toBe("query");
+      expect(proposal.normalizedValue.startsWith(USASPENDING_DEFAULT_QUERY_VALUE)).toBe(true);
+      expect(proposal.estimatedCostUsd).toBe(0);
+      const period = proposal.payload?.["timePeriod"] as {
+        startDate: string;
+        endDate: string;
+      };
+      expect(period.startDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(period.endDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+      expect(Array.isArray(proposal.payload?.["naics"])).toBe(true);
+      expect(Array.isArray(proposal.payload?.["psc"])).toBe(true);
+    }
 
-    // Re-expansion proposes the same identity — deduped by the runner key.
+    // Windows are contiguous and cover exactly one year.
+    const periods = proposals.map(
+      (p) => p.payload?.["timePeriod"] as { startDate: string; endDate: string },
+    );
+    for (let i = 1; i < periods.length; i += 1) {
+      const prev = new Date(periods[i - 1]!.endDate);
+      const next = new Date(periods[i]!.startDate);
+      expect(next.getUTCDate()).toBe(1);
+      expect(next.getTime() - prev.getTime()).toBeLessThanOrEqual(24 * 60 * 60 * 1000 * 2);
+    }
+
+    // Re-expansion proposes the same identities — deduped by the runner key.
     const again = await strategy.proposeFrontierItems(campaign, {
       ...queryItem(),
       itemType: "source",
       normalizedValue: "usaspending",
       payload: {},
     });
-    expect(again[0]?.normalizedValue).toBe(proposals[0]?.normalizedValue);
+    expect(again.map((p) => p.normalizedValue)).toEqual(
+      proposals.map((p) => p.normalizedValue),
+    );
   });
 
   it("proposes no continuation when the result set is exhausted", async () => {
@@ -203,6 +225,62 @@ describe("UsaspendingDiscoveryStrategy", () => {
     const { strategy } = makeStrategy(2, { pageSize: 10 });
     const proposals = await strategy.proposeFrontierItems(campaign, queryItem());
     expect(proposals.every((p) => p.itemType === "company")).toBe(true);
+  });
+
+  it("continues past the API ceiling when the payload carries a cursor", async () => {
+    // resumePage 501 is only valid alongside the sequential anchor; the
+    // stub asserts the anchor reaches the client and the walk continues.
+    const seen: Array<Record<string, unknown>> = [];
+    const recipient = {
+      rawName: "Deep Page Aero Inc",
+      uei: "DEEP00000001",
+      awardCount: 1,
+      totalAwardValueUsd: 5_000,
+      source: "usaspending" as const,
+      sourceLocator: "usaspending://spending_by_award?recipient_name=Deep",
+    };
+    const strategy = new UsaspendingDiscoveryStrategy({
+      client: {
+        searchRecipients: async () => [],
+        searchRecipientsPage: async (query) => {
+          seen.push(query);
+          return { leads: [recipient], nextPage: 502, cursor: { sortValue: "DEEP ANCHOR LLC", uniqueId: 77 } };
+        },
+      },
+    });
+    const proposals = await strategy.proposeFrontierItems(campaign, queryItem({
+      payload: {
+        naics: ["336413"],
+        timePeriod: { startDate: "2025-01-01", endDate: "2025-12-31" },
+        resumePage: 501,
+        cursorSortValue: "PRIOR ANCHOR LLC",
+        cursorUniqueId: 33,
+      },
+    }));
+
+    expect(seen[0]).toMatchObject({
+      startPage: 501,
+      cursor: { sortValue: "PRIOR ANCHOR LLC", uniqueId: 33 },
+    });
+    const continuation = proposals.find((p) => p.itemType === "query");
+    expect(continuation).toBeDefined();
+    expect(continuation?.payload?.["resumePage"]).toBe(502);
+    expect(continuation?.payload?.["cursorSortValue"]).toBe("DEEP ANCHOR LLC");
+    expect(continuation?.payload?.["cursorUniqueId"]).toBe(77);
+  });
+
+  it("ignores a post-ceiling resume page that lacks a cursor", async () => {
+    const strategy = new UsaspendingDiscoveryStrategy({
+      client: { searchRecipients: async () => [] },
+    });
+    const proposals = await strategy.proposeFrontierItems(campaign, queryItem({
+      payload: {
+        naics: ["336413"],
+        timePeriod: { startDate: "2025-01-01", endDate: "2025-12-31" },
+        resumePage: 501,
+      },
+    }));
+    expect(proposals).toEqual([]); // invalid payload -> not a USAspending query
   });
 
   it("resumes at payload.resumePage instead of restarting from page 1", async () => {

@@ -380,6 +380,41 @@ describe("UsaspendingClient cursor pagination", () => {
     });
   });
 
+  it("anchors each subsequent page on the previous page's cursor", async () => {
+    const { spy, fetchImpl } = fetchSpy((_url, init) => {
+      const body = JSON.parse(String(init?.body));
+      return jsonResponse({
+        results: loadPageFixture("usaspending-page1").results,
+        page_metadata: {
+          page: body.page,
+          hasNext: true,
+          last_record_unique_id: 1000 + body.page,
+          last_record_sort_value: `anchor-${body.page}`,
+        },
+      });
+    });
+    const client = new UsaspendingClient({
+      fetchImpl,
+      sleep: noSleep,
+      pageSize: 2,
+      maxPages: 2,
+    });
+
+    const result = await client.searchRecipientsPage({ timePeriod: FY_WINDOW });
+
+    expect(spy.calls).toHaveLength(2);
+    const second = JSON.parse(String(spy.calls[1]!.init?.body));
+    expect(second.page).toBe(2);
+    // The second request resumes from page 1's anchor.
+    expect(second.last_record_sort_value).toBe("anchor-1");
+    expect(second.last_record_unique_id).toBe(1001);
+    expect(result.nextPage).toBe(3);
+    expect(result.cursor).toEqual({
+      sortValue: "anchor-2",
+      uniqueId: 1002,
+    });
+  });
+
   it("advances past the page ceiling when a cursor is provided", async () => {
     // Sequential (cursor) pagination is exactly what the API prescribes
     // past its 50k-record page-param ceiling.
@@ -450,8 +485,8 @@ describe("UsaspendingClient cursor pagination", () => {
         page_metadata: {
           page: 500,
           hasNext: true,
-          last_record_unique_id: 999,
-          last_record_sort_value: "ZEPHYR INTERNATIONAL LLC",
+          last_record_unique_id: null,
+          last_record_sort_value: null,
         },
       }),
     );
@@ -469,11 +504,8 @@ describe("UsaspendingClient cursor pagination", () => {
 
     expect(spy.calls).toHaveLength(1); // page 501 would be rejected by the API
     expect(result.nextPage).toBeNull();
-    // The cursor still hands off so deeper traversal can resume sequentially.
-    expect(result.cursor).toEqual({
-      sortValue: "ZEPHYR INTERNATIONAL LLC",
-      uniqueId: 999,
-    });
+    // No anchor was reported, so deeper traversal cannot safely resume here.
+    expect(result.cursor).toBeNull();
   });
 });
 
