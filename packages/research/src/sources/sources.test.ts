@@ -232,6 +232,37 @@ describe("UsaspendingClient schema validation", () => {
     );
   });
 
+  it("treats the API's null-cursor end-of-stream page as exhausted", async () => {
+    // Verbatim shape served at the final page of a result stream
+    // (verified live 2026-08-24): hasNext false with null cursor fields.
+    const { spy, fetchImpl } = fetchSpy(() =>
+      jsonResponse({
+        results: (loadFixture("usaspending-page1") as { results: unknown }).results,
+        page_metadata: {
+          page: 100,
+          hasNext: false,
+          last_record_unique_id: null,
+          last_record_sort_value: "None",
+        },
+      }),
+    );
+    const client = new UsaspendingClient({
+      fetchImpl,
+      sleep: noSleep,
+      pageSize: 2,
+      maxPages: 2,
+    });
+
+    const result = await client.searchRecipientsPage({
+      timePeriod: FY_WINDOW,
+      startPage: 100,
+    });
+
+    expect(spy.calls).toHaveLength(1);
+    expect(result.nextPage).toBeNull();
+    expect(result.cursor).toBeNull();
+  });
+
   it("sends the documented request shape (award types, fields, limit, page)", async () => {
     const { spy, fetchImpl } = fetchSpy(() => jsonResponse({ results: [] }));
     const client = new UsaspendingClient({ fetchImpl, sleep: noSleep });

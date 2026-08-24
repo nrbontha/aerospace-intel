@@ -148,7 +148,8 @@ const rowSchema = z.object({
 const pageMetadataSchema = z.object({
   page: z.number().optional(),
   hasNext: z.boolean().optional(),
-  last_record_unique_id: z.number().optional(),
+  // The API emits explicit nulls for both cursor fields once hasNext=false.
+  last_record_unique_id: z.number().nullable().optional(),
   last_record_sort_value: z.string().nullable().optional(),
 });
 
@@ -474,6 +475,7 @@ export class UsaspendingClient {
     }
     const lastRecordCursor =
       meta.last_record_unique_id !== undefined &&
+      meta.last_record_unique_id !== null &&
       typeof meta.last_record_sort_value === "string"
         ? {
             sortValue: meta.last_record_sort_value,
