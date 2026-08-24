@@ -6,6 +6,8 @@
  *   ASI_DB_TESTS=1 DATABASE_URL=postgres://... npx vitest run tests/exports.db.test.ts
  */
 import { eq } from "drizzle-orm";
+import { existsSync, readFileSync } from "node:fs";
+
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
@@ -19,6 +21,28 @@ import {
 import { runMigrations } from "../packages/database/src/migrate.js";
 
 const DB_TESTS_ENABLED = process.env.ASI_DB_TESTS === "1";
+
+// Match the other DB-gated suites: fall back to the repo .env.local when
+// DATABASE_URL is not exported in the environment.
+function loadDatabaseUrl(): void {
+  if (process.env.DATABASE_URL !== undefined && process.env.DATABASE_URL !== "") {
+    return;
+  }
+  for (const candidate of [".env.local", ".env"]) {
+    const path = `${process.cwd()}/${candidate}`;
+    if (!existsSync(path)) continue;
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+      const match = /^DATABASE_URL=(.*)$/.exec(line.trim());
+      if (match?.[1] !== undefined) {
+        process.env.DATABASE_URL = match[1].trim();
+        return;
+      }
+    }
+  }
+}
+
+loadDatabaseUrl();
+
 const RUN_TAG = Date.now().toString(36);
 
 describe.skipIf(!DB_TESTS_ENABLED)("exports (DB)", () => {
