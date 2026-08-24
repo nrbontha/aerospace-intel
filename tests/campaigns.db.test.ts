@@ -231,6 +231,25 @@ describe.skipIf(!DB_TESTS_ENABLED)("campaign engine (DB)", () => {
     expect(second.inserted).toBe(0);
   });
 
+  it("plans source seeds case-insensitively against the adapter registry", async () => {
+    // Catalog keys are display names ("USAspending"); campaign seeds use
+    // lowercase ids. The intersection must still match.
+    const campaignId = await createTestCampaign({
+      seeds: { sources: ["usaspending"] },
+    });
+    const result = await planCampaign(campaignId, {
+      searchableSources: ["USAspending", "System for Award Management (SAM)"],
+    });
+    expect(result.inserted).toBe(1);
+    const items = await getDatabase()
+      .select()
+      .from(frontierItems)
+      .where(eq(frontierItems.campaignId, campaignId));
+    expect(items).toHaveLength(1);
+    expect(items[0]?.itemType).toBe("source");
+    expect(items[0]?.normalizedValue).toBe("usaspending");
+  });
+
   it("processes frontier children respecting depth and finishes exhausted", async () => {
     const campaignId = await createTestCampaign({ maxDepth: 1 });
     await insertRootItem(campaignId, "depth-root");
