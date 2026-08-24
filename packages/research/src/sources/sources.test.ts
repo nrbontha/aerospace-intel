@@ -11,9 +11,18 @@ import {
   UsaspendingClient,
 } from "./usaspending.js";
 
-function loadFixture(name: string): unknown {
+interface PageFixture {
+  results: Record<string, unknown>[];
+  page_metadata?: unknown;
+}
+
+/**
+ * Committed fixture files: JSON parsed once at the test boundary into the
+ * documented fixture shape (results array plus optional metadata).
+ */
+function loadPageFixture(name: string): PageFixture {
   const path = new URL(`./fixtures/${name}.json`, import.meta.url);
-  return JSON.parse(readFileSync(path, "utf8"));
+  return JSON.parse(readFileSync(path, "utf8")) as PageFixture;
 }
 
 /** Test seam: builds a Response without touching the network (many call sites). */
@@ -53,8 +62,8 @@ const FY_WINDOW = { startDate: "2021-01-01", endDate: "2026-01-01" };
 describe("UsaspendingClient aggregation", () => {
   it("aggregates rows into one LeadCandidate per recipient with exact sums, counts, freshest date", async () => {
     const pages = [
-      loadFixture("usaspending-page1"),
-      loadFixture("usaspending-page2"),
+      loadPageFixture("usaspending-page1"),
+      loadPageFixture("usaspending-page2"),
     ];
     const { spy, fetchImpl } = fetchSpy((_url, init) =>
       jsonResponse(pages[Number(JSON.parse(String(init?.body)).page) - 1]),
@@ -106,7 +115,7 @@ describe("UsaspendingClient aggregation", () => {
   it("respects the maxPages budget bound even when more pages exist", async () => {
     const { spy, fetchImpl } = fetchSpy(() =>
       // Server has >= 3 pages of results (every response is a full page).
-      jsonResponse(loadFixture("usaspending-page1")),
+      jsonResponse(loadPageFixture("usaspending-page1")),
     );
     const client = new UsaspendingClient({
       fetchImpl,
@@ -130,7 +139,7 @@ describe("UsaspendingClient aggregation", () => {
   it("rate-limit sleeps at least 1000ms between pages but not after the last", async () => {
     const sleeps: number[] = [];
     const { fetchImpl } = fetchSpy(() =>
-      jsonResponse(loadFixture("usaspending-page1")),
+      jsonResponse(loadPageFixture("usaspending-page1")),
     );
     const client = new UsaspendingClient({
       fetchImpl,
@@ -155,7 +164,7 @@ describe("UsaspendingClient error taxonomy", () => {
       callCount += 1;
       return callCount === 1
         ? jsonResponse({ error: "throttled" }, 429)
-        : jsonResponse(loadFixture("usaspending-page1"));
+        : jsonResponse(loadPageFixture("usaspending-page1"));
     });
     const client = new UsaspendingClient({ fetchImpl, sleep: noSleep });
 
@@ -204,10 +213,7 @@ describe("UsaspendingClient schema validation", () => {
   it("drops rows missing Recipient Name instead of failing the page", async () => {
     // One malformed row mid-stream used to fail schema validation for the
     // whole 100-row page, which stalled a running crawl with retry backoff.
-    const broken = structuredClone(loadFixture("usaspending-page1")) as {
-      results: Record<string, unknown>[];
-      page_metadata?: unknown;
-    };
+    const broken: PageFixture = structuredClone(loadPageFixture("usaspending-page1"));
     delete broken.results[0]!["Recipient Name"];
     broken.page_metadata = null; // API emits explicit null between pages
     const { spy, fetchImpl } = fetchSpy(() => jsonResponse(broken));
@@ -232,12 +238,54 @@ describe("UsaspendingClient schema validation", () => {
     );
   });
 
-  it("treats the API's null-cursor end-of-stream page as exhausted", async () => {
-    // Verbatim shape served at the final page of a result stream
-    // (verified live 2026-08-24): hasNext false with null cursor fields.
+  it("continues past a spurious hasNext=false while pages stay full", async () => {
+    // Under sorted access the API flips hasNext to false at its internal
+    // 10k-record window even though deeper pages keep returning data
+    // (verified live 2026-08-24). Only a partial page means exhaustion.
     const { spy, fetchImpl } = fetchSpy(() =>
       jsonResponse({
-        results: (loadFixture("usaspending-page1") as { results: unknown }).results,
+        results: loadPageFixture("usaspending-page1").results,
+        page_metadata: { page: 100, hasNext: false },
+      }),
+    );
+    const client = new UsaspendingClient({
+      fetchImpl,
+      sleep: noSleep,
+      pageSize: 4,
+      maxPages: 2,
+    });
+
+    const result = await client.searchRecipientsPage({ timePeriod: FY_WINDOW });
+
+    expect(spy.calls).toHaveLength(2); // kept walking despite hasNext:false
+    expect(result.nextPage).toBe(3);
+  });
+
+  it("stops on a partial page even without any metadata", async () => {
+    // Fixture page holds 4 rows; pageSize 10 makes it partial — the true
+    // end-of-data signal.
+    const { spy, fetchImpl } = fetchSpy(() =>
+      jsonResponse(loadPageFixture("usaspending-page1")),
+    );
+    const client = new UsaspendingClient({
+      fetchImpl,
+      sleep: noSleep,
+      pageSize: 10,
+      maxPages: 3,
+    });
+
+    const result = await client.searchRecipientsPage({ timePeriod: FY_WINDOW });
+
+    expect(spy.calls).toHaveLength(1);
+    expect(result.nextPage).toBeNull();
+  });
+
+  it("treats a partial page with null cursor fields as true exhaustion", async () => {
+    // Verbatim end-of-stream shape (verified live 2026-08-24): fewer rows
+    // than the page size plus hasNext:false and null cursor fields.
+    const { spy, fetchImpl } = fetchSpy(() =>
+      jsonResponse({
+        results: loadPageFixture("usaspending-page1").results,
         page_metadata: {
           page: 100,
           hasNext: false,
@@ -249,7 +297,7 @@ describe("UsaspendingClient schema validation", () => {
     const client = new UsaspendingClient({
       fetchImpl,
       sleep: noSleep,
-      pageSize: 2,
+      pageSize: 10, // fixture holds 4 rows -> partial page
       maxPages: 2,
     });
 
@@ -306,7 +354,7 @@ describe("UsaspendingClient cursor pagination", () => {
   it("reports nextPage and the API cursor from page_metadata", async () => {
     const { spy, fetchImpl } = fetchSpy(() =>
       jsonResponse({
-        results: (loadFixture("usaspending-page1") as { results: unknown }).results,
+        results: loadPageFixture("usaspending-page1").results,
         page_metadata: {
           page: 1,
           hasNext: true,
@@ -332,31 +380,46 @@ describe("UsaspendingClient cursor pagination", () => {
     });
   });
 
-  it("stops without nextPage when hasNext is explicitly false", async () => {
+  it("advances past the page ceiling when a cursor is provided", async () => {
+    // Sequential (cursor) pagination is exactly what the API prescribes
+    // past its 50k-record page-param ceiling.
     const { spy, fetchImpl } = fetchSpy(() =>
       jsonResponse({
-        results: (loadFixture("usaspending-page1") as { results: unknown }).results,
-        page_metadata: { page: 1, hasNext: false },
+        results: loadPageFixture("usaspending-page1").results,
+        page_metadata: {
+          page: 500,
+          hasNext: true,
+          last_record_unique_id: 42,
+          last_record_sort_value: "BASIC RUBBER AND PLASTICS CO.",
+        },
       }),
     );
     const client = new UsaspendingClient({
       fetchImpl,
       sleep: noSleep,
       pageSize: 2,
-      maxPages: 3,
+      maxPages: 1,
     });
 
-    const result = await client.searchRecipientsPage({ timePeriod: FY_WINDOW });
+    const result = await client.searchRecipientsPage({
+      timePeriod: FY_WINDOW,
+      startPage: 500,
+      cursor: { sortValue: "BAHR MACHINE COMPANY INC", uniqueId: 41 },
+    });
 
-    expect(spy.calls).toHaveLength(1); // no second page requested
-    expect(result.nextPage).toBeNull();
+    expect(spy.calls).toHaveLength(1);
+    expect(result.nextPage).toBe(501);
+    expect(result.cursor).toEqual({
+      sortValue: "BASIC RUBBER AND PLASTICS CO.",
+      uniqueId: 42,
+    });
   });
 
   it("resumes at startPage and forwards the cursor in the request body", async () => {
     const { spy, fetchImpl } = fetchSpy((_url, init) => {
       const body = JSON.parse(String(init?.body));
       return jsonResponse({
-        results: (loadFixture("usaspending-page1") as { results: unknown }).results,
+        results: loadPageFixture("usaspending-page1").results,
         page_metadata: { page: body.page, hasNext: true },
       });
     });
@@ -383,7 +446,7 @@ describe("UsaspendingClient cursor pagination", () => {
   it("refuses to advance past the API's 50k-record page ceiling", async () => {
     const { spy, fetchImpl } = fetchSpy(() =>
       jsonResponse({
-        results: (loadFixture("usaspending-page1") as { results: unknown }).results,
+        results: loadPageFixture("usaspending-page1").results,
         page_metadata: {
           page: 500,
           hasNext: true,
@@ -434,7 +497,7 @@ describe("SamEntityClient", () => {
     const { spy, fetchImpl } = fetchSpy((url) => {
       expect(url).toContain("api.sam.gov/entity-information/v3/search");
       expect(url).toContain("api_key=test-key");
-      return jsonResponse(loadFixture("sam-search"));
+      return jsonResponse(loadPageFixture("sam-search"));
     });
     const client = new SamEntityClient({
       apiKey: "test-key",

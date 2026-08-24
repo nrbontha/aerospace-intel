@@ -62,9 +62,11 @@ export interface UsaspendingSearchClient {
     pscCodes?: readonly string[];
     timePeriod: { startDate: string; endDate: string };
     startPage?: number;
+    cursor?: { sortValue: string; uniqueId: number } | null;
   }): Promise<{
     leads: LeadCandidate[];
     nextPage: number | null;
+    cursor?: { sortValue: string; uniqueId: number } | null;
   }>;
 }
 
@@ -90,6 +92,9 @@ const usaspendingQueryPayloadSchema = z
     timePeriod: z.union([timePeriodSchema, z.array(timePeriodSchema)]).optional(),
     // Cursor for multi-slice full coverage: the page this slice starts from.
     resumePage: z.number().int().min(1).max(USASPENDING_API_MAX_PAGE).optional(),
+    // Sequential anchor for traversal past the API's 50k-record ceiling.
+    cursorSortValue: z.string().optional(),
+    cursorUniqueId: z.number().int().optional(),
   });
 
 /** Trailing-365-day window ending "today" (UTC date strings). */
@@ -216,6 +221,10 @@ export class UsaspendingDiscoveryStrategy implements DiscoveryStrategy {
     // the same period instead of drifting with the calendar.
     const timePeriod = resolveTimePeriod(query.timePeriod);
     const startPage = query.resumePage ?? 1;
+    const cursor =
+      query.cursorSortValue !== undefined && query.cursorUniqueId !== undefined
+        ? { sortValue: query.cursorSortValue, uniqueId: query.cursorUniqueId }
+        : null;
     const search = {
       ...(query.naics === undefined ? {} : { naicsCodes: query.naics }),
       ...(query.psc === undefined ? {} : { pscCodes: query.psc }),
@@ -231,6 +240,7 @@ export class UsaspendingDiscoveryStrategy implements DiscoveryStrategy {
     const result = await this.#client.searchRecipientsPage({
       ...search,
       startPage,
+      cursor,
     });
     const proposals = result.leads.map(leadCandidateToProposal);
     if (
@@ -248,6 +258,12 @@ export class UsaspendingDiscoveryStrategy implements DiscoveryStrategy {
           ...(query.psc === undefined ? {} : { psc: [...query.psc] }),
           timePeriod,
           resumePage: result.nextPage,
+          ...(result.cursor === undefined || result.cursor === null
+            ? {}
+            : {
+                cursorSortValue: result.cursor.sortValue,
+                cursorUniqueId: result.cursor.uniqueId,
+              }),
         },
       });
     }

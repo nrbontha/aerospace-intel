@@ -352,18 +352,20 @@ export class UsaspendingClient {
         byRecipient.set(key, agg);
       }
 
-      // Continue only past a full page; an explicit hasNext=false wins even
-      // when the page happens to be full. No metadata (fixtures) falls back
-      // to the full-page heuristic.
-      const moreAvailable =
-        rows.length >= this.#pageSize && metadata?.hasNext !== false;
+      // Continue while the page came back full. The API's hasNext flag is
+      // unreliable under sorted access — it flips to false at its internal
+      // 10k-record window even though deeper pages keep returning data
+      // (verified live 2026-08-24: pages 101-102 served continuing rows
+      // while reporting hasNext:false). Partial page = true end.
+      const moreAvailable = rows.length >= this.#pageSize;
       if (!moreAvailable) {
         nextPage = null;
         nextCursor = null;
         break;
       }
-      // The page parameter cannot advance past the API record ceiling.
-      if (page >= USASPENDING_API_MAX_PAGE) {
+      // Without a cursor the page parameter cannot advance past the API
+      // record ceiling; with one, sequential pagination may proceed.
+      if (page >= USASPENDING_API_MAX_PAGE && cursor === null) {
         nextPage = null;
         nextCursor = metadata?.lastRecordCursor ?? null;
         break;
