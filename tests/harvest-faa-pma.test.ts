@@ -54,6 +54,7 @@ describe("FAA PMA harvest CLI arguments", () => {
         query: { holderName: "RAM Aerospace", maxRecords: 25 },
         agentKey: FAA_PMA_HARVEST_AGENT_KEY,
         apply: false,
+        refreshExisting: false,
       });
     expect(
       parseHarvestFaaPmaArgs([
@@ -67,6 +68,7 @@ describe("FAA PMA harvest CLI arguments", () => {
       query: { partNumber: "RAM-101-1", maxRecords: 7 },
       agentKey: "manual-faa-agent",
       apply: true,
+      refreshExisting: false,
     });
   });
 
@@ -90,6 +92,21 @@ describe("FAA PMA harvest CLI arguments", () => {
       parseHarvestFaaPmaArgs([
         "--holder-name",
         "RAM Aerospace",
+        "--refresh-existing",
+      ]),
+    ).toThrow(/valid only with --apply/iu);
+    expect(
+      parseHarvestFaaPmaArgs([
+        "--holder-name",
+        "RAM Aerospace",
+        "--apply",
+        "--refresh-existing",
+      ]),
+    ).toMatchObject({ apply: true, refreshExisting: true });
+    expect(() =>
+      parseHarvestFaaPmaArgs([
+        "--holder-name",
+        "RAM Aerospace",
         "--output",
         "faa.json",
       ]),
@@ -108,7 +125,12 @@ describe("FAA PMA source-signal harvest", () => {
         parseHarvestFaaPmaArgs(["--holder-name", "RAM Aerospace", "--limit", "1"]),
         { client, db: fakeDb, resolveAgentId, upsertSignal },
       ),
-    ).resolves.toEqual({ records: 1, created: 0, duplicates: 0 });
+    ).resolves.toEqual({
+      records: 1,
+      created: 0,
+      duplicates: 0,
+      refreshed: 0,
+    });
     expect(client.search).toHaveBeenCalledOnce();
     expect(client.search).toHaveBeenCalledWith({
       holderName: "RAM Aerospace",
@@ -138,7 +160,12 @@ describe("FAA PMA source-signal harvest", () => {
           now: () => new Date("2026-08-25T14:30:00.000Z"),
         },
       ),
-    ).resolves.toEqual({ records: 1, created: 1, duplicates: 0 });
+    ).resolves.toEqual({
+      records: 1,
+      created: 1,
+      duplicates: 0,
+      refreshed: 0,
+    });
 
     expect(resolveAgentId).toHaveBeenCalledWith(
       fakeDb,
@@ -182,6 +209,7 @@ describe("FAA PMA source-signal harvest", () => {
       seenAgentIds.push(input.agentId);
       return { duplicate: input.sourceLocator === record.guidUrl };
     });
+    const refreshSignal = vi.fn(async () => true);
 
     await expect(
       runFaaPmaHarvest(
@@ -191,10 +219,101 @@ describe("FAA PMA source-signal harvest", () => {
           db: fakeDb,
           resolveAgentId: async () => undefined,
           upsertSignal,
+          refreshSignal,
         },
       ),
-    ).resolves.toEqual({ records: 2, created: 1, duplicates: 1 });
+    ).resolves.toEqual({
+      records: 2,
+      created: 1,
+      duplicates: 1,
+      refreshed: 0,
+    });
     expect(upsertSignal).toHaveBeenCalledTimes(2);
     expect(seenAgentIds).toEqual([undefined, undefined]);
+    expect(refreshSignal).not.toHaveBeenCalled();
+  });
+
+  it("refreshes official payload and address fields without requeueing terminal state", async () => {
+    const refreshedRecord: FaaPmaRecord = {
+      ...record,
+      fullAddress: "900 New Flight Road\nCedar City, UT 84720\nUnited States",
+      renderedSourceText:
+        "PMA Holder Name: RAM Aerospace, Inc.\nPMA Holder Physical Address: 900 New Flight Road",
+    };
+    const client = browserReturning({
+      ...result,
+      records: [refreshedRecord],
+      source: {
+        ...result.source,
+        scrapedAt: "2026-08-25T15:00:00.000Z",
+      },
+    });
+    let updatePatch: Record<string, unknown> | undefined;
+    const returning = vi.fn(async () => [{ id: "existing-signal" }]);
+    const where = vi.fn(() => ({ returning }));
+    const set = vi.fn((patch: Record<string, unknown>) => {
+      updatePatch = patch;
+      return { where };
+    });
+    const update = vi.fn(() => ({ set }));
+    const db = { update } as unknown as Database;
+    const existing = {
+      status: "qualified",
+      qualification: { decision: "qualified", reason: "reviewed" },
+      leadId: "lead-existing",
+      companyId: "company-existing",
+      createdAt: new Date("2026-08-20T00:00:00.000Z"),
+      qualifiedAt: new Date("2026-08-21T00:00:00.000Z"),
+      rejectedAt: null,
+    };
+
+    await expect(
+      runFaaPmaHarvest(
+        parseHarvestFaaPmaArgs([
+          "--holder-name",
+          "RAM Aerospace",
+          "--limit",
+          "1",
+          "--apply",
+          "--refresh-existing",
+        ]),
+        {
+          client,
+          db,
+          resolveAgentId: async () => undefined,
+          upsertSignal: async () => ({ duplicate: true }),
+          now: () => new Date("2026-08-25T15:01:00.000Z"),
+        },
+      ),
+    ).resolves.toEqual({
+      records: 1,
+      created: 0,
+      duplicates: 0,
+      refreshed: 1,
+    });
+
+    if (updatePatch === undefined) throw new Error("Expected refresh update");
+    expect(Object.keys(updatePatch).sort()).toEqual([
+      "city",
+      "country",
+      "rawName",
+      "sourcePayload",
+      "state",
+      "updatedAt",
+    ]);
+    expect(updatePatch).toMatchObject({
+      city: "Cedar City",
+      state: "UT",
+      country: "US",
+      updatedAt: new Date("2026-08-25T15:01:00.000Z"),
+    });
+    expect(updatePatch.sourcePayload).toMatchObject({
+      record: {
+        fullAddress: refreshedRecord.fullAddress,
+        renderedSourceText: refreshedRecord.renderedSourceText,
+      },
+      manualHarvest: { at: "2026-08-25T15:01:00.000Z" },
+    });
+    expect({ ...existing, ...updatePatch }).toMatchObject(existing);
   });
 });

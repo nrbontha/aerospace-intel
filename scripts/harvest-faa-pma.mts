@@ -5,6 +5,8 @@ import {
   closeDatabase,
   getDatabase,
   researchAgents,
+  sourceSignalFingerprint,
+  sourceSignals,
   upsertHarvestedSourceSignal,
   type Database,
   type HarvestedSourceSignal,
@@ -23,6 +25,7 @@ export interface HarvestFaaPmaCliOptions {
   readonly query: FaaPmaScrapeQuery;
   readonly agentKey: string;
   readonly apply: boolean;
+  readonly refreshExisting: boolean;
 }
 
 export interface FaaPmaHarvestClient {
@@ -33,6 +36,7 @@ export interface HarvestFaaPmaSummary {
   readonly records: number;
   readonly created: number;
   readonly duplicates: number;
+  readonly refreshed: number;
 }
 
 export interface HarvestFaaPmaDependencies {
@@ -47,6 +51,11 @@ export interface HarvestFaaPmaDependencies {
     db: Database,
     input: HarvestedSourceSignal,
   ) => Promise<{ readonly duplicate: boolean }>;
+  readonly refreshSignal?: (
+    db: Database,
+    input: HarvestedSourceSignal,
+    updatedAt: Date,
+  ) => Promise<boolean>;
 }
 
 export function parseHarvestFaaPmaArgs(
@@ -56,6 +65,7 @@ export function parseHarvestFaaPmaArgs(
   let agentKey = FAA_PMA_HARVEST_AGENT_KEY;
   let agentKeySupplied = false;
   let mode: "apply" | "dry-run" | undefined;
+  let refreshExisting = false;
 
   for (let index = 0; index < argv.length; index += 1) {
     const argument = argv[index]!;
@@ -65,6 +75,14 @@ export function parseHarvestFaaPmaArgs(
         throw new Error("Choose either --dry-run or --apply, not both");
       }
       mode = nextMode;
+      continue;
+    }
+
+    if (argument === "--refresh-existing") {
+      if (refreshExisting) {
+        throw new Error("--refresh-existing may be supplied only once");
+      }
+      refreshExisting = true;
       continue;
     }
 
@@ -90,7 +108,15 @@ export function parseHarvestFaaPmaArgs(
   }
 
   const { query } = parseScrapeFaaPmaArgs(scrapeArguments);
-  return { query, agentKey, apply: mode === "apply" };
+  if (refreshExisting && mode !== "apply") {
+    throw new Error("--refresh-existing is valid only with --apply");
+  }
+  return {
+    query,
+    agentKey,
+    apply: mode === "apply",
+    refreshExisting,
+  };
 }
 
 export async function runFaaPmaHarvest(
@@ -110,9 +136,12 @@ export async function runFaaPmaHarvest(
   const result = await client.search(options.query);
   const records = result.records.length;
 
-  if (!options.apply) return { records, created: 0, duplicates: 0 };
+  if (!options.apply) {
+    return { records, created: 0, duplicates: 0, refreshed: 0 };
+  }
 
-  const harvestedAt = (dependencies.now?.() ?? new Date()).toISOString();
+  const harvestedAtDate = dependencies.now?.() ?? new Date();
+  const harvestedAt = harvestedAtDate.toISOString();
   const inputs = result.records.map((record): HarvestedSourceSignal => {
     if (record.holderName === null) {
       throw new Error(`FAA PMA record ${record.recordId} has no holder name`);
@@ -145,19 +174,31 @@ export async function runFaaPmaHarvest(
   const resolveAgentId = dependencies.resolveAgentId ?? findResearchAgentId;
   const agentId = await resolveAgentId(db, options.agentKey);
   const upsertSignal = dependencies.upsertSignal ?? upsertHarvestedSourceSignal;
+  const refreshSignal =
+    dependencies.refreshSignal ?? refreshExistingFaaPmaSignal;
   let created = 0;
   let duplicates = 0;
-
+  let refreshed = 0;
   for (const input of inputs) {
     const outcome = await upsertSignal(db, {
       ...input,
       ...(agentId === undefined ? {} : { agentId }),
     });
-    if (outcome.duplicate) duplicates += 1;
-    else created += 1;
+    if (!outcome.duplicate) {
+      created += 1;
+      continue;
+    }
+    if (
+      options.refreshExisting &&
+      (await refreshSignal(db, input, harvestedAtDate))
+    ) {
+      refreshed += 1;
+    } else {
+      duplicates += 1;
+    }
   }
 
-  return { records, created, duplicates };
+  return { records, created, duplicates, refreshed };
 }
 
 export async function findResearchAgentId(
@@ -170,6 +211,31 @@ export async function findResearchAgentId(
     .where(eq(researchAgents.key, agentKey))
     .limit(1);
   return rows[0]?.id;
+}
+
+export async function refreshExistingFaaPmaSignal(
+  db: Database,
+  input: HarvestedSourceSignal,
+  updatedAt: Date,
+): Promise<boolean> {
+  const rows = await db
+    .update(sourceSignals)
+    .set({
+      rawName: input.rawName,
+      city: input.city ?? null,
+      state: input.state ?? null,
+      country: input.country ?? null,
+      sourcePayload: input.sourcePayload,
+      updatedAt,
+    })
+    .where(
+      eq(
+        sourceSignals.sourceFingerprint,
+        sourceSignalFingerprint(input),
+      ),
+    )
+    .returning({ id: sourceSignals.id });
+  return rows.length > 0;
 }
 
 function printSummary(
