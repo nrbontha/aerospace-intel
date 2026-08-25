@@ -11,7 +11,19 @@ import { QualificationLadder } from "./qualification-ladder.js";
 // tsx honors the web tsconfig's JSX-preserve setting; emulate Next's JSX runtime.
 Reflect.set(globalThis, "React", React);
 
-function overview(sourceSignals: AgentsOverview["sourceSignals"]): AgentsOverview {
+function overview(
+  sourceSignals: AgentsOverview["sourceSignals"],
+  usaSpendingCrawl: AgentsOverview["usaSpendingCrawl"] = {
+    totalWindows: 0,
+    pendingWindows: 0,
+    inProgressWindows: 0,
+    completedWindows: 0,
+    failedWindows: 0,
+    currentMonth: null,
+    currentPage: null,
+    lastAttemptAt: null,
+  },
+): AgentsOverview {
   return {
     counts: { total: 1, running: 0, idle: 0, paused: 1, failed: 0 },
     findsToday: 0,
@@ -19,6 +31,7 @@ function overview(sourceSignals: AgentsOverview["sourceSignals"]): AgentsOvervie
     dailyCapUsd: 1,
     openProposals: 0,
     sourceSignals,
+    usaSpendingCrawl,
     lastFind: null,
   };
 }
@@ -66,24 +79,73 @@ assert.match(zeroState, /Rejected today: 0/);
 assert.match(zeroState, /Quarantined legacy: 0/);
 assert.match(zeroState, /Weak signals are not Targets until official-site qualification passes\./);
 assert.doesNotMatch(zeroState, /\/leads/);
+assert.match(zeroState, /USAspending coverage/);
+assert.match(zeroState, /0\/0 months · current not initialized/);
+assert.doesNotMatch(zeroState, /Failed windows:/);
 
 const nonzeroState = renderToStaticMarkup(
   createElement(LiveStrip, {
     loading: false,
     error: null,
-    overview: overview({
-      queuedQualification: 7,
-      qualifying: 2,
-      qualifiedToday: 3,
-      rejectedToday: 4,
-      quarantined: 5,
-      latestQualification: "2026-08-24T11:30:00.000Z",
-    }),
+    overview: overview(
+      {
+        queuedQualification: 7,
+        qualifying: 2,
+        qualifiedToday: 3,
+        rejectedToday: 4,
+        quarantined: 5,
+        latestQualification: "2026-08-24T11:30:00.000Z",
+      },
+      {
+        totalWindows: 12,
+        pendingWindows: 7,
+        inProgressWindows: 1,
+        completedWindows: 4,
+        failedWindows: 0,
+        currentMonth: "2026-04",
+        currentPage: 3,
+        lastAttemptAt: "2026-08-24T11:45:00.000Z",
+      },
+    ),
+    onOpenUsaSpendingTicks: () => undefined,
   }),
 );
 assert.match(nonzeroState, /7 queued · 2 qualifying/);
 assert.match(nonzeroState, /Qualified today: <a href="\/feed">3<\/a>/);
 assert.match(nonzeroState, /Latest qualification/);
+assert.match(nonzeroState, /USAspending coverage/);
+assert.match(nonzeroState, /4\/12 months · current 2026-04 page 3/);
+assert.match(nonzeroState, /View agent ticks/);
+
+const failedState = renderToStaticMarkup(
+  createElement(LiveStrip, {
+    loading: false,
+    error: null,
+    overview: overview(
+      {
+        queuedQualification: 0,
+        qualifying: 0,
+        qualifiedToday: 0,
+        rejectedToday: 0,
+        quarantined: 0,
+        latestQualification: null,
+      },
+      {
+        totalWindows: 12,
+        pendingWindows: 2,
+        inProgressWindows: 0,
+        completedWindows: 9,
+        failedWindows: 1,
+        currentMonth: "2026-11",
+        currentPage: 1,
+        lastAttemptAt: "2026-08-24T11:45:00.000Z",
+      },
+    ),
+  }),
+);
+assert.match(failedState, /Failed windows: 1/);
+assert.match(failedState, /data-tone="error"/);
+assert.match(failedState, /color:var\(--asi-danger, #dc2626\)/);
 
 const pausedLadder = renderToStaticMarkup(
   createElement(QualificationLadder, { agents: [qualificationAgent("paused")] }),

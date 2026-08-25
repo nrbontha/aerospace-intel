@@ -1,4 +1,4 @@
-import { listAgents } from "@asi/database";
+import { agentFrontierProgress, listAgents } from "@asi/database";
 import { getDatabase } from "@asi/database/client";
 import { sql } from "drizzle-orm";
 import type { NextRequest } from "next/server";
@@ -33,6 +33,47 @@ export type SourceSignalOverview = Readonly<{
   quarantined: number;
   latestQualification: string | null;
 }>;
+export type UsaSpendingCrawlOverview = Readonly<{
+  totalWindows: number;
+  pendingWindows: number;
+  inProgressWindows: number;
+  completedWindows: number;
+  failedWindows: number;
+  currentMonth: string | null;
+  currentPage: number | null;
+  lastAttemptAt: string | null;
+}>;
+
+const EMPTY_USASPENDING_CRAWL: UsaSpendingCrawlOverview = {
+  totalWindows: 0,
+  pendingWindows: 0,
+  inProgressWindows: 0,
+  completedWindows: 0,
+  failedWindows: 0,
+  currentMonth: null,
+  currentPage: null,
+  lastAttemptAt: null,
+};
+
+/** USAspending month/page coverage owned by the autonomous discovery agent. */
+export async function getUsaSpendingCrawlOverview(
+  agentId: string | null,
+): Promise<UsaSpendingCrawlOverview> {
+  if (agentId === null) return EMPTY_USASPENDING_CRAWL;
+
+  const progress = await agentFrontierProgress(agentId);
+  return {
+    totalWindows: progress.total,
+    pendingWindows: progress.pending,
+    inProgressWindows: progress.inProgress,
+    completedWindows: progress.completed,
+    failedWindows: progress.failed,
+    currentMonth: progress.currentMonth,
+    currentPage: progress.currentPage,
+    lastAttemptAt: progress.lastAttemptAt,
+  };
+}
+
 
 /**
  * Source observations remain quarantined until qualification creates a lead.
@@ -96,6 +137,11 @@ export async function GET(_request: NextRequest): Promise<Response> {
         getSourceSignalOverview(),
       ]);
 
+    const usaSpendingAgentId =
+      rows.find((row) => row.agent.key === "discover-usaspending")?.agent.id ?? null;
+    const usaSpendingCrawl =
+      await getUsaSpendingCrawlOverview(usaSpendingAgentId);
+
     const counts = { total: rows.length, running: 0, idle: 0, paused: 0, failed: 0 };
     for (const row of rows) {
       if (row.agent.status in counts) {
@@ -111,6 +157,7 @@ export async function GET(_request: NextRequest): Promise<Response> {
       openProposals,
       lastFind,
       sourceSignals,
+      usaSpendingCrawl,
     });
   } catch (error) {
     return handleAgentRouteError(error);

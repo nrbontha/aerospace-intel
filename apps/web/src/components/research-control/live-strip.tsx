@@ -1,5 +1,5 @@
 "use client";
-import { Metric } from "@asi/ui";
+import { Button, Metric } from "@asi/ui";
 import Link from "next/link";
 
 import type { AgentsOverview } from "@/lib/agents-api";
@@ -10,6 +10,7 @@ type LiveStripProps = Readonly<{
   loading: boolean;
   overview: AgentsOverview | null;
   error: string | null;
+  onOpenUsaSpendingTicks?: () => void;
 }>;
 
 /**
@@ -17,7 +18,12 @@ type LiveStripProps = Readonly<{
  * proposals · last find timestamp. Every value comes straight from
  * /api/v1/agents/overview; loading and failure are shown, never papered over.
  */
-export function LiveStrip({ loading, overview, error }: LiveStripProps) {
+export function LiveStrip({
+  loading,
+  overview,
+  error,
+  onOpenUsaSpendingTicks,
+}: LiveStripProps) {
   if (error !== null && overview === null) {
     return (
       <p className="admin-feedback" data-tone="error" role="alert">
@@ -37,6 +43,15 @@ export function LiveStrip({ loading, overview, error }: LiveStripProps) {
   const spentPct = dailyCapUsd > 0 ? Math.min(100, (spendTodayUsd / dailyCapUsd) * 100) : 100;
   const budgetTone =
     spentPct >= 100 ? "danger" : spentPct >= 80 ? "warning" : undefined;
+  const crawl = overview.usaSpendingCrawl;
+  const crawlCurrent =
+    crawl.currentMonth !== null
+      ? `current ${crawl.currentMonth} page ${crawl.currentPage ?? 1}`
+      : crawl.totalWindows === 0
+        ? "current not initialized"
+        : crawl.completedWindows === crawl.totalWindows
+          ? "current complete"
+          : "no active window";
 
   return (
     <div
@@ -137,6 +152,46 @@ export function LiveStrip({ loading, overview, error }: LiveStripProps) {
                   · Latest qualification{" "}
                   {formatRelativeTime(overview.sourceSignals.latestQualification)}
                 </span>
+              )}
+            </>
+          }
+        />
+        <Metric
+          label="USAspending coverage"
+          value={`${crawl.completedWindows}/${crawl.totalWindows} months · ${crawlCurrent}`}
+          detail={
+            <>
+              <span>
+                Pending: {crawl.pendingWindows} · In progress:{" "}
+                {crawl.inProgressWindows}
+              </span>
+              {crawl.failedWindows > 0 ? (
+                <span
+                  data-tone="error"
+                  style={{ color: "var(--asi-danger, #dc2626)" }}
+                >
+                  {" "}
+                  · Failed windows: {crawl.failedWindows}
+                </span>
+              ) : null}
+              {crawl.lastAttemptAt === null ? null : (
+                <span>
+                  {" "}
+                  · Last attempt {formatRelativeTime(crawl.lastAttemptAt)}
+                </span>
+              )}
+              {onOpenUsaSpendingTicks === undefined ? null : (
+                <>
+                  {" "}
+                  ·{" "}
+                  <Button
+                    size="small"
+                    variant="secondary"
+                    onClick={onOpenUsaSpendingTicks}
+                  >
+                    View agent ticks
+                  </Button>
+                </>
               )}
             </>
           }

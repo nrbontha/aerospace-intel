@@ -143,10 +143,22 @@ export function ResearchControlPlane({ role }: Readonly<{ role: Role }>) {
     setCampaignRefresh((value) => value + 1);
     refresh(false);
   }, [refresh]);
+  const usaSpendingAgent =
+    state.agents.find((agent) => agent.key === "discover-usaspending") ?? null;
+
 
   return (
     <div data-testid="research-control-plane">
-      <LiveStrip loading={loading} overview={state.overview} error={loadError} />
+      <LiveStrip
+        loading={loading}
+        overview={state.overview}
+        error={loadError}
+        {...(usaSpendingAgent === null
+          ? {}
+          : {
+              onOpenUsaSpendingTicks: () => setDrawerAgent(usaSpendingAgent),
+            })}
+      />
 
       <QualificationLadder agents={state.agents} />
 

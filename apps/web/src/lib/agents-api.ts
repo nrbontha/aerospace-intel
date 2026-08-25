@@ -61,6 +61,16 @@ export type AgentsOverview = Readonly<{
     quarantined: number;
     latestQualification: string | null;
   }>;
+  usaSpendingCrawl: Readonly<{
+    totalWindows: number;
+    pendingWindows: number;
+    inProgressWindows: number;
+    completedWindows: number;
+    failedWindows: number;
+    currentMonth: string | null;
+    currentPage: number | null;
+    lastAttemptAt: string | null;
+  }>;
   lastFind: Readonly<{
     at: string;
     agentId: string;

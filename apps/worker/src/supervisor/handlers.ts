@@ -3,6 +3,12 @@ import { z } from "zod";
 
 import {
   agentTicks,
+  agentFrontierProgress,
+  claimNextAgentQuery,
+  completeAgentQuery,
+  continueAgentQuery,
+  ensureAgentMonthlyQueries,
+  failAgentQuery,
   candidates,
   claimQueuedSourceSignals,
   companies,
@@ -50,6 +56,7 @@ import {
   isSuppressedDirectoryDomain,
   searchOfficialDomainCandidates,
   UsaspendingDiscoveryStrategy,
+  UsaspendingClient,
   wrapUntrustedSourceJson,
   type AgentPlan,
   type CampaignView,
@@ -186,6 +193,7 @@ export interface TickHandlerDeps {
   /** Generic official-site source-signal classifier override (tests). */
   readonly classifySourceSignal?: SourceSignalClassifier;
   readonly searchRecipients?: UsaspendingSearchClient["searchRecipients"];
+  readonly searchRecipientsPage?: UsaspendingSearchClient["searchRecipientsPage"];
   /** Generic Exa query override for company-list and source-catalog discovery (tests). */
   readonly searchExa?: (query: string) => Promise<readonly ExaSearchResult[]>;
   /** Document fetcher override (tests); default is safe-fetch. */
@@ -311,6 +319,9 @@ const STALE_EVIDENCE_DAYS = 30;
 const MAX_DOCUMENT_CHARACTERS = 120_000;
 /** Safety circuit-breaker: discovery may queue at most 25 source signals/tick. */
 const MAX_SOURCE_SIGNALS_PER_HARVEST_TICK = 25;
+/** Consecutive query failures back off from 15 minutes to at most 24 hours. */
+const AGENT_QUERY_BACKOFF_BASE_MS = 15 * 60_000;
+const AGENT_QUERY_BACKOFF_MAX_MS = 24 * 60 * 60_000;
 
 const OWNERSHIP_TYPES = [
   "private",
@@ -493,33 +504,49 @@ function discoverSourceKey(agent: ResearchAgent): string {
 const SAM_API_KEY_ENV = "SAM_API_KEY";
 
 interface DiscoveryExpansion {
-  readonly queryRan: boolean;
-  readonly proposals: readonly FrontierProposal[];
-  readonly queryValue: string | null;
-  readonly qualifiedBeforeCap: number;
-  readonly qualificationRejected: {
-    readonly missingStrictNaics: number;
-    readonly missingAerospaceDefenseEvidence: number;
-    readonly excludedServiceWithoutManufacturing: number;
+  readonly queryValue: string;
+  readonly month: string | null;
+  readonly page: number;
+  readonly cursor: { readonly sortValue: string; readonly uniqueId: number } | null;
+  readonly fetched: number;
+  readonly harvested: number;
+  readonly duplicates: number;
+  readonly rejected: {
+    readonly invalidSignal: number;
+    readonly strictSourceGate: {
+      readonly missingStrictNaics: number;
+      readonly missingAerospaceDefenseEvidence: number;
+      readonly excludedServiceWithoutManufacturing: number;
+    };
+    readonly outputCap: number;
   };
+  readonly continuation: boolean;
+  readonly pendingMonths: number;
+  readonly completedMonths: number;
 }
 
 /**
- * Run exactly ONE bounded USAspending page-set: source-item expansion →
- * first query proposal → recipient search via UsaspendingDiscoveryStrategy.
+ * Advance exactly one durable USAspending monthly query. Initial source
+ * expansion is persisted before any query runs; pagination subsequently
+ * requeues that same row with an advanced resumePage/cursor payload.
  */
 async function runUsaspendingExpansion(
+  db: Database,
   agent: ResearchAgent,
   deps: Partial<TickHandlerDeps>,
   seeds: { naics: readonly string[]; psc?: readonly string[] },
-): Promise<DiscoveryExpansion> {
-  const strategy =
+): Promise<DiscoveryExpansion | null> {
+  const client =
     deps.searchRecipients === undefined
-      ? new UsaspendingDiscoveryStrategy()
-      : new UsaspendingDiscoveryStrategy({
-          client: { searchRecipients: deps.searchRecipients },
-        });
-  // The strategy never reads the campaign view; a minimal stub suffices.
+      ? new UsaspendingClient({ maxPages: 1, pageSize: 25 })
+      : {
+          searchRecipients: deps.searchRecipients,
+          ...(deps.searchRecipientsPage === undefined
+            ? {}
+            : { searchRecipientsPage: deps.searchRecipientsPage }),
+        };
+  const strategy = new UsaspendingDiscoveryStrategy({ client });
+  // The strategy never reads campaign fields; agent-owned rows have no campaign.
   const campaignStub = {
     id: "",
     name: "",
@@ -534,59 +561,132 @@ async function runUsaspendingExpansion(
     policy: {},
   } as unknown as CampaignView;
 
-  const sourceView: FrontierItemView = {
-    id: `agent-source-${agent.id}`,
-    campaignId: "",
-    itemType: "source",
-    normalizedValue: `usaspending:${agent.key}`,
-    parentItemId: null,
-    discoveryPath: null,
-    depth: 0,
-    payload: { source: "usaspending" },
-  };
-  const queryProposals = await strategy.proposeFrontierItems(campaignStub, sourceView);
-  const queryProposal = queryProposals[0];
-  if (queryProposal === undefined) {
-    return {
-      queryRan: false,
-      proposals: [],
-      queryValue: null,
-      qualifiedBeforeCap: 0,
-      qualificationRejected: strategy.qualificationFindings.rejected,
+  const before = await agentFrontierProgress(agent.id);
+  if (before.total === 0) {
+    const sourceView: FrontierItemView = {
+      id: `agent-source-${agent.id}`,
+      campaignId: "",
+      itemType: "source",
+      normalizedValue: `usaspending:${agent.key}`,
+      parentItemId: null,
+      discoveryPath: null,
+      depth: 0,
+      payload: { source: "usaspending" },
     };
+    const expanded = await strategy.proposeFrontierItems(campaignStub, sourceView);
+    const monthlyQueries = expanded
+      .filter(
+        (proposal): proposal is FrontierProposal & { readonly itemType: "query" } =>
+          proposal.itemType === "query",
+      )
+      // The strategy's inclusive trailing-365-day range has two partial edge
+      // months. Agent traversal is the latest twelve calendar buckets.
+      .slice(-12)
+      .map((proposal) => ({
+        ...proposal,
+        payload: {
+          ...(proposal.payload ?? {}),
+          naics: [...seeds.naics],
+          ...(seeds.psc === undefined ? {} : { psc: [...seeds.psc] }),
+        },
+      }));
+    await ensureAgentMonthlyQueries(agent.id, monthlyQueries);
   }
 
+  const claimed = await claimNextAgentQuery(agent.id);
+  if (claimed === null) return null;
   const queryView: FrontierItemView = {
-    ...sourceView,
+    id: claimed.id,
+    campaignId: "",
     itemType: "query",
-    normalizedValue: queryProposal.normalizedValue,
-    depth: 1,
-    payload: {
-      ...(queryProposal.payload ?? {}),
-      naics: [...seeds.naics],
-      ...(seeds.psc === undefined ? {} : { psc: [...seeds.psc] }),
-    } as Record<string, unknown>,
+    normalizedValue: claimed.normalizedValue,
+    parentItemId: claimed.parentItemId,
+    discoveryPath: claimed.discoveryPath,
+    depth: claimed.depth,
+    payload: claimed.payload,
   };
-  const allProposals = await strategy.proposeFrontierItems(
-    campaignStub,
-    queryView,
-  );
-  // Agents execute exactly ONE bounded page-set per tick and record their
-  // items as done. Self-continuation proposals (same type + value as the
-  // query item) are the campaign runner's requeue signal — recording them
-  // here would create dead items, so drop them. The cap is deliberately
-  // after source qualification: rejected rows never consume its 25 slots.
-  const qualifiedProposals = allProposals.filter(
-    (proposal) => proposal.itemType === "company",
-  );
-  const proposals = qualifiedProposals.slice(0, MAX_SOURCE_SIGNALS_PER_HARVEST_TICK);
-  return {
-    queryRan: true,
-    proposals,
-    queryValue: queryProposal.normalizedValue,
-    qualifiedBeforeCap: qualifiedProposals.length,
-    qualificationRejected: strategy.qualificationFindings.rejected,
-  };
+  const page =
+    typeof claimed.payload["resumePage"] === "number" &&
+    Number.isInteger(claimed.payload["resumePage"])
+      ? claimed.payload["resumePage"]
+      : 1;
+  const cursorSortValue = claimed.payload["cursorSortValue"];
+  const cursorUniqueId = claimed.payload["cursorUniqueId"];
+  const cursor =
+    typeof cursorSortValue === "string" &&
+    typeof cursorUniqueId === "number" &&
+    Number.isInteger(cursorUniqueId)
+      ? { sortValue: cursorSortValue, uniqueId: cursorUniqueId }
+      : null;
+
+  try {
+    const allProposals = await strategy.proposeFrontierItems(campaignStub, queryView);
+    const companyProposals = allProposals.filter(
+      (proposal) => proposal.itemType === "company",
+    );
+    const continuation = allProposals.find(
+      (proposal) =>
+        proposal.itemType === "query" &&
+        proposal.normalizedValue === claimed.normalizedValue,
+    );
+    // Production fetches at most 25 rows. An oversized injected client is
+    // bounded explicitly and every excess proposal is reported as rejected.
+    const harvestable = companyProposals.slice(0, MAX_SOURCE_SIGNALS_PER_HARVEST_TICK);
+    const harvest = await harvestUsaspendingSourceSignals(db, agent, harvestable);
+
+    const transitioned =
+      continuation === undefined
+        ? await completeAgentQuery(claimed.id)
+        : await continueAgentQuery(claimed.id, continuation.payload ?? {});
+    if (transitioned === null) {
+      throw new Error(`USAspending query ${claimed.id} lost its in-progress claim`);
+    }
+
+    const progress = await agentFrontierProgress(agent.id);
+    const strictRejected = strategy.qualificationFindings.rejected;
+    const strictRejectedCount =
+      strictRejected.missingStrictNaics +
+      strictRejected.missingAerospaceDefenseEvidence +
+      strictRejected.excludedServiceWithoutManufacturing;
+    const timePeriod = claimed.payload["timePeriod"];
+    const startDate =
+      typeof timePeriod === "object" && timePeriod !== null && !Array.isArray(timePeriod)
+        ? (timePeriod as Record<string, unknown>)["startDate"]
+        : null;
+    return {
+      queryValue: claimed.normalizedValue,
+      month:
+        typeof startDate === "string"
+          ? startDate.slice(0, 7)
+          : (/:(\d{4}-\d{2})$/u.exec(claimed.normalizedValue)?.[1] ?? null),
+      page,
+      cursor,
+      fetched:
+        Math.max(strategy.qualificationFindings.qualified, companyProposals.length) +
+        strictRejectedCount,
+      harvested: harvest.harvested,
+      duplicates: harvest.duplicate,
+      rejected: {
+        invalidSignal: harvest.rejected,
+        strictSourceGate: strictRejected,
+        outputCap: companyProposals.length - harvestable.length,
+      },
+      continuation: continuation !== undefined,
+      pendingMonths: progress.pendingMonths,
+      completedMonths: progress.completedMonths,
+    };
+  } catch (error) {
+    const backoffMs = Math.min(
+      AGENT_QUERY_BACKOFF_BASE_MS * 2 ** Math.max(0, claimed.attemptCount - 1),
+      AGENT_QUERY_BACKOFF_MAX_MS,
+    );
+    await failAgentQuery(
+      claimed.id,
+      error instanceof Error ? error.message : String(error),
+      backoffMs,
+    );
+    throw error;
+  }
 }
 
 
@@ -800,13 +900,22 @@ function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandle
         },
       };
     }
-    const expansion = await runUsaspendingExpansion(agent, deps, {
+    const expansion = await runUsaspendingExpansion(db, agent, deps, {
       naics: [...AEROSPACE_NAICS],
     });
-    if (!expansion.queryRan) {
-      return { outcome: "stuck", plan: planJson, findings: { idleReason: "no_query_expansion" } };
+    if (expansion === null) {
+      const progress = await agentFrontierProgress(agent.id);
+      return {
+        outcome: "stuck",
+        plan: planJson,
+        findings: {
+          idleReason: progress.pendingMonths === 0 ? "frontier_exhausted" : "frontier_backoff",
+          source: "usaspending",
+          pendingMonths: progress.pendingMonths,
+          completedMonths: progress.completedMonths,
+        },
+      };
     }
-    const harvest = await harvestUsaspendingSourceSignals(db, agent, expansion.proposals);
     return {
       outcome: "executed",
       plan: planJson,
@@ -814,13 +923,16 @@ function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandle
       findings: {
         source: "usaspending",
         query: expansion.queryValue,
-        harvested: harvest.harvested,
-        duplicate: harvest.duplicate,
-        rejected: {
-          invalidSignal: harvest.rejected,
-          strictSourceGate: expansion.qualificationRejected,
-          outputCap: expansion.qualifiedBeforeCap - expansion.proposals.length,
-        },
+        month: expansion.month,
+        page: expansion.page,
+        cursor: expansion.cursor,
+        fetched: expansion.fetched,
+        harvested: expansion.harvested,
+        duplicates: expansion.duplicates,
+        rejected: expansion.rejected,
+        pendingMonths: expansion.pendingMonths,
+        completedMonths: expansion.completedMonths,
+        continuation: expansion.continuation,
       },
     };
   };

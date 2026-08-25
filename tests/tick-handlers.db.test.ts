@@ -19,14 +19,19 @@ import { promisify } from "node:util";
 import { asc, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
+  AGENT_QUERY_STALE_CLAIM_MS,
+  agentFrontierProgress,
   candidates,
   closeDatabase,
   companies,
   dataSources,
   evidence,
   frontierItems,
+  claimNextAgentQuery,
   getDatabase,
   goldenExamples,
+  ensureAgentMonthlyQueries,
+  failAgentQuery,
   leads,
   observations,
   ownershipObservations,
@@ -170,6 +175,7 @@ type FetchDoc = NonNullable<TickHandlerDeps["fetchDocument"]>;
 function depsWith(options: {
   fetchDocument?: FetchDoc;
   searchRecipients?: TickHandlerDeps["searchRecipients"];
+  searchRecipientsPage?: TickHandlerDeps["searchRecipientsPage"];
   searchExa?: TickHandlerDeps["searchExa"];
 }): Partial<TickHandlerDeps> {
   // Client comes from the stubbed global fetch (fake gateway); the key is
@@ -181,6 +187,9 @@ function depsWith(options: {
     ...(options.searchRecipients === undefined
       ? {}
       : { searchRecipients: options.searchRecipients }),
+    ...(options.searchRecipientsPage === undefined
+      ? {}
+      : { searchRecipientsPage: options.searchRecipientsPage }),
     ...(options.searchExa === undefined ? {} : { searchExa: options.searchExa }),
   };
 }
@@ -451,6 +460,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       },
     ];
     let searchCalls = 0;
+    const searchedMonths: string[] = [];
     gatewayWithContents([planEnvelope([{ source: "usaspending" }])]);
     const agent = await insertAgent({
       key: "discover-usaspending-test",
@@ -461,6 +471,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       searchRecipients: async (query) => {
         searchCalls += 1;
         expect(query.naicsCodes).toContain("336411");
+        searchedMonths.push(query.timePeriod.startDate.slice(0, 7));
         return recipients;
       },
     });
@@ -470,8 +481,22 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       signal: new AbortController().signal,
     });
     expect(first.outcome).toBe("executed");
-    expect(first.findings).toMatchObject({ harvested: 2, duplicate: 0 });
+    expect(first.findings).toMatchObject({
+      harvested: 2,
+      duplicates: 0,
+      fetched: 2,
+      pendingMonths: 11,
+      completedMonths: 1,
+      continuation: false,
+    });
     expect(searchCalls).toBe(1);
+    const initialQueries = await getDatabase()
+      .select()
+      .from(frontierItems)
+      .where(eq(frontierItems.agentId, agent.id));
+    expect(initialQueries).toHaveLength(12);
+    expect(initialQueries.filter((item) => item.status === "done")).toHaveLength(1);
+    expect(initialQueries.filter((item) => item.status === "pending")).toHaveLength(11);
     const signals = await getDatabase()
       .select()
       .from(sourceSignals)
@@ -491,11 +516,18 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       agent,
       signal: new AbortController().signal,
     });
-    expect(second.findings).toMatchObject({ harvested: 0, duplicate: 2 });
+    expect(second.findings).toMatchObject({
+      harvested: 0,
+      duplicates: 2,
+      pendingMonths: 10,
+      completedMonths: 2,
+    });
+    expect(searchCalls).toBe(2);
+    expect(searchedMonths[1]).not.toBe(searchedMonths[0]);
   });
 
-  it("discover_source caps harvested source signals at 25 and reports the remainder", async () => {
-    const recipients = Array.from({ length: 30 }, (_, index) => ({
+  it("discover_source saves all 25 fetched rows without output truncation", async () => {
+    const recipients = Array.from({ length: 25 }, (_, index) => ({
       rawName: `Capped Aerospace Manufacturer ${index}`,
       uei: `CAP${String(index).padStart(9, "0")}`,
       naics: ["336413"],
@@ -517,8 +549,10 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       signal: new AbortController().signal,
     });
     expect(result.findings).toMatchObject({
+      fetched: 25,
       harvested: 25,
-      rejected: { outputCap: 5 },
+      duplicates: 0,
+      rejected: { outputCap: 0 },
     });
     const signals = await getDatabase()
       .select()
@@ -526,6 +560,339 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       .where(eq(sourceSignals.agentId, agent.id));
     expect(signals).toHaveLength(25);
   });
+  it("walks a continuation before advancing to the next monthly window", async () => {
+    gatewayWithContents([
+      planEnvelope([{ source: "usaspending" }]),
+      planEnvelope([{ source: "usaspending" }]),
+      planEnvelope([{ source: "usaspending" }]),
+    ]);
+    const agent = await insertAgent({
+      key: "discover-usaspending-pagination-test",
+      agentType: "discover_source",
+    });
+    const pageCalls: Array<{
+      readonly month: string;
+      readonly startPage: number | undefined;
+      readonly cursor: { readonly sortValue: string; readonly uniqueId: number } | null | undefined;
+    }> = [];
+    const handler = createV1TickHandlerRegistry(
+      depsWith({
+        searchRecipients: async () => [],
+        searchRecipientsPage: async (query) => {
+          pageCalls.push({
+            month: query.timePeriod.startDate.slice(0, 7),
+            startPage: query.startPage,
+            cursor: query.cursor,
+          });
+          const call = pageCalls.length;
+          return {
+            leads: [
+              {
+                rawName: `Paged Aerospace Manufacturer ${call}`,
+                uei: `PAGE${String(call).padStart(8, "0")}`,
+                naics: ["336413"],
+                awardCount: 1,
+                totalAwardValueUsd: 10_000,
+                source: "usaspending" as const,
+                sourceLocator: `usaspending://test/page-${call}`,
+                sourceQualification: qualifiedSourceQualification(),
+              },
+            ],
+            nextPage: call === 1 ? 2 : null,
+            cursor: call === 1 ? { sortValue: "anchor-1", uniqueId: 101 } : null,
+            qualificationFindings: {
+              qualified: 1,
+              rejected: {
+                missingStrictNaics: 0,
+                missingAerospaceDefenseEvidence: 0,
+                excludedServiceWithoutManufacturing: 0,
+              },
+            },
+          };
+        },
+      }),
+    );
+
+    const first = await handler.get("discover_source")!({
+      agent,
+      signal: new AbortController().signal,
+    });
+    expect(first.findings).toMatchObject({
+      page: 1,
+      continuation: true,
+      pendingMonths: 12,
+      completedMonths: 0,
+    });
+    const afterFirst = await getDatabase()
+      .select()
+      .from(frontierItems)
+      .where(eq(frontierItems.agentId, agent.id));
+    expect(afterFirst).toHaveLength(12);
+    const continued = afterFirst.find((item) => item.payload["resumePage"] === 2);
+    expect(continued).toMatchObject({
+      status: "pending",
+      payload: {
+        resumePage: 2,
+        cursorSortValue: "anchor-1",
+        cursorUniqueId: 101,
+      },
+    });
+
+    const second = await handler.get("discover_source")!({
+      agent,
+      signal: new AbortController().signal,
+    });
+    expect(second.findings).toMatchObject({
+      page: 2,
+      cursor: { sortValue: "anchor-1", uniqueId: 101 },
+      continuation: false,
+      pendingMonths: 11,
+      completedMonths: 1,
+    });
+    expect(pageCalls[1]).toMatchObject({
+      month: pageCalls[0]!.month,
+      startPage: 2,
+      cursor: { sortValue: "anchor-1", uniqueId: 101 },
+    });
+
+    const third = await handler.get("discover_source")!({
+      agent,
+      signal: new AbortController().signal,
+    });
+    expect(third.findings).toMatchObject({ page: 1, continuation: false });
+    expect(pageCalls[2]!.month).not.toBe(pageCalls[0]!.month);
+    expect(pageCalls[2]!.startPage).toBe(1);
+  });
+
+  it("reclaims a stale cursor after restart without duplicating a source signal", async () => {
+    gatewayWithContents([
+      planEnvelope([{ source: "usaspending" }]),
+      planEnvelope([{ source: "usaspending" }]),
+    ]);
+    const agent = await insertAgent({
+      key: "discover-usaspending-restart-test",
+      agentType: "discover_source",
+    });
+    const startPages: number[] = [];
+    const handler = createV1TickHandlerRegistry(
+      depsWith({
+        searchRecipients: async () => [],
+        searchRecipientsPage: async (query) => {
+          const startPage = query.startPage ?? 1;
+          startPages.push(startPage);
+          return {
+            leads: [
+              {
+                rawName: "Restart Safe Aerospace LLC",
+                uei: "RESTART00001",
+                naics: ["336413"],
+                awardCount: 1,
+                totalAwardValueUsd: 5_000,
+                source: "usaspending" as const,
+                sourceLocator: "usaspending://test/restart-safe",
+                sourceQualification: qualifiedSourceQualification(),
+              },
+            ],
+            nextPage: startPage === 1 ? 2 : null,
+            cursor:
+              startPage === 1 ? { sortValue: "restart-anchor", uniqueId: 202 } : null,
+            qualificationFindings: {
+              qualified: 1,
+              rejected: {
+                missingStrictNaics: 0,
+                missingAerospaceDefenseEvidence: 0,
+                excludedServiceWithoutManufacturing: 0,
+              },
+            },
+          };
+        },
+      }),
+    );
+
+    await handler.get("discover_source")!({
+      agent,
+      signal: new AbortController().signal,
+    });
+    const crashedClaim = await claimNextAgentQuery(agent.id);
+    expect(crashedClaim?.payload).toMatchObject({
+      resumePage: 2,
+      cursorSortValue: "restart-anchor",
+      cursorUniqueId: 202,
+    });
+    await getDatabase()
+      .update(frontierItems)
+      .set({
+        lastAttemptAt: new Date(Date.now() - AGENT_QUERY_STALE_CLAIM_MS - 1_000),
+      })
+      .where(eq(frontierItems.id, crashedClaim!.id));
+
+    const restarted = await handler.get("discover_source")!({
+      agent,
+      signal: new AbortController().signal,
+    });
+    expect(restarted.findings).toMatchObject({
+      page: 2,
+      duplicates: 1,
+      continuation: false,
+    });
+    expect(startPages).toEqual([1, 2]);
+    const signals = await getDatabase()
+      .select()
+      .from(sourceSignals)
+      .where(eq(sourceSignals.agentId, agent.id));
+    expect(signals).toHaveLength(1);
+  });
+
+  it("lets concurrent supervisors claim distinct monthly rows", async () => {
+    const agent = await insertAgent({
+      key: "discover-usaspending-concurrent-test",
+      agentType: "discover_source",
+    });
+    await ensureAgentMonthlyQueries(agent.id, [
+      {
+        itemType: "query",
+        normalizedValue: "usaspending:aerospace-components-default:2026-01",
+        payload: {
+          source: "usaspending",
+          naics: ["336413"],
+          timePeriod: { startDate: "2026-01-01", endDate: "2026-01-31" },
+        },
+      },
+      {
+        itemType: "query",
+        normalizedValue: "usaspending:aerospace-components-default:2026-02",
+        payload: {
+          source: "usaspending",
+          naics: ["336413"],
+          timePeriod: { startDate: "2026-02-01", endDate: "2026-02-28" },
+        },
+      },
+    ]);
+
+    const [first, second] = await Promise.all([
+      claimNextAgentQuery(agent.id),
+      claimNextAgentQuery(agent.id),
+    ]);
+    expect(first).not.toBeNull();
+    expect(second).not.toBeNull();
+    expect(first!.id).not.toBe(second!.id);
+    expect(first!.status).toBe("in_progress");
+    expect(second!.status).toBe("in_progress");
+  });
+
+  it("retains the cursor across exponential error backoff and eventually fails", async () => {
+    gatewayWithContents([
+      planEnvelope([{ source: "usaspending" }]),
+      planEnvelope([{ source: "usaspending" }]),
+    ]);
+    const agent = await insertAgent({
+      key: "discover-usaspending-error-test",
+      agentType: "discover_source",
+    });
+    await ensureAgentMonthlyQueries(agent.id, [
+      {
+        itemType: "query",
+        normalizedValue: "usaspending:aerospace-components-default:2026-03",
+        payload: {
+          source: "usaspending",
+          naics: ["336413"],
+          timePeriod: { startDate: "2026-03-01", endDate: "2026-03-31" },
+          resumePage: 7,
+          cursorSortValue: "error-anchor",
+          cursorUniqueId: 303,
+        },
+      },
+    ]);
+    const handler = createV1TickHandlerRegistry(
+      depsWith({
+        searchRecipients: async () => [],
+        searchRecipientsPage: async () => {
+          throw new Error("simulated USAspending outage");
+        },
+      }),
+    );
+
+    const firstStarted = Date.now();
+    await expect(
+      handler.get("discover_source")!({
+        agent,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow("simulated USAspending outage");
+    const [afterFirst] = await getDatabase()
+      .select()
+      .from(frontierItems)
+      .where(eq(frontierItems.agentId, agent.id));
+    expect(afterFirst).toMatchObject({
+      status: "pending",
+      attemptCount: 1,
+      failureReason: "simulated USAspending outage",
+      payload: {
+        resumePage: 7,
+        cursorSortValue: "error-anchor",
+        cursorUniqueId: 303,
+      },
+    });
+    expect(afterFirst!.nextAttemptAt!.getTime() - firstStarted).toBeGreaterThanOrEqual(
+      15 * 60_000,
+    );
+
+    await getDatabase()
+      .update(frontierItems)
+      .set({ nextAttemptAt: new Date(Date.now() - 1_000) })
+      .where(eq(frontierItems.id, afterFirst!.id));
+    const secondStarted = Date.now();
+    await expect(
+      handler.get("discover_source")!({
+        agent,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow("simulated USAspending outage");
+    const [afterSecond] = await getDatabase()
+      .select()
+      .from(frontierItems)
+      .where(eq(frontierItems.id, afterFirst!.id));
+    expect(afterSecond).toMatchObject({
+      status: "pending",
+      attemptCount: 2,
+      payload: {
+        resumePage: 7,
+        cursorSortValue: "error-anchor",
+        cursorUniqueId: 303,
+      },
+    });
+    expect(afterSecond!.nextAttemptAt!.getTime() - secondStarted).toBeGreaterThanOrEqual(
+      30 * 60_000,
+    );
+
+    await getDatabase()
+      .update(frontierItems)
+      .set({ status: "in_progress", attemptCount: 5 })
+      .where(eq(frontierItems.id, afterSecond!.id));
+    const failed = await failAgentQuery(
+      afterSecond!.id,
+      "simulated USAspending outage",
+      60_000,
+    );
+    expect(failed).toMatchObject({
+      status: "failed",
+      payload: {
+        resumePage: 7,
+        cursorSortValue: "error-anchor",
+        cursorUniqueId: 303,
+      },
+    });
+    const progress = await agentFrontierProgress(agent.id);
+    expect(progress).toMatchObject({
+      total: 1,
+      pendingMonths: 0,
+      completedMonths: 0,
+      failed: 1,
+      currentMonth: null,
+      currentPage: null,
+    });
+  });
+
 
   it("qualify_award_lead applies the generic deterministic gate to all source keys", async () => {
     const qualifier = await insertAgent({
