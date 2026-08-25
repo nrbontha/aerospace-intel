@@ -3722,6 +3722,66 @@ async function attachQualifiedSignalByIdentifier(
   return { outcome: "attached", companyId, leadId, matches };
 }
 
+async function stampVerifiedOfficialDomain(
+  db: Database,
+  companyId: string,
+  domain: string,
+): Promise<void> {
+  const normalizedDomain = domain
+    .normalize("NFKC")
+    .trim()
+    .toLocaleLowerCase("en-US")
+    .replace(/\.$/u, "")
+    .replace(/^www\./u, "");
+  if (normalizedDomain === "") throw new Error("verified official domain is empty");
+  await db.transaction(async (tx) => {
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtextextended(${normalizedDomain}, 4281161))`,
+    );
+    const [existing] = await tx
+      .select({
+        id: companyDomains.id,
+        companyId: companyDomains.companyId,
+        isPrimary: companyDomains.isPrimary,
+      })
+      .from(companyDomains)
+      .where(sql`lower(regexp_replace(rtrim(${companyDomains.domain}, '.'), '^www\\.', '', 'i')) = ${normalizedDomain}`)
+      .limit(1);
+    if (existing !== undefined && existing.companyId !== companyId) {
+      throw new Error(
+        `verified official domain ${normalizedDomain} belongs to a different company`,
+      );
+    }
+    const [primary] = await tx
+      .select({ id: companyDomains.id })
+      .from(companyDomains)
+      .where(
+        and(
+          eq(companyDomains.companyId, companyId),
+          eq(companyDomains.isPrimary, true),
+        ),
+      )
+      .limit(1);
+    const verifiedAt = new Date();
+    if (existing !== undefined) {
+      await tx
+        .update(companyDomains)
+        .set({
+          verifiedAt,
+          isPrimary: existing.isPrimary || primary === undefined,
+        })
+        .where(eq(companyDomains.id, existing.id));
+      return;
+    }
+    await tx.insert(companyDomains).values({
+      companyId,
+      domain: normalizedDomain,
+      isPrimary: primary === undefined,
+      verifiedAt,
+    });
+  });
+}
+
 async function qualifySourceSignal(input: {
   readonly db: Database;
   readonly qualifierAgent: ResearchAgent;
@@ -3988,6 +4048,7 @@ async function qualifySourceSignal(input: {
       })
       .where(eq(leads.id, lead.id));
     if (lead.companyId !== null) {
+      await stampVerifiedOfficialDomain(input.db, lead.companyId, homepageHost);
       await routeQualifiedCandidate(
         input.db,
         lead.companyId,

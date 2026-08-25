@@ -1463,6 +1463,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
         sourceFingerprint: `qualification-test-${index}`,
         agentId: qualifier.id,
         rawName,
+        ...(index === 0 ? { rawDomain: "sam-supplied.test" } : {}),
         city: "Huntsville",
         state: "AL",
         uei: `QUALIFY${index}`,
@@ -1687,6 +1688,46 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       .from(leads)
       .where(eq(leads.campaignId, qualifier.id));
     expect(leadRows).toHaveLength(2);
+    const verifiedOfficialDomains = await getDatabase()
+      .select({
+        companyId: companyDomains.companyId,
+        domain: companyDomains.domain,
+        isPrimary: companyDomains.isPrimary,
+        verifiedAt: companyDomains.verifiedAt,
+      })
+      .from(companyDomains)
+      .where(
+        inArray(
+          companyDomains.companyId,
+          qualified.map((signal) => signal.companyId!),
+        ),
+      );
+    expect(verifiedOfficialDomains).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          domain: "atlas.test",
+          isPrimary: true,
+          verifiedAt: expect.any(Date),
+        }),
+        expect.objectContaining({
+          domain: "ram.test",
+          isPrimary: true,
+          verifiedAt: expect.any(Date),
+        }),
+      ]),
+    );
+    const unverifiedSourceDomains = await getDatabase()
+      .select()
+      .from(companyDomains)
+      .where(
+        inArray(companyDomains.domain, [
+          "sam-supplied.test",
+          "orbit.test",
+          "aircraft.test",
+          "identity.test",
+        ]),
+      );
+    expect(unverifiedSourceDomains).toHaveLength(0);
     const routedCandidates = await getDatabase()
       .select({
         companyId: candidates.companyId,
