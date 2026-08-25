@@ -7,6 +7,7 @@ import {
   FaaDrsAccessError,
   FaaDrsBrowserClient,
   FaaDrsProtocolError,
+  FaaDrsStaleResultsError,
   parseFaaPmaCard,
   parseFaaPmaCards,
   type FaaDrsBrowserFactory,
@@ -36,6 +37,7 @@ class MockBrowserPage implements FaaDrsBrowserPage {
   responseStatus: 401 | 403 | 429 | null = null;
   renderedBody = "PMA search results";
   resultCards: readonly FaaDrsDomCard[] = fixture.cards;
+  resultCardsAfterWait: readonly FaaDrsDomCard[] | undefined;
 
   async navigate(url: string, timeoutMs: number) {
     this.calls.push({ method: "navigate", value: url });
@@ -59,6 +61,9 @@ class MockBrowserPage implements FaaDrsBrowserPage {
 
   async waitForResults(timeoutMs: number) {
     this.calls.push({ method: "query-timeout", value: timeoutMs });
+    if (this.resultCardsAfterWait !== undefined) {
+      this.resultCards = this.resultCardsAfterWait;
+    }
   }
 
   async bodyText() {
@@ -192,6 +197,59 @@ describe("FaaDrsBrowserClient", () => {
       { method: "close" },
     ]);
   });
+  it("waits past initial default cards and returns only later matching RAM cards", async () => {
+    const page = new MockBrowserPage();
+    page.resultCards = [
+      {
+        href: "/browse/excelExternalWindow/DRSDOCID190185491920260813184047.0001",
+        renderedText:
+          "PMA Holder Name: B/E Aerospace Inc.\nPMA Holder Number: PQ3417CE\nPMA Part Number: 4660-2222-02",
+      },
+    ];
+    page.resultCardsAfterWait = fixture.cards;
+    const client = new FaaDrsBrowserClient({
+      browserFactory: new MockBrowserFactory(page),
+      sleep: noSleep,
+    });
+
+    const result = await client.search({
+      holderNumber: "PQ00076WB",
+      maxRecords: 2,
+    });
+
+    expect(result.records).toHaveLength(2);
+    expect(
+      result.records.every(
+        (record) =>
+          record.holderNumber === "PQ00076WB" &&
+          record.holderName === "RAM Aerospace" &&
+          record.guidUrl.startsWith(
+            "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID",
+          ),
+      ),
+    ).toBe(true);
+  });
+
+  it("throws a typed error instead of returning stale default cards", async () => {
+    const page = new MockBrowserPage();
+    page.resultCards = [
+      {
+        href: "/browse/excelExternalWindow/DRSDOCID190185491920260813184047.0001",
+        renderedText:
+          "PMA Holder Name: B/E Aerospace Inc.\nPMA Holder Number: PQ3417CE\nPMA Part Number: 4660-2222-02",
+      },
+    ];
+    const client = new FaaDrsBrowserClient({
+      browserFactory: new MockBrowserFactory(page),
+      sleep: noSleep,
+      maxRetries: 0,
+    });
+
+    await expect(
+      client.search({ holderNumber: "PQ00076WB", maxRecords: 1 }),
+    ).rejects.toBeInstanceOf(FaaDrsStaleResultsError);
+  });
+
 
   it("rejects no-filter and over-limit queries before opening a browser", async () => {
     const browserFactory = new MockBrowserFactory();

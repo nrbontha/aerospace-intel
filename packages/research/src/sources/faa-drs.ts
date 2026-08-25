@@ -75,6 +75,21 @@ export class FaaDrsProtocolError extends SourceFetchError {
     });
   }
 }
+export class FaaDrsStaleResultsError extends SourceFetchError {
+  override readonly name = "FaaDrsStaleResultsError";
+  readonly filter: FaaDrsFilterName;
+  readonly expectedValue: string;
+
+  constructor(filter: FaaDrsFilterName, expectedValue: string) {
+    super(
+      `FAA DRS returned cards that do not match ${filter}=${JSON.stringify(expectedValue)}; refusing stale default results`,
+      { transient: true },
+    );
+    this.filter = filter;
+    this.expectedValue = expectedValue;
+  }
+}
+
 
 export interface FaaDrsDomCard {
   readonly href: string;
@@ -104,6 +119,7 @@ export interface FaaDrsBrowserFactory {
   open(options: {
     readonly executablePath?: string;
     readonly userAgent: string;
+    readonly queryTimeoutMs: number;
   }): Promise<FaaDrsBrowserPage>;
 }
 interface BrowserDomElement {
@@ -199,6 +215,7 @@ export class FaaDrsBrowserClient {
         ? {}
         : { executablePath: this.#chromiumPath }),
       userAgent: BROWSER_USER_AGENT,
+      queryTimeoutMs: this.#queryTimeoutMs,
     });
 
     try {
@@ -219,6 +236,7 @@ export class FaaDrsBrowserClient {
 
       const cards = await page.cards(query.maxRecords);
       const records = parseFaaPmaCards(cards, query.maxRecords);
+      assertRecordsMatchFilter(records, filter);
       return faaPmaScrapeResultSchema.parse({
         query,
         records,
@@ -246,6 +264,7 @@ class PlaywrightFaaDrsBrowserFactory implements FaaDrsBrowserFactory {
   async open(options: {
     readonly executablePath?: string;
     readonly userAgent: string;
+    readonly queryTimeoutMs: number;
   }): Promise<FaaDrsBrowserPage> {
     // Runtime-only loading keeps the optional browser out of non-FAA worker startup.
     const { chromium } = await import("playwright");
@@ -260,7 +279,9 @@ class PlaywrightFaaDrsBrowserFactory implements FaaDrsBrowserFactory {
       const context = await browser.newContext({ userAgent: options.userAgent });
       const page = await context.newPage();
       let blockedStatus: 401 | 403 | 429 | null = null;
-      let resultSignatureBeforeApply = "";
+      let activeFilterValue = "";
+      let firstRecordBeforeApply = "";
+      let firstRecordMatchedFilter = false;
       page.on("response", (response) => {
         const status = response.status();
         const resourceType = response.request().resourceType();
@@ -303,53 +324,130 @@ class PlaywrightFaaDrsBrowserFactory implements FaaDrsBrowserFactory {
           return { url: page.url(), status };
         },
         async fill(selector, value) {
+          activeFilterValue = value;
           await page.locator(selector).fill(value);
         },
         async press(selector, key) {
-          await page.locator(selector).press(key);
+          await page.locator(selector).focus();
+          await page.keyboard.press(key);
         },
         async click(selector) {
           if (selector === APPLY_FILTERS_SELECTOR) {
+            await page.waitForFunction(
+              ({ expectedValue }) => {
+                const browserGlobal =
+                  globalThis as unknown as BrowserDomGlobal;
+                const selectedOptions = Array.from(
+                  browserGlobal.document.querySelectorAll(
+                    "[role='option'][aria-selected='true']",
+                  ),
+                );
+                return selectedOptions.some(
+                  (option) =>
+                    option.getAttribute("aria-label")?.trim() ===
+                      expectedValue ||
+                    option.textContent?.trim() === expectedValue,
+                );
+              },
+              { expectedValue: activeFilterValue },
+              { timeout: options.queryTimeoutMs },
+            );
+            const priorResult = await page.evaluate(
+              ({ anchorSelector, expectedValue }) => {
+                const browserGlobal =
+                  globalThis as unknown as BrowserDomGlobal;
+                const firstAnchor = Array.from(
+                  browserGlobal.document.querySelectorAll(anchorSelector),
+                )[0];
+                if (firstAnchor === undefined) {
+                  return { href: "", matchedFilter: false };
+                }
+                const container =
+                  firstAnchor.closest(".result-content, li") ?? firstAnchor;
+                const renderedText =
+                  typeof container.innerText === "string"
+                    ? container.innerText
+                    : (container.textContent ?? "");
+                const normalizedText = renderedText
+                  .toLocaleLowerCase("en-US")
+                  .replace(/\s+/gu, " ");
+                const normalizedExpected = expectedValue
+                  .toLocaleLowerCase("en-US")
+                  .replace(/\s+/gu, " ")
+                  .trim();
+                return {
+                  href: firstAnchor.getAttribute("href") ?? "",
+                  matchedFilter: normalizedText.includes(normalizedExpected),
+                };
+              },
+              {
+                anchorSelector: RESULT_ANCHOR_SELECTOR,
+                expectedValue: activeFilterValue,
+              },
+            );
+            firstRecordBeforeApply = priorResult.href;
+            firstRecordMatchedFilter = priorResult.matchedFilter;
             // Ignore expected guest-session probes from initial page bootstrap;
             // only the targeted Apply operation may block this scrape.
             blockedStatus = null;
-            resultSignatureBeforeApply = await readResultSignature();
           }
           await page.locator(selector).click();
         },
         async waitForResults(timeoutMs) {
           const deadline = Date.now() + timeoutMs;
           await page.waitForFunction(
-            ({ anchorSelector, previousSignature }) => {
+            ({
+              anchorSelector,
+              expectedValue,
+              previousFirstRecord,
+              previousFirstMatched,
+            }) => {
               const browserGlobal = globalThis as unknown as BrowserDomGlobal;
               const browserDocument = browserGlobal.document;
-              const anchors = Array.from(
-                browserDocument.querySelectorAll(anchorSelector),
+              const selectedOptions = Array.from(
+                browserDocument.querySelectorAll(
+                  "[role='option'][aria-selected='true']",
+                ),
               );
-              const currentSignature = anchors
-                .map((anchor) => anchor.getAttribute("href") ?? "")
-                .join("|");
+              const filterIsActive = selectedOptions.some(
+                (option) =>
+                  option.getAttribute("aria-label")?.trim() === expectedValue ||
+                  option.textContent?.trim() === expectedValue,
+              );
+              const body =
+                browserDocument.body?.innerText.toLowerCase() ?? "";
               if (
-                anchors.length > 0 &&
-                currentSignature !== previousSignature
+                body.includes("captcha") ||
+                body.includes("too many requests") ||
+                body.includes("sign in required") ||
+                body.includes("login required")
               ) {
                 return true;
               }
-              const body =
-                browserDocument.body?.innerText.toLowerCase() ?? "";
-              return (
+              if (!filterIsActive) return false;
+              if (
                 body.includes("no records found") ||
                 body.includes("no results found") ||
-                body.includes("no matching records") ||
-                body.includes("captcha") ||
-                body.includes("sign in") ||
-                body.includes("log in") ||
-                body.includes("too many requests")
+                body.includes("no matching records")
+              ) {
+                return true;
+              }
+              const firstAnchor = Array.from(
+                browserDocument.querySelectorAll(anchorSelector),
+              )[0];
+              if (firstAnchor === undefined) return false;
+              const currentFirstRecord =
+                firstAnchor.getAttribute("href") ?? "";
+              return (
+                previousFirstMatched ||
+                currentFirstRecord !== previousFirstRecord
               );
             },
             {
               anchorSelector: RESULT_ANCHOR_SELECTOR,
-              previousSignature: resultSignatureBeforeApply,
+              expectedValue: activeFilterValue,
+              previousFirstRecord: firstRecordBeforeApply,
+              previousFirstMatched: firstRecordMatchedFilter,
             },
             { timeout: timeoutMs },
           );
@@ -652,6 +750,54 @@ function queryFilter(query: FaaPmaScrapeQuery): {
   }
   throw new FaaDrsProtocolError("FAA DRS query contained no supported filter");
 }
+function assertRecordsMatchFilter(
+  records: readonly FaaPmaRecord[],
+  filter: { readonly name: FaaDrsFilterName; readonly value: string },
+): void {
+  const expected = normalizeFilterValue(filter.value);
+  for (const record of records) {
+    let matches: boolean;
+    switch (filter.name) {
+      case "holderName":
+        matches =
+          record.holderName !== null &&
+          normalizeFilterValue(record.holderName).includes(expected);
+        break;
+      case "holderNumber":
+        matches =
+          record.holderNumber !== null &&
+          normalizeFilterValue(record.holderNumber) === expected;
+        break;
+      case "partNumber":
+        matches =
+          record.pmaPartNumber !== null &&
+          normalizeFilterValue(record.pmaPartNumber) === expected;
+        break;
+      case "make":
+        matches =
+          record.make !== null &&
+          normalizeFilterValue(record.make).includes(expected);
+        break;
+      case "model":
+        matches = record.models.some((model) =>
+          normalizeFilterValue(model).includes(expected),
+        );
+        break;
+    }
+    if (!matches) {
+      throw new FaaDrsStaleResultsError(filter.name, filter.value);
+    }
+  }
+}
+
+function normalizeFilterValue(value: string): string {
+  return value
+    .normalize("NFKC")
+    .toLocaleLowerCase("en-US")
+    .replace(/\s+/gu, " ")
+    .trim();
+}
+
 
 function assertAllowedNavigation(location: string): void {
   let url: URL;
