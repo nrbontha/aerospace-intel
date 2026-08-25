@@ -10,35 +10,19 @@ import { SourceFetchError } from "./types.js";
  * No API key required (public_no_auth).
  *
  * HONEST SCOPE NOTE: spending_by_award returns RECIPIENTS of federal
- * awards. Small private aerospace manufacturers surface heavily here, but so
- * do distributors, service firms, universities and other federal grantees.
- * Recipient-vs-actual-manufacturer filtering happens downstream (scoring /
- * partner review) — this adapter deliberately does not guess at it.
+ * awards, not a manufacturer registry. This adapter therefore applies a
+ * conservative post-fetch qualification gate before it emits any candidate:
+ * returned NAICS must be a strict aerospace-manufacturing code and the
+ * award/business text must carry aerospace or defense manufacturing evidence.
  */
 
 export const USASPENDING_SEARCH_URL =
   "https://api.usaspending.gov/api/v2/search/spending_by_award/";
 
 /**
- * NAICS seed list for aerospace manufacturing discovery.
- *
- * 336411 Aircraft Manufacturing (airframes)
- * 336412 Aircraft Engine and Engine Parts Manufacturing (power)
- * 336413 Other Aircraft Parts and Auxiliary Equipment Manufacturing
- *        (structural components / auxiliary equipment)
- * 336419 Other Guided Missile and Space Vehicle Parts and Equipment
- * 334511 Search, Detection, Navigation, Guidance, Aeronautical System Mfg
- *        (instrument navigation)
- * 334515 Instrument Manufacturing for Measuring/Testing Electricity &
- *        Electrical Signals (avionics test bench)
- * 334517 Instrument Manufacturing for Physical Property Testing
- * 3364    Aerospace Product and Parts Manufacturing (sector-level rollup;
- *        catches recipients coded only at the parent industry)
- *
- * Seeds for campaign queries — intentionally includes the 3364 rollup so we
- * also reach recipients the census codes coarsely. Not exhaustive: missile/
- * space vehicle primes sit in 336414/336415/336416 and are added per-campaign
- * when that thesis is active.
+ * Default discovery seed list: US aerospace/defense engineered-component
+ * manufacturing only. It deliberately excludes sector rollups and adjacent
+ * instrument codes; campaign-specific seeds must opt in separately.
  */
 export const AEROSPACE_NAICS = [
   "336411",
@@ -46,22 +30,12 @@ export const AEROSPACE_NAICS = [
   "336413",
   "336419",
   "334511",
-  "334515",
-  "334517",
-  "3364",
 ] as const;
 
 /**
- * PSC/FSC seed list focused on aircraft components & support.
- *
- * 1510 Fixed Wing Aircraft          1520 Rotary Wing Aircraft
- * 1560 Airframe Structural Components
- * 1610 Airplane Propellers and Components
- * 1620 Aircraft Wheels and Brakes? -> landing gear components group
- * 1630 Aircraft Landing Gear? -> wheel/brake/control subsystems
- * 1650 Aircraft Hydraulic Systems   1660 Aircraft Environmental Systems
- * 1680 Miscellaneous Aircraft Components and Parts
- * 1730 Aircraft Ground Serving Equipment
+ * Aircraft-related PSC values remain available to explicitly configured
+ * campaigns, but are never part of the default discovery query and cannot
+ * qualify a recipient without strict returned NAICS evidence.
  */
 export const AIRCRAFT_COMPONENT_PSC = [
   "1510",
@@ -76,6 +50,36 @@ export const AIRCRAFT_COMPONENT_PSC = [
   "1730",
 ] as const;
 
+export interface SourceQualification {
+  readonly appliedFilters: {
+    readonly awardTypeCodes: readonly string[];
+    readonly naicsCodes: readonly string[];
+    readonly pscCodes: readonly string[];
+    readonly timePeriods: readonly UsaspendingTimePeriod[];
+    readonly placeOfPerformanceLocations: readonly UsaspendingPlaceOfPerformance[];
+    readonly keywords: readonly string[];
+  };
+  readonly returnedNaics: readonly string[];
+  readonly returnedPsc: readonly string[];
+  readonly awardDescriptionExcerpt: string;
+  readonly awardAgency?: string;
+  /** Stable endpoint + canonicalized query/recipient locator for replay. */
+  readonly queryLocator: string;
+}
+
+export type UsaspendingLeadCandidate = LeadCandidate & {
+  readonly sourceQualification: SourceQualification;
+};
+
+export interface QualificationFindings {
+  readonly qualified: number;
+  readonly rejected: {
+    readonly missingStrictNaics: number;
+    readonly missingAerospaceDefenseEvidence: number;
+    readonly excludedServiceWithoutManufacturing: number;
+  };
+}
+
 /** Award type codes: B/C/D = purchase orders + definitive contracts (and A/B combined continuing). */
 const DEFAULT_AWARD_TYPE_CODES = ["A", "B", "C", "D"] as const;
 
@@ -87,6 +91,10 @@ const FIELDS = [
   "Awarding Agency",
   "Start Date",
   "Description",
+  // Verified against the live award-search response on 2026-08-24.
+  "NAICS Code",
+  "Product or Service Code",
+  "Recipient Location",
 ] as const;
 
 const MIN_PAGE_DELAY_MS = 1_000;
@@ -126,6 +134,13 @@ function parseAmountUsd(raw: unknown): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
+const locationSchema = z.object({
+  address_line1: z.union([z.string(), z.null()]).optional(),
+  city_name: z.union([z.string(), z.null()]).optional(),
+  state_code: z.union([z.string(), z.null()]).optional(),
+  zip5: z.union([z.string(), z.number(), z.null()]).optional(),
+});
+
 const rowSchema = z.object({
   // Real pages occasionally carry null/blank recipient cells; such rows are
   // dropped during aggregation instead of failing the whole 100-row page.
@@ -143,6 +158,11 @@ const rowSchema = z.object({
   "Awarding Agency": z.union([z.string(), z.null()]).optional(),
   "Start Date": z.union([z.string(), z.null()]).optional(),
   Description: z.union([z.string(), z.null()]).optional(),
+  "NAICS Code": z.union([z.string(), z.number(), z.null()]).optional(),
+  "Product or Service Code": z
+    .union([z.string(), z.number(), z.null()])
+    .optional(),
+  "Recipient Location": locationSchema.nullish(),
 });
 
 const pageMetadataSchema = z.object({
@@ -185,11 +205,13 @@ export interface UsaspendingPageQuery extends UsaspendingQuery {
 }
 
 export interface UsaspendingPageResult {
-  readonly leads: LeadCandidate[];
+  readonly leads: UsaspendingLeadCandidate[];
   /** Page to resume from when more results remain; null when exhausted or at the API ceiling. */
   readonly nextPage: number | null;
   /** Cursor for the resume point; null when the API did not report one. */
   readonly cursor: UsaspendingCursor | null;
+  /** Deterministic post-fetch gate accounting for this page-set. */
+  readonly qualificationFindings: QualificationFindings;
 }
 export interface UsaspendingQuery {
   readonly naicsCodes?: readonly string[];
@@ -216,6 +238,13 @@ interface AggRow {
   totalUsd: number;
   count: number;
   freshestDate?: string;
+  readonly naics: Set<string>;
+  readonly psc: Set<string>;
+  qualification: SourceQualification;
+  city?: string;
+  state?: string;
+  addressLine?: string;
+  zip?: string;
 }
 
 interface UsaspendingPage {
@@ -267,6 +296,93 @@ function buildRequestBody(
         }),
   };
 }
+type AwardRow = z.output<typeof rowSchema>;
+
+const STRICT_NAICS: Record<string, true> = {
+  "336411": true,
+  "336412": true,
+  "336413": true,
+  "336419": true,
+  "334511": true,
+};
+const AEROSPACE_DEFENSE_RELEVANCE =
+  /\b(?:aerospace|aviation|aircraft|airframe|avionics|rotary[-\s]?wing|defen[cs]e|military)\b/iu;
+const MANUFACTURING_SIGNAL =
+  /\b(?:manufactur(?:e|ed|ing)|machin(?:e|ed|ing)|fabricat(?:e|ed|ing)|assembly|assembl(?:e|ed|ing)|tooling|production)\b/iu;
+const EXCLUDED_SERVICE_SIGNAL =
+  /\b(?:service(?:s|ing)?|distribution|distributor|procurement|consult(?:ant|ing)|staffing|brokerage|reseller)\b/iu;
+
+function codeList(raw: unknown): string[] {
+  if (typeof raw === "number") return [String(raw)];
+  if (typeof raw !== "string") return [];
+  return raw
+    .split(/[,\s;]+/u)
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+}
+
+function queryLocator(
+  query: UsaspendingQuery,
+  recipientName: string,
+  uei: string | undefined,
+): string {
+  const timePeriods = Array.isArray(query.timePeriod)
+    ? query.timePeriod
+    : [query.timePeriod];
+  const params = new URLSearchParams({
+    award_type_codes: [...DEFAULT_AWARD_TYPE_CODES].join(","),
+    naics_codes: [...(query.naicsCodes ?? [])].join(","),
+    psc_codes: [...(query.pscCodes ?? [])].join(","),
+    time_period: timePeriods
+      .map((period) => `${period.startDate}:${period.endDate}`)
+      .join(","),
+    place_of_performance_locations: JSON.stringify(
+      query.placeOfPerformanceLocations ?? [],
+    ),
+    keywords: query.keyword ?? "",
+    recipient_name: recipientName,
+  });
+  if (uei !== undefined) params.set("recipient_uei", uei);
+  return `${USASPENDING_SEARCH_URL}?${params.toString()}`;
+}
+
+
+function appliedFilters(query: UsaspendingQuery): SourceQualification["appliedFilters"] {
+  const timePeriods = Array.isArray(query.timePeriod)
+    ? query.timePeriod
+    : [query.timePeriod];
+  return {
+    awardTypeCodes: [...DEFAULT_AWARD_TYPE_CODES],
+    naicsCodes: [...(query.naicsCodes ?? [])],
+    pscCodes: [...(query.pscCodes ?? [])],
+    placeOfPerformanceLocations: [...(query.placeOfPerformanceLocations ?? [])],
+    keywords: query.keyword === undefined ? [] : [query.keyword],
+    timePeriods: timePeriods.map(({ startDate, endDate }) => ({ startDate, endDate })),
+  };
+}
+
+function qualificationRejection(
+  row: AwardRow,
+): keyof QualificationFindings["rejected"] | null {
+  const naics = codeList(row["NAICS Code"]);
+  if (!naics.some((code) => STRICT_NAICS[code] === true)) {
+    return "missingStrictNaics";
+  }
+  const businessText = [
+    row["Recipient Name"] ?? "",
+    row.Description ?? "",
+  ].join(" ");
+  if (!AEROSPACE_DEFENSE_RELEVANCE.test(businessText)) {
+    return "missingAerospaceDefenseEvidence";
+  }
+  if (
+    EXCLUDED_SERVICE_SIGNAL.test(businessText) &&
+    !MANUFACTURING_SIGNAL.test(businessText)
+  ) {
+    return "excludedServiceWithoutManufacturing";
+  }
+  return null;
+}
 
 
 export class UsaspendingClient {
@@ -306,7 +422,7 @@ export class UsaspendingClient {
    * recipient (summed amounts, counted awards, freshest award date).
    * Reads at most #maxPages pages starting from page 1.
    */
-  async searchRecipients(query: UsaspendingQuery): Promise<LeadCandidate[]> {
+  async searchRecipients(query: UsaspendingQuery): Promise<UsaspendingLeadCandidate[]> {
     const result = await this.searchRecipientsPage(query);
     return result.leads;
   }
@@ -321,6 +437,22 @@ export class UsaspendingClient {
     query: UsaspendingPageQuery,
   ): Promise<UsaspendingPageResult> {
     const byRecipient = new Map<string, AggRow>();
+    const findings: {
+      qualified: number;
+      rejected: {
+        missingStrictNaics: number;
+        missingAerospaceDefenseEvidence: number;
+        excludedServiceWithoutManufacturing: number;
+      };
+    } = {
+      qualified: 0,
+      rejected: {
+        missingStrictNaics: 0,
+        missingAerospaceDefenseEvidence: 0,
+        excludedServiceWithoutManufacturing: 0,
+      },
+    };
+    const filters = appliedFilters(query);
     const startPage = Math.max(1, query.startPage ?? 1);
     let cursor = query.cursor ?? null;
     let page = startPage;
@@ -338,10 +470,60 @@ export class UsaspendingClient {
         if (name === undefined || name === null || name.trim() === "") {
           continue;
         }
-        const key = `${name}|${row["Recipient UEI"] ?? ""}`;
-        const agg = byRecipient.get(key) ?? { totalUsd: 0, count: 0 };
+        const rejection = qualificationRejection(row);
+        if (rejection !== null) {
+          findings.rejected[rejection] += 1;
+          continue;
+        }
+        findings.qualified += 1;
+        const uei = row["Recipient UEI"];
+        const key = `${name}|${uei ?? ""}`;
+        const returnedNaics = codeList(row["NAICS Code"]);
+        const returnedPsc = codeList(row["Product or Service Code"]);
+        const location = row["Recipient Location"];
+        const qualification: SourceQualification = {
+          appliedFilters: filters,
+          returnedNaics,
+          returnedPsc,
+          awardDescriptionExcerpt: (row.Description ?? "").slice(0, 1_000),
+          ...(row["Awarding Agency"] === undefined ||
+          row["Awarding Agency"] === null
+            ? {}
+            : { awardAgency: row["Awarding Agency"] }),
+          queryLocator: queryLocator(query, name, uei),
+        };
+        const agg = byRecipient.get(key);
+        if (agg === undefined) {
+          const fresh: AggRow = {
+            totalUsd: row["Award Amount"] ?? 0,
+            count: 1,
+            naics: new Set(returnedNaics),
+            psc: new Set(returnedPsc),
+            qualification,
+            ...(location?.city_name === undefined || location.city_name === null
+              ? {}
+              : { city: location.city_name }),
+            ...(location?.state_code === undefined || location.state_code === null
+              ? {}
+              : { state: location.state_code }),
+            ...(location?.address_line1 === undefined ||
+            location.address_line1 === null
+              ? {}
+              : { addressLine: location.address_line1 }),
+            ...(location?.zip5 === undefined || location.zip5 === null
+              ? {}
+              : { zip: String(location.zip5) }),
+          };
+          if (row["Start Date"] !== undefined && row["Start Date"] !== null) {
+            fresh.freshestDate = row["Start Date"];
+          }
+          byRecipient.set(key, fresh);
+          continue;
+        }
         agg.totalUsd += row["Award Amount"] ?? 0;
         agg.count += 1;
+        for (const code of returnedNaics) agg.naics.add(code);
+        for (const code of returnedPsc) agg.psc.add(code);
         const start = row["Start Date"];
         if (
           start &&
@@ -349,7 +531,6 @@ export class UsaspendingClient {
         ) {
           agg.freshestDate = start;
         }
-        byRecipient.set(key, agg);
       }
 
       // Continue while the page came back full. The API's hasNext flag is
@@ -380,10 +561,15 @@ export class UsaspendingClient {
       page += 1;
     }
 
-    return { leads: this.#toCandidates(byRecipient), nextPage, cursor: nextCursor };
+    return {
+      leads: this.#toCandidates(byRecipient),
+      nextPage,
+      cursor: nextCursor,
+      qualificationFindings: findings,
+    };
   }
 
-  #toCandidates(byRecipient: Map<string, AggRow>): LeadCandidate[] {
+  #toCandidates(byRecipient: Map<string, AggRow>): UsaspendingLeadCandidate[] {
     return [...byRecipient.entries()].map(([key, agg]) => {
       const [rawNameKey, ueiKey] = key.split("|");
       const rawName = rawNameKey!;
@@ -391,19 +577,27 @@ export class UsaspendingClient {
       return {
         rawName,
         ...(uei ? { uei } : {}),
+        ...(agg.addressLine === undefined ? {} : { addressLine: agg.addressLine }),
+        ...(agg.city === undefined ? {} : { city: agg.city }),
+        ...(agg.state === undefined ? {} : { state: agg.state }),
+        ...(agg.zip === undefined ? {} : { zip: agg.zip }),
+        naics: [...agg.naics],
+        pscCodes: [...agg.psc],
         awardCount: agg.count,
         totalAwardValueUsd: agg.totalUsd,
         ...(agg.freshestDate !== undefined
           ? { freshestAwardDate: agg.freshestDate }
           : {}),
         source: "usaspending" as const,
-        sourceLocator: `usaspending://spending_by_award?${
-          new URLSearchParams(
-            uei
-              ? [["recipient_name", rawName], ["uei", uei]]
-              : [["recipient_name", rawName]],
-          ).toString()
-        }`,
+        sourceLocator: agg.qualification.queryLocator.replace(
+          USASPENDING_SEARCH_URL,
+          "usaspending://spending_by_award",
+        ),
+        sourceQualification: {
+          ...agg.qualification,
+          returnedNaics: [...agg.naics],
+          returnedPsc: [...agg.psc],
+        },
       };
     });
   }

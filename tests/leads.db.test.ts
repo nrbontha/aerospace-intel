@@ -54,14 +54,47 @@ function loadDatabaseUrl(): void {
   }
 }
 
+type SourceQualifiedLeadCandidate = LeadCandidate & {
+  readonly sourceQualification: {
+    readonly appliedFilters: {
+      readonly awardTypeCodes: readonly string[];
+      readonly naicsCodes: readonly string[];
+      readonly pscCodes: readonly string[];
+      readonly timePeriods: ReadonlyArray<{ readonly startDate: string; readonly endDate: string }>;
+      readonly placeOfPerformanceLocations: readonly unknown[];
+      readonly keywords: readonly string[];
+    };
+    readonly returnedNaics: readonly string[];
+    readonly returnedPsc: readonly string[];
+    readonly awardDescriptionExcerpt: string;
+    readonly awardAgency: string;
+    readonly queryLocator: string;
+  };
+};
+
 function candidate(
   overrides: Partial<LeadCandidate> & Pick<LeadCandidate, "rawName">,
-): LeadCandidate {
+): SourceQualifiedLeadCandidate {
   return {
     awardCount: 2,
     totalAwardValueUsd: 50_000,
     source: "usaspending",
     sourceLocator: `usaspending://spending_by_award?recipient_name=${encodeURIComponent(overrides.rawName)}`,
+    sourceQualification: {
+      appliedFilters: {
+        awardTypeCodes: ["A", "B", "C", "D"],
+        naicsCodes: ["336413"],
+        pscCodes: [],
+        timePeriods: [{ startDate: "2025-01-01", endDate: "2025-12-31" }],
+        placeOfPerformanceLocations: [],
+        keywords: [],
+      },
+      returnedNaics: ["336413"],
+      returnedPsc: [],
+      awardDescriptionExcerpt: "Manufacturing aircraft components",
+      awardAgency: "Department of Defense",
+      queryLocator: "https://api.usaspending.gov/api/v2/search/spending_by_award/",
+    },
     ...overrides,
   };
 }

@@ -10,11 +10,12 @@
  *      model path is unavailable — never on top of it.
  *   2. Each candidate homepage is fetched through the injected `prober`
  *      (SSRF-safe fetch + HTML→identity-text in production wiring).
- *   3. Identity is checked WITHOUT the model first (legal-token overlap
- *      ≥ MIN_IDENTITY_OVERLAP); only ambiguous pages pay for a model judgment.
- *   4. ANTI-FABRICATION: a domain is attached only after a fetched-page
- *      identity verification. Every probe is journaled into
- *      `lead.context.domainVerification.attempts[]` — guess-only attachments
+ *   3. Every fetched page receives a model identity judgment. A verification
+ *      needs a high-confidence exact/parent-brand relationship plus a location
+ *      or identifier match; name overlap is only a strict fallback when both
+ *      stronger signals are unknown.
+ *   4. ANTI-FABRICATION: every probe is journaled into
+ *      `lead.context.domainVerification.attempts[]`; guess-only attachments
  *      are impossible by construction.
  *
  * Fetch/model capabilities are injected because @asi/database must not depend
@@ -54,10 +55,27 @@ export interface DomainProber {
   fetchText(url: string): Promise<DomainProbeResult>;
 }
 
+export type DomainRelationship = "exact" | "parent_brand" | "mismatch";
+
+export interface LeadIdentityHints {
+  readonly location: string | null;
+  readonly uei: string | null;
+  readonly cage: string | null;
+}
+
 export interface IdentityJudgment {
   readonly matches: boolean;
   /** 0..1 self-reported confidence; gated by MIN_JUDGE_CONFIDENCE. */
   readonly confidence: number;
+  /** Whether the page supports the lead's supplied city/state. */
+  readonly locationMatches: boolean | "unknown";
+  /** Whether the page supports the lead's supplied UEI or CAGE. */
+  readonly identifierMatches: boolean | "unknown";
+  /**
+   * `parent_brand` is a shared corporate brand, not proof that the named
+   * subsidiary independently owns the domain.
+   */
+  readonly relationship: DomainRelationship;
   readonly reason: string;
 }
 
@@ -68,7 +86,11 @@ export interface IdentityJudgment {
 export interface DomainJudge {
   /** Plausible candidate domains for a lead name; may return any garbage. */
   proposeDomains(leadName: string, locationHint?: string | null): Promise<string[]>;
-  judgeIdentity(leadName: string, pageText: string): Promise<IdentityJudgment>;
+  judgeIdentity(
+    leadName: string,
+    pageText: string,
+    identityHints?: LeadIdentityHints,
+  ): Promise<IdentityJudgment>;
 }
 
 export interface ResolutionLogger {
@@ -98,9 +120,11 @@ export interface DomainAttempt {
   readonly domain: string;
   readonly source: "llm" | "fallback";
   readonly outcome: "verified" | "unreachable" | "identity_mismatch" | "low_confidence";
-  /** How identity was decided — absent when the page never loaded. */
-  readonly method?: "text-overlap" | "model-judge";
+  readonly method?: "model-judge";
   readonly confidence?: number;
+  readonly locationMatches?: boolean | "unknown";
+  readonly identifierMatches?: boolean | "unknown";
+  readonly relationship?: DomainRelationship;
   readonly detail?: string;
 }
 
@@ -140,15 +164,12 @@ export class LeadNotResolvableError extends Error {
 // ---------------------------------------------------------------------------
 
 /**
- * Deterministic identity pass: fraction of lead tokens present on the page.
- * A page must clear this STRICTLY (>) to be accepted without the model —
- * a bare-threshold half-match ("York Precision" for YORK PRECISION
- * MACHINING AND HYDRAULICS, a DIFFERENT "York Precision Inc.") is exactly
- * the ambiguous case that must fall through to the model judge.
+ * Name overlap is only a secondary fallback when both stronger signals are
+ * unavailable; it never verifies a domain by itself.
  */
-export const MIN_IDENTITY_OVERLAP = 0.5;
+export const MIN_IDENTITY_OVERLAP = 0.8;
 /** Model judgments must clear this to count as a match. */
-export const MIN_JUDGE_CONFIDENCE = 0.6;
+export const MIN_JUDGE_CONFIDENCE = 0.75;
 
 const LEGAL_SUFFIXES = new Set([
   "llc",
@@ -249,6 +270,19 @@ function contextWith(
   return { ...context, ...patch };
 }
 
+function identityHintsFor(lead: typeof leads.$inferSelect): LeadIdentityHints {
+  let uei: string | null = null;
+  let cage: string | null = null;
+  for (const identifier of lead.possibleIdentifiers) {
+    if (typeof identifier !== "object" || identifier === null || Array.isArray(identifier)) continue;
+    const { type, value } = identifier as { type?: unknown; value?: unknown };
+    if (typeof value !== "string" || value.length === 0) continue;
+    if (type === "uei") uei = value;
+    if (type === "cage") cage = value;
+  }
+  return { location: lead.possibleLocation, uei, cage };
+}
+
 // ---------------------------------------------------------------------------
 // resolveLeadDomain.
 // ---------------------------------------------------------------------------
@@ -340,25 +374,39 @@ export async function resolveLeadDomain(
     sawReachablePage = true;
 
     const overlap = identityOverlapRatio(lead.rawName, probe.text);
-    let matches = overlap > MIN_IDENTITY_OVERLAP;
-    let confidence = overlap;
-    let method: DomainAttempt["method"] = "text-overlap";
-    let reason = `deterministic token overlap ${(overlap * 100).toFixed(0)}%`;
-
-    if (!matches) {
-      method = "model-judge";
-      try {
-        const judgment = await deps.judge.judgeIdentity(lead.rawName, probe.text);
-        matches = judgment.matches && judgment.confidence >= MIN_JUDGE_CONFIDENCE;
-        confidence = judgment.confidence;
-        reason = judgment.reason;
-      } catch (error) {
-        matches = false;
-        confidence = 0;
-        reason = `identity judge unavailable: ${
-          error instanceof Error ? error.message : String(error)
-        }`;
-      }
+    const method: DomainAttempt["method"] = "model-judge";
+    let matches = false;
+    let confidence = 0;
+    let locationMatches: boolean | "unknown" = "unknown";
+    let identifierMatches: boolean | "unknown" = "unknown";
+    let relationship: DomainRelationship = "mismatch";
+    let reason = "identity judge unavailable";
+    try {
+      const judgment = await deps.judge.judgeIdentity(
+        lead.rawName,
+        probe.text,
+        identityHintsFor(lead),
+      );
+      confidence = judgment.confidence;
+      locationMatches = judgment.locationMatches;
+      identifierMatches = judgment.identifierMatches;
+      relationship = judgment.relationship;
+      reason = judgment.reason;
+      const corroborated =
+        locationMatches === true ||
+        identifierMatches === true ||
+        (locationMatches === "unknown" &&
+          identifierMatches === "unknown" &&
+          overlap >= MIN_IDENTITY_OVERLAP);
+      matches =
+        judgment.matches &&
+        confidence >= MIN_JUDGE_CONFIDENCE &&
+        (relationship === "exact" || relationship === "parent_brand") &&
+        corroborated;
+    } catch (error) {
+      reason = `identity judge unavailable: ${
+        error instanceof Error ? error.message : String(error)
+      }`;
     }
 
     if (matches) {
@@ -368,6 +416,9 @@ export async function resolveLeadDomain(
         outcome: "verified",
         method,
         confidence,
+        locationMatches,
+        identifierMatches,
+        relationship,
         detail: reason,
       });
       const committed = await commitVerifiedDomain(db, {
@@ -376,6 +427,7 @@ export async function resolveLeadDomain(
         url: probe.finalUrl,
         confidence,
         method,
+        relationship,
         attempts,
       });
       return {
@@ -392,12 +444,22 @@ export async function resolveLeadDomain(
     attempts.push({
       domain: candidate.domain,
       source: candidate.source,
-      outcome: judgmentOutcome(matches, confidence),
+      outcome: judgmentOutcome(confidence, reason),
       method,
       confidence,
+      locationMatches,
+      identifierMatches,
+      relationship,
       detail: reason,
     });
-    log("debug", "candidate rejected", { domain: candidate.domain, matches, confidence });
+    log("debug", "candidate rejected", {
+      domain: candidate.domain,
+      matches,
+      confidence,
+      locationMatches,
+      identifierMatches,
+      relationship,
+    });
   }
 
   // --- Exhausted: journal attempts, leave the lead unresolved.
@@ -421,8 +483,10 @@ export async function resolveLeadDomain(
   };
 }
 
-function judgmentOutcome(matches: boolean, confidence: number): DomainAttempt["outcome"] {
-  return matches && confidence < MIN_JUDGE_CONFIDENCE ? "low_confidence" : "identity_mismatch";
+function judgmentOutcome(confidence: number, reason: string): DomainAttempt["outcome"] {
+  return confidence > 0 && confidence < MIN_JUDGE_CONFIDENCE && !reason.startsWith("identity judge unavailable")
+    ? "low_confidence"
+    : "identity_mismatch";
 }
 
 // ---------------------------------------------------------------------------
@@ -435,6 +499,7 @@ interface CommitInput {
   readonly url: string;
   readonly confidence: number;
   readonly method: NonNullable<DomainAttempt["method"]>;
+  readonly relationship: DomainRelationship;
   readonly attempts: readonly DomainAttempt[];
 }
 
@@ -506,6 +571,7 @@ async function commitVerifiedDomain(
       domainVerification: {
         verifiedAt: new Date().toISOString(),
         method: "homepage-identity",
+        relationship: input.relationship,
         url: input.url,
         confidence: input.confidence,
         attempts: input.attempts,
@@ -533,6 +599,7 @@ async function commitVerifiedDomain(
         url: input.url,
         confidence: input.confidence,
         identityMethod: input.method,
+        relationship: input.relationship,
         companyId,
         companyCreated: existing === undefined,
         candidateId: seeded.id,

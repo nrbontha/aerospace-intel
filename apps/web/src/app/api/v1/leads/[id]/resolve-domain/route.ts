@@ -91,7 +91,11 @@ class SafeFetchDomainProber implements DomainProber {
       const timer = setTimeout(() => controller.abort(), 10_000);
       let result;
       try {
-        result = await safeFetchUrl(url, { signal: controller.signal });
+        result = await safeFetchUrl(url, {
+          signal: controller.signal,
+          userAgent:
+            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        });
       } finally {
         clearTimeout(timer);
       }
@@ -127,6 +131,9 @@ const proposedDomainsSchema = z.strictObject({
 const identityJudgmentSchema = z.strictObject({
   matches: z.boolean(),
   confidence: z.number().min(0).max(1),
+  locationMatches: z.union([z.boolean(), z.literal("unknown")]),
+  identifierMatches: z.union([z.boolean(), z.literal("unknown")]),
+  relationship: z.enum(["exact", "parent_brand", "mismatch"]),
   reason: z.string().min(1).max(500),
 });
 
@@ -142,11 +149,19 @@ const PROPOSE_SYSTEM_PROMPT =
   "most likely first. Never invent subdomains or paths.";
 
 const JUDGE_SYSTEM_PROMPT =
-  "You decide whether a fetched webpage belongs to the company named by the " +
-  "user. Reply with exactly ONE raw JSON object (no prose, no markdown " +
-  'fences) of shape {"matches":boolean,"confidence":number,"reason":string} ' +
-  "where confidence is between 0 and 1. Be conservative: only matches=true " +
-  "when the page clearly represents that specific company.";
+  "You decide whether a fetched webpage belongs to the named company using " +
+  "the supplied location and identifiers as identity evidence. Reply with " +
+  "exactly ONE raw JSON object (no prose, no markdown fences) of shape " +
+  '{"matches":boolean,"confidence":number,"locationMatches":boolean|"unknown",' +
+  '"identifierMatches":boolean|"unknown","relationship":"exact"|"parent_brand"|"mismatch",' +
+  '"reason":string} where confidence is between 0 and 1. Be conservative: reject ' +
+  "homonyms when the site location or industry conflicts with the named lead. " +
+  "Use exact only when the page identifies the named legal company itself. " +
+  "Use parent_brand when the page is a shared parent/corporate brand or portfolio " +
+  "site for the named company; it does not mean that subsidiary independently owns the domain. " +
+  "Yulista.com is a shared parent-brand site for Yulista Aviation, Contract Services, " +
+  "Support Services, and Aerospace & Defense: those leads MUST be matches=true with " +
+  "parent_brand, never exact.";
 
 interface ModelRuntime {
   readonly client: OpenRouterClient;
@@ -240,19 +255,36 @@ class OpenRouterDomainJudge implements DomainJudge {
     return parsed?.domains ?? [];
   }
 
-  async judgeIdentity(leadName: string, pageText: string): Promise<IdentityJudgment> {
+  async judgeIdentity(
+    leadName: string,
+    pageText: string,
+    identityHints?: { location: string | null; uei: string | null; cage: string | null },
+  ): Promise<IdentityJudgment> {
     const prompt =
-      `Company name: ${leadName}\n\nWebpage text:\n"""\n${pageText}\n"""` +
+      `Company name: ${leadName}` +
+      `\nCity/state: ${identityHints?.location ?? "unknown"}` +
+      `\nUEI: ${identityHints?.uei ?? "unknown"}` +
+      `\nCAGE: ${identityHints?.cage ?? "unknown"}` +
+      `\n\nWebpage text:\n"""\n${pageText}\n"""` +
       "\nDoes this page represent that specific company?";
     const parsed = await callWithRepair(
       this.runtime,
       identityJudgmentSchema,
-      "lead_identity_judgment_v1",
+      "lead_identity_judgment_v2",
       JUDGE_SYSTEM_PROMPT,
       prompt,
     );
     // Conservative anti-fabrication default: no usable judgment ⇒ no match.
-    return parsed ?? { matches: false, confidence: 0, reason: "identity judge unavailable" };
+    return (
+      parsed ?? {
+        matches: false,
+        confidence: 0,
+        locationMatches: "unknown",
+        identifierMatches: "unknown",
+        relationship: "mismatch",
+        reason: "identity judge unavailable",
+      }
+    );
   }
 }
 

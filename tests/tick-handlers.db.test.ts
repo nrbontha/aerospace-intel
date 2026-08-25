@@ -181,6 +181,22 @@ function depsWith(options: {
   };
 }
 
+function qualifiedSourceQualification(naics = "336413") {
+  return {
+    appliedFilters: {
+      awardTypeCodes: ["A", "B", "C", "D"],
+      naicsCodes: [naics],
+      pscCodes: [],
+      timePeriods: [{ startDate: "2025-01-01", endDate: "2025-12-31" }],
+    },
+    returnedNaics: [naics],
+    returnedPsc: [],
+    awardDescriptionExcerpt: "Manufacturing aircraft components",
+    awardAgency: "Department of Defense",
+    queryLocator: "https://api.usaspending.gov/api/v2/search/spending_by_award/",
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Row factories + cleanup.
 // ---------------------------------------------------------------------------
@@ -381,6 +397,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
         awardCount: 4,
         totalAwardValueUsd: 1_234_567,
         sourceLocator: "usaspending://test/alpha",
+        sourceQualification: qualifiedSourceQualification("336411"),
       },
       {
         rawName: "Bravo Gears Inc",
@@ -388,6 +405,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
         awardCount: 2,
         totalAwardValueUsd: 500_000,
         sourceLocator: "usaspending://test/bravo",
+        sourceQualification: qualifiedSourceQualification(),
       },
     ];
     let searchCalls = 0;
@@ -422,6 +440,10 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     expect(leadRows).toHaveLength(2);
     for (const lead of leadRows) {
       expect((lead.context as Record<string, unknown>)["discoveryOrigin"]).toBe("usaspending");
+      expect((lead.context as Record<string, unknown>)["sourceQualification"]).toMatchObject({
+        returnedNaics: expect.any(Array),
+        queryLocator: expect.stringContaining("api.usaspending.gov"),
+      });
     }
 
     const frontierRows = await getDatabase()
@@ -442,6 +464,40 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     expect(gateway.requestBodies()[0]?.response_format?.json_schema?.name).toBe(
       "agent_plan_v1",
     );
+  });
+
+  it("discover_source caps a qualified tick at 25 leads and reports the drop", async () => {
+    const recipients = Array.from({ length: 30 }, (_, index) => ({
+      rawName: `Capped Aerospace Manufacturer ${index}`,
+      uei: `CAP${String(index).padStart(9, "0")}`,
+      naics: ["336413"],
+      awardCount: 1,
+      totalAwardValueUsd: 1_000,
+      sourceLocator: `usaspending://test/cap-${index}`,
+      sourceQualification: qualifiedSourceQualification(),
+    }));
+    const gateway = gatewayWithContents([planEnvelope([{ source: "usaspending" }])]);
+    const agent = await insertAgent({
+      key: "discover-usaspending-cap-test",
+      agentType: "discover_source",
+    });
+    const handler = createV1TickHandlerRegistry(
+      depsWith({ searchRecipients: async () => recipients }),
+    );
+    const result = await handler.get("discover_source")!({
+      agent,
+      signal: new AbortController().signal,
+    });
+    expect(result.findings).toMatchObject({
+      qualifiedBeforeCap: 30,
+      droppedLeads: { total: 5, reasons: { outputCap: 5 } },
+      newLeads: 25,
+    });
+    const leadRows = await getDatabase()
+      .select()
+      .from(leads)
+      .where(eq(leads.campaignId, agent.id));
+    expect(leadRows).toHaveLength(25);
   });
 
   it("discover_source (sam variant) idles honestly without SAM_API_KEY", async () => {
@@ -836,6 +892,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
               awardCount: 3,
               totalAwardValueUsd: 900_000,
               sourceLocator: "usaspending://test/neighbor",
+              sourceQualification: qualifiedSourceQualification(),
             },
           ];
         },

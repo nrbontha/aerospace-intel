@@ -24,6 +24,7 @@ import {
   type DomainJudge,
   type DomainProber,
   type IdentityJudgment,
+  type LeadIdentityHints,
   type LeadCandidateInput,
   type LeadDomainDeps,
   type ResearchAgent,
@@ -32,7 +33,6 @@ import {
 } from "@asi/database";
 import {
   AEROSPACE_NAICS,
-  AIRCRAFT_COMPONENT_PSC,
   CANDIDATE_RESEARCH_PROMPT_VERSION,
   collectCandidatePageLinks,
   frontierIdempotencyKey,
@@ -225,8 +225,8 @@ export function createV1TickHandlerRegistry(
 const MAX_STATE_IDS = 20;
 const STALE_EVIDENCE_DAYS = 30;
 const MAX_DOCUMENT_CHARACTERS = 120_000;
-/** USAspending politeness budget: one page-set per tick. */
-const MAX_LEADS_PER_TICK = 50;
+/** Safety circuit-breaker: a qualified tick may never ingest more than 25 leads. */
+const MAX_LEADS_PER_TICK = 25;
 
 const OWNERSHIP_TYPES = [
   "private",
@@ -357,7 +357,7 @@ function hostOf(url: string | null | undefined): string | null {
   }
 }
 
-/** "336411, 3364" / ["1560"] → ["336411","3364"] — tolerant code splitting. */
+/** "336411, 336413" / ["1560"] → ["336411","336413"] — tolerant code splitting. */
 function codeList(value: unknown): string[] {
   if (typeof value === "string") {
     return value
@@ -404,6 +404,12 @@ interface DiscoveryExpansion {
   readonly queryRan: boolean;
   readonly proposals: readonly FrontierProposal[];
   readonly queryValue: string | null;
+  readonly qualifiedBeforeCap: number;
+  readonly qualificationRejected: {
+    readonly missingStrictNaics: number;
+    readonly missingAerospaceDefenseEvidence: number;
+    readonly excludedServiceWithoutManufacturing: number;
+  };
 }
 
 /**
@@ -413,7 +419,7 @@ interface DiscoveryExpansion {
 async function runUsaspendingExpansion(
   agent: ResearchAgent,
   deps: Partial<TickHandlerDeps>,
-  seeds: { naics: readonly string[]; psc: readonly string[] },
+  seeds: { naics: readonly string[]; psc?: readonly string[] },
 ): Promise<DiscoveryExpansion> {
   const strategy =
     deps.searchRecipients === undefined
@@ -449,7 +455,13 @@ async function runUsaspendingExpansion(
   const queryProposals = await strategy.proposeFrontierItems(campaignStub, sourceView);
   const queryProposal = queryProposals[0];
   if (queryProposal === undefined) {
-    return { queryRan: false, proposals: [], queryValue: null };
+    return {
+      queryRan: false,
+      proposals: [],
+      queryValue: null,
+      qualifiedBeforeCap: 0,
+      qualificationRejected: strategy.qualificationFindings.rejected,
+    };
   }
 
   const queryView: FrontierItemView = {
@@ -460,7 +472,7 @@ async function runUsaspendingExpansion(
     payload: {
       ...(queryProposal.payload ?? {}),
       naics: [...seeds.naics],
-      psc: [...seeds.psc],
+      ...(seeds.psc === undefined ? {} : { psc: [...seeds.psc] }),
     } as Record<string, unknown>,
   };
   const allProposals = await strategy.proposeFrontierItems(
@@ -470,17 +482,19 @@ async function runUsaspendingExpansion(
   // Agents execute exactly ONE bounded page-set per tick and record their
   // items as done. Self-continuation proposals (same type + value as the
   // query item) are the campaign runner's requeue signal — recording them
-  // here would create dead items, so drop them.
-  const proposals = allProposals
-    .filter(
-      (proposal) =>
-        !(
-          proposal.itemType === "query" &&
-          proposal.normalizedValue === queryProposal.normalizedValue
-        ),
-    )
-    .slice(0, MAX_LEADS_PER_TICK);
-  return { queryRan: true, proposals, queryValue: queryProposal.normalizedValue };
+  // here would create dead items, so drop them. The cap is deliberately
+  // after source qualification: rejected rows never consume its 25 slots.
+  const qualifiedProposals = allProposals.filter(
+    (proposal) => proposal.itemType === "company",
+  );
+  const proposals = qualifiedProposals.slice(0, MAX_LEADS_PER_TICK);
+  return {
+    queryRan: true,
+    proposals,
+    queryValue: queryProposal.normalizedValue,
+    qualifiedBeforeCap: qualifiedProposals.length,
+    qualificationRejected: strategy.qualificationFindings.rejected,
+  };
 }
 
 /** Persist produced items under the agent's ownership (idempotent keys). */
@@ -539,9 +553,25 @@ async function ingestDiscoveredLeads(
   duplicateSkipped: number;
 }> {
   const leadInputs: LeadCandidateInput[] = [];
+  const qualifications: Array<{
+    sourceLocator: string;
+    sourceQualification: Record<string, unknown>;
+  }> = [];
   for (const proposal of proposals) {
     if (proposal.itemType !== "company") continue;
     const payload = (proposal.payload ?? {}) as Record<string, unknown>;
+    const sourceQualification = payload.sourceQualification;
+    if (
+      sourceQualification === null ||
+      typeof sourceQualification !== "object" ||
+      Array.isArray(sourceQualification)
+    ) {
+      continue;
+    }
+    const sourceLocator =
+      typeof payload.sourceLocator === "string"
+        ? payload.sourceLocator
+        : `${proposal.itemType}:${proposal.normalizedValue}`;
     leadInputs.push({
       rawName:
         typeof payload.rawName === "string" ? payload.rawName : proposal.normalizedValue,
@@ -565,13 +595,23 @@ async function ingestDiscoveredLeads(
       ...(typeof payload.freshestAwardDate === "string"
         ? { freshestAwardDate: payload.freshestAwardDate }
         : {}),
-      sourceLocator:
-        typeof payload.sourceLocator === "string"
-          ? payload.sourceLocator
-          : `${proposal.itemType}:${proposal.normalizedValue}`,
+      sourceLocator,
+    });
+    qualifications.push({
+      sourceLocator,
+      sourceQualification: sourceQualification as Record<string, unknown>,
     });
   }
   const summary = await ingestLeadCandidates(agent.id, leadInputs);
+  for (const qualification of qualifications) {
+    await db.execute(sql`
+      UPDATE leads SET context = context || ${JSON.stringify({
+        sourceQualification: qualification.sourceQualification,
+      })}::jsonb
+      WHERE campaign_id = ${agent.id}
+        AND context->>'sourceLocator' = ${qualification.sourceLocator}
+    `);
+  }
   if (summary.created > 0) {
     await db.execute(sql`
       UPDATE leads SET context = context || ${JSON.stringify({ discoveryOrigin: origin })}::jsonb
@@ -616,8 +656,7 @@ function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandle
 
     const db = getDatabase();
     const expansion = await runUsaspendingExpansion(agent, deps, {
-      naics: [...AEROSPACE_NAICS].slice(0, 8),
-      psc: [...AIRCRAFT_COMPONENT_PSC].slice(0, 10),
+      naics: [...AEROSPACE_NAICS],
     });
     if (!expansion.queryRan) {
       return { outcome: "stuck", plan: planJson, findings: { idleReason: "no_query_expansion" } };
@@ -637,6 +676,18 @@ function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandle
         source: "usaspending",
         query: expansion.queryValue,
         frontierItemsCreated: frontierInserted,
+        qualifiedBeforeCap: expansion.qualifiedBeforeCap,
+        droppedLeads: {
+          total:
+            expansion.qualifiedBeforeCap - expansion.proposals.length +
+            expansion.qualificationRejected.missingStrictNaics +
+            expansion.qualificationRejected.missingAerospaceDefenseEvidence +
+            expansion.qualificationRejected.excludedServiceWithoutManufacturing,
+          reasons: {
+            outputCap: expansion.qualifiedBeforeCap - expansion.proposals.length,
+            ...expansion.qualificationRejected,
+          },
+        },
         newLeads: summary.created,
         resolvedExact: summary.resolvedExact,
         probableReview: summary.probableReview,
@@ -1583,17 +1634,17 @@ function createGoldenNeighborHandler(deps: Partial<TickHandlerDeps>): TickHandle
       };
     }
     const neighborActions = plan.actions.slice(0, 1) as GoldenNeighborAction[];
-
-    const exampleSeeds = collectNaicsPscSeeds(examples.map((example) => example.grataPayload));
+    const exampleSeeds = collectNaicsPscSeeds(
+      examples.map((example) => example.grataPayload),
+    );
     const actionSeeds = collectNaicsPscSeeds(
       neighborActions.map((action) => action.archetypeFilters),
     );
     const naics = [...new Set([...actionSeeds.naics, ...exampleSeeds.naics])].slice(0, 8);
     const psc = [...new Set([...actionSeeds.psc, ...exampleSeeds.psc])].slice(0, 10);
-
     const expansion = await runUsaspendingExpansion(context.agent, deps, {
-      naics: naics.length > 0 ? naics : [...AEROSPACE_NAICS].slice(0, 8),
-      psc: psc.length > 0 ? psc : [...AIRCRAFT_COMPONENT_PSC].slice(0, 10),
+      naics: naics.length > 0 ? naics : [...AEROSPACE_NAICS],
+      ...(psc.length > 0 ? { psc } : {}),
     });
     if (!expansion.queryRan) {
       return { outcome: "stuck", plan: planJson, findings: { idleReason: "no_query_expansion" } };
@@ -1623,6 +1674,18 @@ function createGoldenNeighborHandler(deps: Partial<TickHandlerDeps>): TickHandle
         archetypePsc: psc,
         query: expansion.queryValue,
         frontierItemsCreated: frontierInserted,
+        qualifiedBeforeCap: expansion.qualifiedBeforeCap,
+        droppedLeads: {
+          total:
+            expansion.qualifiedBeforeCap - expansion.proposals.length +
+            expansion.qualificationRejected.missingStrictNaics +
+            expansion.qualificationRejected.missingAerospaceDefenseEvidence +
+            expansion.qualificationRejected.excludedServiceWithoutManufacturing,
+          reasons: {
+            outputCap: expansion.qualifiedBeforeCap - expansion.proposals.length,
+            ...expansion.qualificationRejected,
+          },
+        },
         newLeads: summary.created,
         resolvedExact: summary.resolvedExact,
         probableReview: summary.probableReview,
@@ -1757,6 +1820,9 @@ const proposedDomainsSchema = z.strictObject({
 const identityJudgmentSchema = z.strictObject({
   matches: z.boolean(),
   confidence: z.number().min(0).max(1),
+  locationMatches: z.union([z.boolean(), z.literal("unknown")]),
+  identifierMatches: z.union([z.boolean(), z.literal("unknown")]),
+  relationship: z.enum(["exact", "parent_brand", "mismatch"]),
   reason: z.string().min(1).max(500),
 });
 
@@ -1775,11 +1841,19 @@ const PROPOSE_SYSTEM_PROMPT =
   "most likely first. Never invent subdomains or paths.";
 
 const JUDGE_SYSTEM_PROMPT =
-  "You decide whether a fetched webpage belongs to the company named by the " +
-  "user. Reply with exactly ONE raw JSON object (no prose, no markdown " +
-  'fences) of shape {"matches":boolean,"confidence":number,"reason":string} ' +
-  "where confidence is between 0 and 1. Be conservative: only matches=true " +
-  "when the page clearly represents that specific company.";
+  "You decide whether a fetched webpage belongs to the named company using " +
+  "the supplied location and identifiers as identity evidence. Reply with " +
+  "exactly ONE raw JSON object (no prose, no markdown fences) of shape " +
+  '{"matches":boolean,"confidence":number,"locationMatches":boolean|"unknown",' +
+  '"identifierMatches":boolean|"unknown","relationship":"exact"|"parent_brand"|"mismatch",' +
+  '"reason":string} where confidence is between 0 and 1. Be conservative: reject ' +
+  "homonyms when the site location or industry conflicts with the named lead. " +
+  "Use exact only when the page identifies the named legal company itself. " +
+  "Use parent_brand when the page is a shared parent/corporate brand or portfolio " +
+  "site for the named company; it does not mean that subsidiary independently owns the domain. " +
+  "Yulista.com is a shared parent-brand site for Yulista Aviation, Contract Services, " +
+  "Support Services, and Aerospace & Defense: those leads MUST be matches=true with " +
+  "parent_brand, never exact.";
 
 class CostTrackingOpenRouterDomainJudge implements DomainJudge {
   private spentUsd = 0;
@@ -1850,18 +1924,35 @@ class CostTrackingOpenRouterDomainJudge implements DomainJudge {
     return parsed?.domains ?? [];
   }
 
-  async judgeIdentity(leadName: string, pageText: string): Promise<IdentityJudgment> {
+  async judgeIdentity(
+    leadName: string,
+    pageText: string,
+    identityHints?: LeadIdentityHints,
+  ): Promise<IdentityJudgment> {
     const prompt =
-      `Company name: ${leadName}\n\nWebpage text:\n"""\n${pageText}\n"""` +
+      `Company name: ${leadName}` +
+      `\nCity/state: ${identityHints?.location ?? "unknown"}` +
+      `\nUEI: ${identityHints?.uei ?? "unknown"}` +
+      `\nCAGE: ${identityHints?.cage ?? "unknown"}` +
+      `\n\nWebpage text:\n"""\n${pageText}\n"""` +
       "\nDoes this page represent that specific company?";
     const parsed = await this.callWithRepair(
       identityJudgmentSchema,
-      "lead_identity_judgment_v1",
+      "lead_identity_judgment_v2",
       JUDGE_SYSTEM_PROMPT,
       prompt,
     );
     // Conservative anti-fabrication default: no usable judgment ⇒ no match.
-    return parsed ?? { matches: false, confidence: 0, reason: "identity judge unavailable" };
+    return (
+      parsed ?? {
+        matches: false,
+        confidence: 0,
+        locationMatches: "unknown",
+        identifierMatches: "unknown",
+        relationship: "mismatch",
+        reason: "identity judge unavailable",
+      }
+    );
   }
 }
 

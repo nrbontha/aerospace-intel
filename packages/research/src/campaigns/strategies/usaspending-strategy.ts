@@ -2,10 +2,11 @@ import { z } from "zod";
 
 import {
   AEROSPACE_NAICS,
-  AIRCRAFT_COMPONENT_PSC,
   USASPENDING_API_MAX_PAGE,
   UsaspendingClient,
   type LeadCandidate,
+  type QualificationFindings,
+  type SourceQualification,
 } from "../../sources/index.js";
 import type {
   CampaignView,
@@ -17,9 +18,9 @@ import type {
 /**
  * Concrete discovery strategy backed by the USAspending award-search client.
  *
- * Frontier contract:
  *  - `source` items naming USAspending expand to ONE deterministic default
- *    `query` item (aerospace NAICS/PSC seed lists, trailing-365-day window).
+ *    `query` item (strict aerospace-manufacturing NAICS seed list,
+ *    trailing-365-day window).
  *  - `query` items whose payload carries USAspending query parameters
  *    ({ naics?, psc?, timePeriod?, resumePage? }) run a bounded recipient
  *    search (maxPages 2 per item) and propose one `company` frontier item
@@ -67,6 +68,7 @@ export interface UsaspendingSearchClient {
     leads: LeadCandidate[];
     nextPage: number | null;
     cursor?: { sortValue: string; uniqueId: number } | null;
+    qualificationFindings?: QualificationFindings;
   }>;
 }
 
@@ -164,8 +166,18 @@ function recipientNormalizedValue(candidate: LeadCandidate): string {
   return `name:${normalizeNameIdentity(candidate.rawName)}`;
 }
 
-/** Map one aggregated source candidate onto a `company` frontier proposal. */
-function leadCandidateToProposal(candidate: LeadCandidate): FrontierProposal {
+/** Map one qualified source candidate onto a `company` frontier proposal. */
+function leadCandidateToProposal(
+  candidate: LeadCandidate,
+): FrontierProposal | null {
+  const sourceQualification = (
+    candidate as LeadCandidate & {
+      readonly sourceQualification?: SourceQualification;
+    }
+  ).sourceQualification;
+  // A manually injected client is not an authority to bypass the source
+  // qualification contract. Unknown evidence never creates a frontier item.
+  if (sourceQualification === undefined) return null;
   return {
     itemType: "company",
     normalizedValue: recipientNormalizedValue(candidate),
@@ -185,6 +197,7 @@ function leadCandidateToProposal(candidate: LeadCandidate): FrontierProposal {
         ? {}
         : { freshestAwardDate: candidate.freshestAwardDate }),
       sourceLocator: candidate.sourceLocator,
+      sourceQualification,
     },
   };
 }
@@ -193,11 +206,23 @@ export class UsaspendingDiscoveryStrategy implements DiscoveryStrategy {
   readonly id = "usaspending";
 
   readonly #client: UsaspendingSearchClient;
+  #qualificationFindings: QualificationFindings = {
+    qualified: 0,
+    rejected: {
+      missingStrictNaics: 0,
+      missingAerospaceDefenseEvidence: 0,
+      excludedServiceWithoutManufacturing: 0,
+    },
+  };
 
   constructor(options: UsaspendingStrategyOptions = {}) {
     this.#client =
       options.client ??
       new UsaspendingClient({ maxPages: USASPENDING_MAX_PAGES_PER_ITEM });
+  }
+
+  get qualificationFindings(): QualificationFindings {
+    return this.#qualificationFindings;
   }
 
   seedsSupported(): boolean {
@@ -235,7 +260,6 @@ export class UsaspendingDiscoveryStrategy implements DiscoveryStrategy {
       payload: {
         source: "usaspending",
         naics: [...AEROSPACE_NAICS],
-        psc: [...AIRCRAFT_COMPONENT_PSC],
         timePeriod,
       },
     }));
@@ -279,7 +303,10 @@ export class UsaspendingDiscoveryStrategy implements DiscoveryStrategy {
     if (this.#client.searchRecipientsPage === undefined) {
       // Stub clients (agents/tests): legacy single-slice behavior.
       const candidates = await this.#client.searchRecipients(search);
-      return candidates.map(leadCandidateToProposal);
+      return candidates.flatMap((candidate) => {
+        const proposal = leadCandidateToProposal(candidate);
+        return proposal === null ? [] : [proposal];
+      });
     }
 
     const result = await this.#client.searchRecipientsPage({
@@ -287,7 +314,18 @@ export class UsaspendingDiscoveryStrategy implements DiscoveryStrategy {
       startPage,
       cursor,
     });
-    const proposals = result.leads.map(leadCandidateToProposal);
+    this.#qualificationFindings = result.qualificationFindings ?? {
+      qualified: 0,
+      rejected: {
+        missingStrictNaics: 0,
+        missingAerospaceDefenseEvidence: 0,
+        excludedServiceWithoutManufacturing: 0,
+      },
+    };
+    const proposals = result.leads.flatMap((candidate) => {
+      const proposal = leadCandidateToProposal(candidate);
+      return proposal === null ? [] : [proposal];
+    });
     if (result.nextPage !== null) {
       // The client only reports nextPage when it holds a valid way to
       // resume: page-param traversal below the ceiling, or a sequential

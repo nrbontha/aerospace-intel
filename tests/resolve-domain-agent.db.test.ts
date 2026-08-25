@@ -111,7 +111,16 @@ function fakeJudge(options: {
       return options.proposals ?? [];
     },
     async judgeIdentity() {
-      return options.judgment ?? { matches: false, confidence: 0.95, reason: "no" };
+      return (
+        options.judgment ?? {
+          matches: false,
+          confidence: 0.95,
+          locationMatches: "unknown",
+          identifierMatches: "unknown",
+          relationship: "mismatch",
+          reason: "no",
+        }
+      );
     },
   };
 }
@@ -318,8 +327,14 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
         "bravogears.com": "Bravo Gears Inc — gears and gearbox assemblies.",
       }),
       domainJudge: fakeJudge({
-        proposals: ["bravogears.com"],
-        judgment: { matches: true, confidence: 0.9, reason: "identity clear" },
+        judgment: {
+          matches: true,
+          confidence: 0.9,
+          locationMatches: "unknown",
+          identifierMatches: "unknown",
+          relationship: "exact",
+          reason: "identity clear",
+        },
       }),
       // Deterministic throw point for the poisoned lead only (the service
       // deliberately swallows model/fetch failures, so isolation needs a

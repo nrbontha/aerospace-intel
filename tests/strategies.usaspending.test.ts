@@ -9,6 +9,7 @@ import path from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  AEROSPACE_NAICS,
   USASPENDING_DEFAULT_QUERY_VALUE,
   UsaspendingClient,
   UsaspendingDiscoveryStrategy,
@@ -26,23 +27,34 @@ async function fetchFixture(name: string): Promise<string> {
 /** Serves fixture pages; pages beyond the fixtures are empty. */
 function makeFixtureFetch() {
   const calls: string[] = [];
+  const requestBodies: Array<Record<string, unknown>> = [];
   const impl: typeof fetch = async (_url, init) => {
     const body = JSON.parse(String(init?.body ?? "{}")) as { page?: number };
     const page = body.page ?? 1;
     calls.push(`page-${page}`);
+    requestBodies.push(body as Record<string, unknown>);
     const file =
       page === 1
         ? "usaspending-page1.json"
         : page === 2
           ? "usaspending-page2.json"
           : null;
-    const payload = file === null ? { results: [] } : JSON.parse(await fetchFixture(file));
+    const raw = file === null ? { results: [] } : JSON.parse(await fetchFixture(file));
+    const payload = {
+      ...raw,
+      results: raw.results.map((row: Record<string, unknown>) => ({
+        ...row,
+        "NAICS Code": "336413",
+        "Product or Service Code": "1560",
+        Description: `${String(row["Description"] ?? "")} aerospace aircraft manufacturing`,
+      })),
+    };
     return new Response(JSON.stringify(payload), {
       status: 200,
       headers: { "Content-Type": "application/json" },
     });
   };
-  return { impl, calls };
+  return { impl, calls, requestBodies };
 }
 
 function makeStrategy(
@@ -51,8 +63,9 @@ function makeStrategy(
 ): {
   strategy: UsaspendingDiscoveryStrategy;
   calls: string[];
+  requestBodies: Array<Record<string, unknown>>;
 } {
-  const { impl, calls } = makeFixtureFetch();
+  const { impl, calls, requestBodies } = makeFixtureFetch();
   const client = new UsaspendingClient({
     maxPages,
     pageSize: 2,
@@ -65,6 +78,7 @@ function makeStrategy(
   return {
     strategy: new UsaspendingDiscoveryStrategy({ client }),
     calls,
+    requestBodies,
   };
 }
 
@@ -192,8 +206,8 @@ describe("UsaspendingDiscoveryStrategy", () => {
       };
       expect(period.startDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
       expect(period.endDate).toMatch(/^\d{4}-\d{2}-\d{2}$/);
-      expect(Array.isArray(proposal.payload?.["naics"])).toBe(true);
-      expect(Array.isArray(proposal.payload?.["psc"])).toBe(true);
+      expect(proposal.payload?.["naics"]).toEqual(AEROSPACE_NAICS);
+      expect(proposal.payload?.["psc"]).toBeUndefined();
     }
 
     // Windows are contiguous and cover exactly one year.
@@ -227,6 +241,112 @@ describe("UsaspendingDiscoveryStrategy", () => {
     expect(proposals.every((p) => p.itemType === "company")).toBe(true);
   });
 
+
+  it("serializes strict manufacturing filters and provenance fields", async () => {
+    const { strategy, requestBodies } = makeStrategy(1);
+    const proposals = await strategy.proposeFrontierItems(
+      campaign,
+      queryItem({
+        payload: {
+          naics: [...AEROSPACE_NAICS],
+          timePeriod: { startDate: "2025-01-01", endDate: "2025-12-31" },
+        },
+      }),
+    );
+    const request = requestBodies[0]!;
+    expect(request).toMatchObject({
+      filters: {
+        award_type_codes: ["A", "B", "C", "D"],
+        naics_codes: [...AEROSPACE_NAICS],
+        time_period: [{ start_date: "2025-01-01", end_date: "2025-12-31" }],
+      },
+      sort: "Recipient Name",
+      order: "asc",
+    });
+    expect((request["filters"] as Record<string, unknown>)["product_or_service_code"]).toBeUndefined();
+    expect(request["fields"]).toEqual(expect.arrayContaining([
+      "NAICS Code",
+      "Product or Service Code",
+      "Recipient Location",
+      "Description",
+    ]));
+    const company = proposals.find((proposal) => proposal.itemType === "company");
+    expect(company?.payload?.["sourceQualification"]).toMatchObject({
+      appliedFilters: { naicsCodes: [...AEROSPACE_NAICS], pscCodes: [] },
+      returnedNaics: ["336413"],
+      returnedPsc: ["1560"],
+      awardAgency: "Department of the Air Force",
+    });
+  });
+
+  it("rejects service, medical, procurement, and consulting recipients while retaining evidenced manufacturers", async () => {
+    const rows = [
+      {
+        "Recipient Name": "Y-TECH Services",
+        "NAICS Code": "336413",
+        Description: "Aerospace engineering consulting services",
+      },
+      {
+        "Recipient Name": "Zoll Medical Corporation",
+        "NAICS Code": "339112",
+        Description: "Military medical monitors",
+      },
+      {
+        "Recipient Name": "Parts Procurement LLC",
+        "NAICS Code": "336413",
+        Description: "Procurement and distribution of military aircraft parts",
+      },
+      {
+        "Recipient Name": "Defense Advisory Group",
+        "NAICS Code": "336413",
+        Description: "Defense consulting services",
+      },
+      {
+        "Recipient Name": "Zephyr International",
+        "NAICS Code": "336413",
+        Description: "Manufacturing aircraft ground support equipment",
+      },
+      {
+        "Recipient Name": "York Precision Systems",
+        "NAICS Code": "334511",
+        Description: "Manufacturing military aviation navigation systems",
+      },
+      {
+        "Recipient Name": "Zippertubing Company",
+        "NAICS Code": "336419",
+        Description: "Fabrication for defense aircraft systems",
+      },
+    ];
+    const client = new UsaspendingClient({
+      maxPages: 1,
+      maxRetries: 0,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            results: rows.map((row) => ({ ...row, "Award Amount": 1 })),
+          }),
+          { status: 200 },
+        ),
+    });
+    const result = await client.searchRecipientsPage({
+      naicsCodes: [...AEROSPACE_NAICS],
+      timePeriod: { startDate: "2025-01-01", endDate: "2025-12-31" },
+    });
+    expect(result.leads.map((lead) => lead.rawName)).toEqual([
+      "Zephyr International",
+      "York Precision Systems",
+      "Zippertubing Company",
+    ]);
+    for (const lead of result.leads) {
+      expect(lead.naics?.some((code) => AEROSPACE_NAICS.includes(code as never))).toBe(true);
+      expect(lead.sourceQualification.awardDescriptionExcerpt.length).toBeGreaterThan(0);
+    }
+    expect(result.qualificationFindings.rejected).toEqual({
+      missingStrictNaics: 1,
+      missingAerospaceDefenseEvidence: 0,
+      excludedServiceWithoutManufacturing: 3,
+    });
+  });
   it("continues past the API ceiling when the payload carries a cursor", async () => {
     // resumePage 501 is only valid alongside the sequential anchor; the
     // stub asserts the anchor reaches the client and the walk continues.
@@ -238,6 +358,19 @@ describe("UsaspendingDiscoveryStrategy", () => {
       totalAwardValueUsd: 5_000,
       source: "usaspending" as const,
       sourceLocator: "usaspending://spending_by_award?recipient_name=Deep",
+      sourceQualification: {
+        appliedFilters: {
+          awardTypeCodes: ["A", "B", "C", "D"],
+          naicsCodes: ["336413"],
+          pscCodes: [],
+          timePeriods: [{ startDate: "2025-01-01", endDate: "2025-12-31" }],
+        },
+        returnedNaics: ["336413"],
+        returnedPsc: [],
+        awardDescriptionExcerpt: "Aircraft manufacturing",
+        awardAgency: "Department of Defense",
+        queryLocator: "https://api.usaspending.gov/api/v2/search/spending_by_award/",
+      },
     };
     const strategy = new UsaspendingDiscoveryStrategy({
       client: {
@@ -314,6 +447,19 @@ describe("UsaspendingDiscoveryStrategy", () => {
         totalAwardValueUsd: 1_000,
         source: "usaspending" as const,
         sourceLocator: "usaspending://spending_by_award?recipient_name=Stub",
+        sourceQualification: {
+          appliedFilters: {
+            awardTypeCodes: ["A", "B", "C", "D"],
+            naicsCodes: ["336413"],
+            pscCodes: [],
+            timePeriods: [{ startDate: "2025-01-01", endDate: "2025-12-31" }],
+          },
+          returnedNaics: ["336413"],
+          returnedPsc: [],
+          awardDescriptionExcerpt: "Aircraft manufacturing",
+          awardAgency: "Department of Defense",
+          queryLocator: "https://api.usaspending.gov/api/v2/search/spending_by_award/",
+        },
       },
     ];
     const strategy = new UsaspendingDiscoveryStrategy({

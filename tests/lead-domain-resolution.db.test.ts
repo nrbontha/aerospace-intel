@@ -72,9 +72,12 @@ function fakeProber(pages: Record<string, string>): DomainProber {
 function fakeJudge(
   proposals: string[] | Error,
   judgment: (leadName: string, pageText: string) => IdentityJudgment = () => ({
-    matches: false,
+    matches: true,
     confidence: 0.9,
-    reason: "page does not represent this company",
+    locationMatches: "unknown",
+    identifierMatches: "unknown",
+    relationship: "exact",
+    reason: "page clearly names this company",
   }),
 ): DomainJudge {
   return {
@@ -94,13 +97,19 @@ const noopLogger = {
   warn: () => undefined,
 };
 
-async function seedLead(db: Database, rawName: string): Promise<string> {
+async function seedLead(
+  db: Database,
+  rawName: string,
+  identity: { location?: string; identifiers?: unknown[] } = {},
+): Promise<string> {
   const [row] = await db
     .insert(leads)
     .values({
       campaignId: campaignId,
       rawName,
       status: "unresolved_lead",
+      possibleLocation: identity.location ?? null,
+      possibleIdentifiers: identity.identifiers ?? [],
       context: {
         sourceLocator: `usaspending://spending_by_award?recipient_name=${encodeURIComponent(rawName)}`,
         awardCount: 3,
@@ -256,7 +265,14 @@ describe.skipIf(!DB_TESTS_ENABLED)("lead domain resolution (DB)", () => {
       }),
       judge: fakeJudge(
         ["charliehydraulics.com"],
-        () => ({ matches: false, confidence: 0.85, reason: "unrelated retailer" }),
+        () => ({
+          matches: false,
+          confidence: 0.85,
+          locationMatches: "unknown",
+          identifierMatches: "unknown",
+          relationship: "mismatch",
+          reason: "unrelated retailer",
+        }),
       ),
       logger: noopLogger,
     };
@@ -364,6 +380,96 @@ describe.skipIf(!DB_TESTS_ENABLED)("lead domain resolution (DB)", () => {
 
     const result = await resolveLeadDomain(db, leadId, deps);
     expect(result.companyId).toBe(existingId);
+  });
+
+  it("rejects a ZITEC homonym despite full name overlap when its location conflicts", async () => {
+    const leadId = await seedLead(db, "ZITEC, INC", {
+      location: "Niceville, FL",
+      identifiers: [{ type: "cage", value: "1R9V9" }],
+    });
+    const result = await resolveLeadDomain(db, leadId, {
+      prober: fakeProber({
+        "zitec.com":
+          "ZITEC software development and digital transformation, Bucharest Romania, IT consulting.",
+      }),
+      judge: fakeJudge(["zitec.com"], () => ({
+        matches: true,
+        confidence: 0.99,
+        locationMatches: false,
+        identifierMatches: "unknown",
+        relationship: "exact",
+        reason: "Romanian software company conflicts with Niceville defense manufacturer",
+      })),
+      logger: noopLogger,
+    });
+    expect(result.outcome).toBe("identity_mismatch");
+    expect(result.attempts[0]).toMatchObject({
+      outcome: "identity_mismatch",
+      locationMatches: false,
+    });
+  });
+
+  it("verifies the US defense ZITEC site when location and CAGE match", async () => {
+    const leadId = await seedLead(db, "ZITEC, INC", {
+      location: "Niceville, FL",
+      identifiers: [{ type: "cage", value: "1R9V9" }],
+    });
+    const result = await resolveLeadDomain(db, leadId, {
+      prober: fakeProber({
+        "zitecusa.com":
+          "ZITEC, INC Niceville, FL defense manufacturer CAGE 1R9V9 aerospace components.",
+      }),
+      judge: fakeJudge(["zitecusa.com"], () => ({
+        matches: true,
+        confidence: 0.99,
+        locationMatches: true,
+        identifierMatches: true,
+        relationship: "exact",
+        reason: "Niceville location and CAGE 1R9V9 match the defense manufacturer",
+      })),
+      logger: noopLogger,
+    });
+    expect(result.outcome).toBe("domain_verified");
+    expect(result.domain).toBe("zitecusa.com");
+    companyIds.push(result.companyId!);
+  });
+
+  it("deduplicates four Yulista siblings onto one parent-brand domain owner", async () => {
+    const names = [
+      "YULISTA AVIATION, INC",
+      "YULISTA CONTRACT SERVICES, LLC",
+      "YULISTA SUPPORT SERVICES, LLC",
+      "YULISTA AEROSPACE & DEFENSE, LLC",
+    ];
+    const deps: LeadDomainDeps = {
+      prober: fakeProber({
+        "yulista.com": "Yulista is a Calista company serving aviation, logistics, and defense.",
+      }),
+      judge: fakeJudge(["yulista.com"], () => ({
+        matches: true,
+        confidence: 0.95,
+        locationMatches: true,
+        identifierMatches: "unknown",
+        relationship: "parent_brand",
+        reason: "Yulista is the shared parent brand for the named subsidiary",
+      })),
+      logger: noopLogger,
+    };
+    const results = [];
+    for (const name of names) {
+      const leadId = await seedLead(db, name, { location: "Huntsville, AL" });
+      results.push(await resolveLeadDomain(db, leadId, deps));
+    }
+    const companyIdsForSiblings = new Set(results.map((result) => result.companyId));
+    expect(companyIdsForSiblings.size).toBe(1);
+    companyIds.push(results[0]!.companyId!);
+    for (const result of results) {
+      expect(result.outcome).toBe("domain_verified");
+      const lead = (await db.select().from(leads).where(eq(leads.id, result.leadId)).limit(1))[0]!;
+      expect((lead.context["domainVerification"] as Record<string, unknown>)["relationship"]).toBe(
+        "parent_brand",
+      );
+    }
   });
 
   it("discards a lead with reason + audit, idempotently", async () => {

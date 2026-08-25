@@ -22,7 +22,20 @@ interface PageFixture {
  */
 function loadPageFixture(name: string): PageFixture {
   const path = new URL(`./fixtures/${name}.json`, import.meta.url);
-  return JSON.parse(readFileSync(path, "utf8")) as PageFixture;
+  const fixture = JSON.parse(readFileSync(path, "utf8")) as PageFixture;
+  if (!Array.isArray(fixture.results)) return fixture;
+  // These legacy pagination fixtures predate row-level qualification fields.
+  // Decorate them at this adapter-test boundary so they represent qualifying
+  // aerospace-manufacturing award rows without weakening the production gate.
+  return {
+    ...fixture,
+    results: fixture.results.map((row) => ({
+      ...row,
+      "NAICS Code": "336413",
+      "Product or Service Code": "1560",
+      Description: `${String(row["Description"] ?? "")} aerospace aircraft manufacturing`,
+    })),
+  };
 }
 
 /** Test seam: builds a Response without touching the network (many call sites). */
@@ -339,6 +352,9 @@ describe("UsaspendingClient schema validation", () => {
         "Awarding Agency",
         "Start Date",
         "Description",
+        "NAICS Code",
+        "Product or Service Code",
+        "Recipient Location",
       ],
       limit: 100,
       page: 1,
