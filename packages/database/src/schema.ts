@@ -34,6 +34,7 @@ import {
   scoreAxisValues,
   snapshotMemberMatchStatusValues,
   sourceAccessValues,
+  sourceSignalStatusValues,
   sourceIngestionValues,
   tierOverrideValues,
   tierSourceValues,
@@ -72,6 +73,10 @@ export const sourceAccess = pgEnum("source_access", sourceAccessValues);
 export const sourceIngestion = pgEnum(
   "source_ingestion",
   sourceIngestionValues,
+);
+export const sourceSignalStatus = pgEnum(
+  "source_signal_status",
+  sourceSignalStatusValues,
 );
 export const companyStatus = pgEnum("company_status", companyStatusValues);
 export const recordStatus = pgEnum("record_status", recordStatusValues);
@@ -2236,6 +2241,71 @@ export const agentTicks = pgTable(
     check("agent_ticks_cost_chk", sql`${t.costUsd} >= 0`),
   ],
 );
+
+// ---------------------------------------------------------------------------
+// Source signals (migration 0005) — raw external observations quarantined from
+// leads/targets until a qualifier creates a verified lead.
+// ---------------------------------------------------------------------------
+
+export const sourceSignals = pgTable(
+  "source_signals",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceKey: text("source_key").notNull(),
+    sourceLocator: text("source_locator").notNull(),
+    sourceFingerprint: text("source_fingerprint").notNull().unique(),
+    agentId: uuid("agent_id").references(() => researchAgents.id, {
+      onDelete: "set null",
+    }),
+    rawName: text("raw_name").notNull(),
+    rawDomain: text("raw_domain"),
+    uei: text("uei"),
+    cage: text("cage"),
+    city: text("city"),
+    state: text("state"),
+    country: text("country"),
+    awardCount: integer("award_count"),
+    awardValue: numeric("award_value", { precision: 18, scale: 2 }),
+    freshestAward: timestamp("freshest_award", { withTimezone: true }),
+    sourcePayload: jsonb("source_payload")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    status: sourceSignalStatus("status")
+      .notNull()
+      .default("queued_qualification"),
+    qualification: jsonb("qualification")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    leadId: uuid("lead_id").references(() => leads.id, { onDelete: "set null" }),
+    companyId: uuid("company_id").references(() => companies.id, {
+      onDelete: "set null",
+    }),
+    createdAt: ct(),
+    updatedAt: ut(),
+    qualifiedAt: timestamp("qualified_at", { withTimezone: true }),
+    rejectedAt: timestamp("rejected_at", { withTimezone: true }),
+  },
+  (t) => [
+    index("source_signals_status_created_at_idx").on(t.status, t.createdAt),
+    index("source_signals_source_key_status_idx").on(t.sourceKey, t.status),
+    index("source_signals_agent_id_idx").on(t.agentId),
+    index("source_signals_lead_id_idx").on(t.leadId),
+    check(
+      "source_signals_award_count_chk",
+      sql`${t.awardCount} IS NULL OR ${t.awardCount} >= 0`,
+    ),
+    check(
+      "source_signals_award_value_chk",
+      sql`${t.awardValue} IS NULL OR ${t.awardValue} >= 0`,
+    ),
+  ],
+);
+
+export type SourceSignal = SelectRow<typeof sourceSignals>;
+export type NewSourceSignal = InsertRow<typeof sourceSignals>;
+export type SourceSignalStatus = (typeof sourceSignalStatus.enumValues)[number];
 
 export type ResearchAgent = SelectRow<typeof researchAgents>;
 export type NewResearchAgent = InsertRow<typeof researchAgents>;

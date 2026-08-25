@@ -18,6 +18,7 @@
  *   monitor_ownership  staleCandidateIds?: string[]
  *   refresh_stale      staleEvidenceIds?: string[]
  *   golden_neighbor    archetypeFilters?: Record<string, string|number|boolean>
+ *   qualify_award_lead sourceSignalIds?: string[]
  */
 import type { AgentType, ResearchAgent } from "@asi/database";
 import { z } from "zod";
@@ -82,6 +83,11 @@ export const resolveDomainActionSchema = z.strictObject({
   leadId: nonEmptyString,
 });
 
+/** qualify_award_lead: one raw award observation to qualify. */
+export const qualifyAwardLeadActionSchema = z.strictObject({
+  sourceSignalId: nonEmptyString,
+});
+
 /**
  * agent_type → action manifest. Adding a new agent type means adding its
  * enum value in @asi/database and an entry here.
@@ -93,6 +99,7 @@ export const AGENT_ACTION_SCHEMAS = {
   refresh_stale: refreshActionSchema,
   golden_neighbor: neighborActionSchema,
   resolve_domain: resolveDomainActionSchema,
+  qualify_award_lead: qualifyAwardLeadActionSchema,
 } as const satisfies Record<AgentType, z.ZodType>;
 
 /** The action manifest for one agent type. */
@@ -108,6 +115,7 @@ export type MonitorOwnershipAction = z.infer<typeof monitorActionSchema>;
 export type RefreshStaleAction = z.infer<typeof refreshActionSchema>;
 export type GoldenNeighborAction = z.infer<typeof neighborActionSchema>;
 export type ResolveDomainAction = z.infer<typeof resolveDomainActionSchema>;
+export type QualifyAwardLeadAction = z.infer<typeof qualifyAwardLeadActionSchema>;
 
 export type PlannedAction =
   | DiscoverSourceAction
@@ -115,7 +123,8 @@ export type PlannedAction =
   | MonitorOwnershipAction
   | RefreshStaleAction
   | GoldenNeighborAction
-  | ResolveDomainAction;
+  | ResolveDomainAction
+  | QualifyAwardLeadAction;
 
 /** Plan envelope the LLM must return for a given action manifest. */
 export function planEnvelopeSchema<A extends z.ZodType>(actionSchema: A) {
@@ -199,6 +208,7 @@ const ACTION_HINTS: Record<AgentType, string> = {
   golden_neighbor:
     '{"archetypeFilters": {"<axis>": <string|number|boolean>, ...}}',
   resolve_domain: '{"leadId": "<lead id>"}',
+  qualify_award_lead: '{"sourceSignalId": "<source signal id>"}',
 };
 
 /** Human-readable rendering of recent ticks for the prompt. */
@@ -319,6 +329,10 @@ export function fallbackActions(
       return stringList(stateSlice["pendingLeadIds"])
         .slice(0, maxActions)
         .map((leadId) => ({ leadId }));
+    case "qualify_award_lead":
+      return stringList(stateSlice["sourceSignalIds"])
+        .slice(0, maxActions)
+        .map((sourceSignalId) => ({ sourceSignalId }));
   }
 }
 

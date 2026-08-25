@@ -12,6 +12,7 @@ export const agentTypeValues = [
   "refresh_stale",
   "golden_neighbor",
   "resolve_domain",
+  "qualify_award_lead",
 ] as const;
 export const agentStatusValues = ["idle", "running", "paused", "failed"] as const;
 export const tickOutcomeValues = [

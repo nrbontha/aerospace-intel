@@ -87,6 +87,7 @@ describe("planner-step action manifests", () => {
         "refresh_stale",
         "golden_neighbor",
         "resolve_domain",
+        "qualify_award_lead",
       ].sort(),
     );
   });
@@ -250,6 +251,23 @@ describe("planTick repair and fallback", () => {
     expect(plan.origin).toBe("fallback");
     expect(plan.actions).toEqual([{ source: "usaspending" }]);
   });
+  it("falls back to queued source signal ids for award qualification", async () => {
+    const { client } = gatewayWithContents(["invalid", "still invalid"]);
+
+    const plan = await planTick(
+      makeAgent("qualify_award_lead"),
+      { sourceSignalIds: ["signal-1", "signal-2"] },
+      [],
+      { client, models },
+    );
+
+    expect(plan.origin).toBe("fallback");
+    expect(plan.actions).toEqual([
+      { sourceSignalId: "signal-1" },
+      { sourceSignalId: "signal-2" },
+    ]);
+  });
+
 });
 
 describe("planTick batch cap", () => {

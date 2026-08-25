@@ -69,6 +69,14 @@ describe("getServerEnv", () => {
     ).toThrow();
   });
 
+  it("keeps EXA_API_KEY optional and trims a configured value", () => {
+    expect(getServerEnv({ NODE_ENV: "test" }).EXA_API_KEY).toBeUndefined();
+    expect(
+      getServerEnv({ NODE_ENV: "test", EXA_API_KEY: "  test-exa-key  " })
+        .EXA_API_KEY,
+    ).toBe("test-exa-key");
+  });
+
   it.each([
     [{ BOOTSTRAP_ADMIN_EMAIL: "nobody@example.invalid" }],
     [{ BOOTSTRAP_ADMIN_PASSWORD: "x".repeat(12) }],
@@ -157,6 +165,7 @@ describe("getPublicEnv", () => {
       DATABASE_URL: "not-exported",
       SESSION_SECRET: "not-exported",
       OPENROUTER_API_KEY: "not-exported",
+      EXA_API_KEY: "not-exported",
       BOOTSTRAP_ADMIN_PASSWORD: "not-exported",
     });
 
@@ -166,6 +175,7 @@ describe("getPublicEnv", () => {
     expect(env).not.toHaveProperty("DATABASE_URL");
     expect(env).not.toHaveProperty("SESSION_SECRET");
     expect(env).not.toHaveProperty("OPENROUTER_API_KEY");
+    expect(env).not.toHaveProperty("EXA_API_KEY");
     expect(env).not.toHaveProperty("BOOTSTRAP_ADMIN_PASSWORD");
   });
 });

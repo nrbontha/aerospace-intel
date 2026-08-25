@@ -94,6 +94,7 @@ const serverEnvSchema = z
     BOOTSTRAP_ADMIN_EMAIL: optionalTrimmedString(z.string().email()),
     BOOTSTRAP_ADMIN_PASSWORD: optionalTrimmedString(z.string().min(12)),
     OPENROUTER_API_KEY: optionalTrimmedString(z.string().min(1)),
+    EXA_API_KEY: optionalTrimmedString(z.string().min(1)),
     OPENROUTER_MODEL_FAST: modelId.default("openai/gpt-5.4-mini"),
     OPENROUTER_MODEL_DEEP: modelId.default("anthropic/claude-sonnet-5"),
     OPENROUTER_MODEL_FALLBACK: modelId.default("google/gemini-3.7-flash"),

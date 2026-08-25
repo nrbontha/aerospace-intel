@@ -187,6 +187,8 @@ describe.skipIf(!DB_TESTS_ENABLED)("migration 0003 on restored prod copy (DB)", 
       "0001_known_universe.sql",
       "0002_candidate_discovery.sql",
       "0003_agent_runtime.sql",
+      "0004_resolve_domain.sql",
+      "0005_source_signals.sql",
     ]);
 
     const countsAfter = await snapshotTableCounts();
