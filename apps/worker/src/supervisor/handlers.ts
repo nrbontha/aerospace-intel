@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, isNull, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 
 import {
@@ -2399,7 +2399,10 @@ function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHand
   };
 }
 
-/** Oldest-first unresolved leads still missing a possible domain. */
+/**
+ * Prefer source-qualified domain signals, then oldest unresolved leads. A
+ * possible domain still goes through the full homepage identity gate.
+ */
 export async function selectDomainResolutionBatch(
   db: Database,
   limit: number = MAX_DOMAIN_LEADS_PER_TICK,
@@ -2411,8 +2414,11 @@ export async function selectDomainResolutionBatch(
       possibleLocation: leads.possibleLocation,
     })
     .from(leads)
-    .where(and(eq(leads.status, "unresolved_lead"), isNull(leads.possibleDomain)))
-    .orderBy(asc(leads.createdAt))
+    .where(eq(leads.status, "unresolved_lead"))
+    .orderBy(
+      desc(sql`case when ${leads.possibleDomain} is not null then 1 else 0 end`),
+      asc(leads.createdAt),
+    )
     .limit(limit);
 }
 

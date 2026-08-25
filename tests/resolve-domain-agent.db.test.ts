@@ -253,39 +253,26 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
     });
   });
 
-  it("batch selection: oldest-first unresolved_lead without possible_domain only", async () => {
-    await insertLead({
-      rawName: "Alpha Oldest LLC",
-      createdAt: new Date(Date.now() - 60_000),
-    }).then((id) => {
-      createdLeadIds.push(id);
-    });
-    const middle = await insertLead({ rawName: "Bravo Middle LLC" });
-    // Has a possible_domain → excluded even though older.
-    await insertLead({
-      rawName: "Charlie Has Domain LLC",
+  it("selects a newer qualified possible_domain before older unresolved legacy leads", async () => {
+    const olderLegacy = await insertLead({
+      rawName: "Legacy Zitec, Inc",
       createdAt: new Date(Date.now() - 120_000),
-      possibleDomain: "charlie.test",
     });
-    // Wrong status → excluded.
+    const qualifiedNewer = await insertLead({
+      rawName: "Qualified Zitec, Inc",
+      createdAt: new Date(Date.now() - 60_000),
+      possibleDomain: "zitecusa.com",
+    });
+    const otherUnresolved = await insertLead({ rawName: "Bravo Middle LLC" });
     await insertLead({ rawName: "Delta Resolved LLC", status: "resolved" });
 
     const batch = await selectDomainResolutionBatch(getDatabase(), 10);
     const ids = batch.map((row) => row.id);
-    const oldIdx = ids.indexOf(createdLeadIds[0]!);
-    const midIdx = ids.indexOf(middle);
-    expect(midIdx).toBeGreaterThan(-1);
-    // Oldest first.
-    expect(oldIdx).toBeLessThan(midIdx);
-    for (const row of batch) {
-      expect(row.rawName).not.toContain("Charlie");
-      expect(row.rawName).not.toContain("Delta");
-    }
-
-    // Limit respected.
-    const limited = await selectDomainResolutionBatch(getDatabase(), 1);
-    expect(limited).toHaveLength(1);
-    expect(limited[0]?.rawName).not.toContain("Charlie");
+    const qualifiedIndex = ids.indexOf(qualifiedNewer);
+    expect(qualifiedIndex).toBeGreaterThanOrEqual(0);
+    expect(ids.indexOf(olderLegacy)).toBeGreaterThan(qualifiedIndex);
+    expect(ids.indexOf(otherUnresolved)).toBeGreaterThan(qualifiedIndex);
+    expect(batch.some((row) => row.rawName.includes("Delta"))).toBe(false);
   });
 
   it("handler verifies a lead through the real commit path", async () => {
