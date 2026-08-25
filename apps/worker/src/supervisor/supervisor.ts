@@ -123,6 +123,7 @@ export function startSupervisor(options: SupervisorOptions): SupervisorRuntime {
       actionsExecuted: result.actionsExecuted ?? 0,
       findings: result.findings ?? {},
       costUsd: result.costUsd ?? 0,
+      ...(result.nextTickAt === undefined ? {} : { nextTickAt: result.nextTickAt }),
       now: now(),
     });
     log("info", "supervisor.tick_completed", {

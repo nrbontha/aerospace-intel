@@ -378,6 +378,25 @@ describe.skipIf(!DB_TESTS_ENABLED)("agent supervisor (DB)", () => {
     expect(mine.lastTickOutcome).toBe("executed");
   });
 
+  it("completion honors an explicit provider reset instead of cadence", async () => {
+    clock = new FakeClock(Date.UTC(2026, 5, 1, 10, 30, 0));
+    const agent = await insertAgent({ key: "provider-reset", cadenceSeconds: 60 });
+    const tick = await startTick(agent.id, { now: clock.now() });
+    const resetAt = new Date(Date.UTC(2026, 5, 2, 0, 0, 0));
+
+    const nextTickAt = await completeTick(agent.id, {
+      tickId: tick.id,
+      outcome: "budget_exhausted",
+      findings: { idleReason: "provider_quota", resetAt: resetAt.toISOString() },
+      nextTickAt: resetAt,
+      now: clock.now(),
+    });
+
+    expect(nextTickAt).toEqual(resetAt);
+    expect((await loadAgent(agent.id)).nextTickAt).toEqual(resetAt);
+    expect((await latestTick(agent.id))?.outcome).toBe("budget_exhausted");
+  });
+
   it("failures back off exponentially (15m doubling) capped at 24h", async () => {
     clock = new FakeClock(Date.UTC(2026, 5, 1, 11, 0, 0));
     const agent = await insertAgent({ key: "backoff", cadenceSeconds: 60 });
@@ -640,6 +659,39 @@ describe.skipIf(!DB_TESTS_ENABLED)("agent supervisor (DB)", () => {
       expect(stored.nextTickAt!.getTime()).toBe(
         clock.now().getTime() + 15 * 60_000,
       );
+    } finally {
+      await runtime.stop();
+    }
+  });
+
+  it("threads a handler reset through completion and does not repeat the tick", async () => {
+    clock = new FakeClock(Date.UTC(2026, 5, 1, 16, 30, 0));
+    const agent = await insertAgent({ key: "quota-reset-through-supervisor" });
+    const resetAt = new Date(Date.UTC(2026, 5, 2, 0, 0, 0));
+    let executions = 0;
+    const runtime = startTestSupervisor(
+      clock,
+      registryOf(async () => {
+        executions += 1;
+        return {
+          outcome: "budget_exhausted",
+          findings: {
+            idleReason: "sam_daily_quota_exhausted",
+            resetAt: resetAt.toISOString(),
+          },
+          nextTickAt: resetAt,
+        };
+      }),
+    );
+    try {
+      await vi.waitFor(
+        async () => {
+          expect((await latestTick(agent.id))?.outcome).toBe("budget_exhausted");
+        },
+        { timeout: 5_000, interval: 20 },
+      );
+      expect(executions).toBe(1);
+      expect((await loadAgent(agent.id)).nextTickAt).toEqual(resetAt);
     } finally {
       await runtime.stop();
     }

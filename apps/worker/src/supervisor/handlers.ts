@@ -64,6 +64,7 @@ import {
   UsaspendingDiscoveryStrategy,
   SamEntityClient,
   SamEntityHarvester,
+  SamQuotaExceededError,
   type SamEntitySearchClient,
   UsaspendingClient,
   wrapUntrustedSourceJson,
@@ -1211,20 +1212,36 @@ function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandle
 
     const db = getDatabase();
     if (sourceKey === "sam") {
-      const harvest = await harvestSamSourceSignals(db, agent, deps, context.signal);
-      return {
-        outcome: "executed",
-        plan: planJson,
-        actionsExecuted: 1,
-        findings: {
-          source: "sam_entity",
-          naics: [...STRICT_SAM_NAICS],
-          fetched: harvest.fetched,
-          harvested: harvest.harvested,
-          duplicates: harvest.duplicates,
-          rejected: harvest.rejected,
-        },
-      };
+      try {
+        const harvest = await harvestSamSourceSignals(db, agent, deps, context.signal);
+        return {
+          outcome: "executed",
+          plan: planJson,
+          actionsExecuted: 1,
+          findings: {
+            source: "sam_entity",
+            naics: [...STRICT_SAM_NAICS],
+            fetched: harvest.fetched,
+            harvested: harvest.harvested,
+            duplicates: harvest.duplicates,
+            rejected: harvest.rejected,
+          },
+        };
+      } catch (error) {
+        if (!(error instanceof SamQuotaExceededError)) throw error;
+        return {
+          outcome: "budget_exhausted",
+          plan: planJson,
+          actionsExecuted: 0,
+          findings: {
+            idle: true,
+            idleReason: "sam_daily_quota_exhausted",
+            source: "sam_entity",
+            resetAt: error.resetAt.toISOString(),
+          },
+          nextTickAt: error.resetAt,
+        };
+      }
     }
     if (sourceKey === "faa_pma_targeted") {
       const harvest = await harvestTargetedFaaSignals(db, agent, deps, faaCache);

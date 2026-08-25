@@ -47,12 +47,14 @@ export async function startTick(
 export interface CompleteTickInput {
   tickId: string;
   /** Success-family outcome recorded by the handler ('executed' default). */
-  outcome?: Extract<TickOutcome, "executed" | "done" | "stuck">;
+  outcome?: Extract<TickOutcome, "executed" | "done" | "stuck" | "budget_exhausted">;
   actionsExecuted?: number;
   findings?: Record<string, unknown>;
   plan?: Record<string, unknown>;
   costUsd?: number;
   now?: Date;
+  /** Override cadence scheduling with an explicit provider reset time. */
+  nextTickAt?: Date;
 }
 
 /**
@@ -88,7 +90,7 @@ export async function completeTick(
       })
       .where(eq(agentTicks.id, input.tickId));
 
-    const nextTickAt = new Date(now.getTime() + cadenceSeconds * 1000);
+    const nextTickAt = input.nextTickAt ?? new Date(now.getTime() + cadenceSeconds * 1000);
     await tx
       .update(researchAgents)
       .set({

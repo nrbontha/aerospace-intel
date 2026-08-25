@@ -272,6 +272,11 @@ export async function startWorker(): Promise<WorkerRuntime> {
       supervisor = startSupervisor({
         handlers: createV1TickHandlerRegistry(),
         logger: log,
+        // Browser-backed FAA DRS queries can legitimately take longer than
+        // the default 60s while Chromium starts and the public SPA renders.
+        // All handlers remain budget/tool bounded; this is the outer kill
+        // switch, not permission for unbounded work.
+        tickWallTimeMs: 120_000,
       });
       log("info", "supervisor.started", { instanceId: supervisor.instanceId });
     }

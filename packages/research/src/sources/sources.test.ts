@@ -2,7 +2,11 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 import { getSearchableSources, SOURCE_CATALOG } from "./catalog.js";
-import { SamApiKeyMissingError, SamEntityClient } from "./sam.js";
+import {
+  SamApiKeyMissingError,
+  SamEntityClient,
+  SamQuotaExceededError,
+} from "./sam.js";
 import { SourceFetchError } from "./types.js";
 import {
   AIRCRAFT_COMPONENT_PSC,
@@ -736,6 +740,61 @@ describe("SamEntityClient", () => {
       transient: true,
       status: 429,
     });
+  });
+
+  it("parses the structured daily quota reset without exposing the response body", async () => {
+    const resetAt = "2026-08-26T00:00:00.000Z";
+    const { fetchImpl } = fetchSpy(() =>
+      jsonResponse(
+        {
+          code: "900804",
+          message: "Message throttled out",
+          nextAccessTime: resetAt,
+          sensitiveProviderDetail: "must-not-leak",
+        },
+        429,
+      ),
+    );
+    const client = new SamEntityClient({
+      apiKey: "secret-personal-key",
+      fetchImpl,
+    });
+
+    const error = await client
+      .search({ naicsCodes: ["336413"] })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(SamQuotaExceededError);
+    expect(error).toMatchObject({
+      transient: true,
+      status: 429,
+      resetAt: new Date(resetAt),
+    });
+    expect(String(error)).not.toContain("secret-personal-key");
+    expect(String(error)).not.toContain("must-not-leak");
+    expect((error as Error).cause).toBeUndefined();
+  });
+
+  it("falls back to the ordinary HTTP error when a quota reset is malformed", async () => {
+    const { fetchImpl } = fetchSpy(() =>
+      jsonResponse(
+        {
+          code: "900804",
+          message: "Message throttled out",
+          nextAccessTime: "not-a-date",
+        },
+        429,
+      ),
+    );
+    const client = new SamEntityClient({ apiKey: "test-key", fetchImpl });
+
+    const error = await client
+      .search({ naicsCodes: ["336413"] })
+      .catch((caught: unknown) => caught);
+
+    expect(error).toBeInstanceOf(SourceFetchError);
+    expect(error).not.toBeInstanceOf(SamQuotaExceededError);
+    expect(error).toMatchObject({ transient: true, status: 429 });
   });
 });
 

@@ -49,7 +49,11 @@ import {
 // runMigrations; each module instance keeps its own pool — close both.
 import { closeDatabase as closeSourceDatabase } from "../packages/database/src/client.js";
 
-import { OpenRouterClient, rescoreCandidateAfterResearch } from "@asi/research";
+import {
+  OpenRouterClient,
+  rescoreCandidateAfterResearch,
+  SamQuotaExceededError,
+} from "@asi/research";
 import {
   createV1TickHandlerRegistry,
   synthesizeQualifiedSignalIfReady,
@@ -589,6 +593,46 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     });
     expect(
       await getDatabase().select().from(leads).where(eq(leads.campaignId, agent.id)),
+    ).toHaveLength(0);
+  });
+
+  it("discover_source (SAM): parks at the daily quota reset without writing signals", async () => {
+    vi.stubEnv("SAM_API_KEY", "test-sam-key");
+    gatewayWithContents([planEnvelope([{ source: "sam" }])]);
+    const agent = await insertAgent({
+      key: "discover-sam-quota-handler-test",
+      agentType: "discover_source",
+    });
+    const resetAt = new Date("2026-08-26T00:00:00.000Z");
+    const searchSamEntities: NonNullable<TickHandlerDeps["searchSamEntities"]> = vi.fn(
+      async () => {
+        throw new SamQuotaExceededError(resetAt, 429);
+      },
+    );
+    const handler = createV1TickHandlerRegistry({
+      ...depsWith({}),
+      searchSamEntities,
+    }).get("discover_source")!;
+
+    const result = await handler({
+      agent,
+      signal: new AbortController().signal,
+    });
+
+    expect(searchSamEntities).toHaveBeenCalledTimes(1);
+    expect(result).toMatchObject({
+      outcome: "budget_exhausted",
+      actionsExecuted: 0,
+      findings: {
+        idle: true,
+        idleReason: "sam_daily_quota_exhausted",
+        source: "sam_entity",
+        resetAt: resetAt.toISOString(),
+      },
+      nextTickAt: resetAt,
+    });
+    expect(
+      await getDatabase().select().from(sourceSignals).where(eq(sourceSignals.agentId, agent.id)),
     ).toHaveLength(0);
   });
 

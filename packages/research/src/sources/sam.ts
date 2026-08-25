@@ -22,6 +22,20 @@ export class SamApiKeyMissingError extends SourceApiKeyMissingError {
   }
 }
 
+/** SAM.gov's daily personal-key quota has been consumed until `resetAt`. */
+export class SamQuotaExceededError extends SourceFetchError {
+  override readonly name: string = "SamQuotaExceededError";
+  readonly resetAt: Date;
+
+  constructor(resetAt: Date, status: number) {
+    super("SAM.gov daily request quota exhausted", {
+      transient: true,
+      status,
+    });
+    this.resetAt = resetAt;
+  }
+}
+
 const nonemptyString = z.string().min(1);
 const optionalString = z.string().min(1).nullish();
 const booleanish = z.union([z.boolean(), z.string(), z.number()]).nullish();
@@ -374,7 +388,16 @@ export class SamEntityClient {
     }
 
     if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
+      let body: unknown;
+      try {
+        body = await response.json();
+      } catch {
+        await response.body?.cancel().catch(() => undefined);
+      }
+      const quotaResetAt = samQuotaResetAt(body);
+      if (quotaResetAt !== null) {
+        throw new SamQuotaExceededError(quotaResetAt, response.status);
+      }
       throw new SourceFetchError(`SAM.gov returned HTTP ${response.status}`, {
         transient:
           response.status === 408 ||
@@ -403,6 +426,19 @@ export class SamEntityClient {
     }
     return parsed.data;
   }
+}
+
+function samQuotaResetAt(body: unknown): Date | null {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return null;
+  const error = body as Record<string, unknown>;
+  const code = typeof error.code === "number" ? String(error.code) : error.code;
+  const message = error.message;
+  const isQuotaResponse =
+    code === "900804" ||
+    (typeof message === "string" && /\bthrottl(?:e|ed|ing)\b/iu.test(message));
+  if (!isQuotaResponse || typeof error.nextAccessTime !== "string") return null;
+  const timestamp = Date.parse(error.nextAccessTime);
+  return Number.isFinite(timestamp) ? new Date(timestamp) : null;
 }
 
 interface ParsedSamSearchQuery {

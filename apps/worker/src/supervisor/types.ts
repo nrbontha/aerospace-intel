@@ -11,7 +11,7 @@ export interface TickContext {
 }
 
 /** Success-family outcomes a handler may report ('executed' is the default). */
-export type TickOutcomeReported = "executed" | "done" | "stuck";
+export type TickOutcomeReported = "executed" | "done" | "stuck" | "budget_exhausted";
 
 export interface TickResult {
   outcome?: TickOutcomeReported;
@@ -20,6 +20,8 @@ export interface TickResult {
   actionsExecuted?: number;
   findings?: Record<string, unknown>;
   costUsd?: number;
+  /** Override normal cadence scheduling, for provider-supplied reset times. */
+  nextTickAt?: Date;
 }
 
 /**
