@@ -200,9 +200,22 @@ async function mergeCandidates(tx: Tx, sourceCompanyId: string, targetCompanyId:
   const targetScoreCount =
     scoreCounts.rows.find((row) => row.candidate_id === target.id)?.count ?? 0;
   if (sourceScoreCount > 0 && targetScoreCount > 0) {
-    throw new Error(
-      `cannot safely consolidate candidates ${source.id} and ${target.id}: both have append-only candidate_scores`,
-    );
+    const sourceRationale = (source.rationale ?? {}) as Record<string, unknown>;
+    const archivalRisk =
+      `merged_duplicate_company; survivorCandidateId=${target.id}`;
+    const rationale = {
+      whyInteresting: strings(sourceRationale["whyInteresting"]),
+      risks: [...new Set([...strings(sourceRationale["risks"]), archivalRisk])],
+      unknowns: strings(sourceRationale["unknowns"]),
+    };
+    await tx.execute(sql`
+      UPDATE candidates
+      SET status = 'archived',
+          rationale = ${JSON.stringify(rationale)}::jsonb,
+          updated_at = now()
+      WHERE id = ${source.id}
+    `);
+    return;
   }
   const kept = sourceScoreCount > 0 ? source : target;
   const removed = kept.id === source.id ? target : source;

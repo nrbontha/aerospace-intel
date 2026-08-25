@@ -7,6 +7,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
   auditEvents,
+  candidateScores,
   candidates,
   companyAliases,
   closeDatabase,
@@ -46,7 +47,6 @@ describe.skipIf(!DB_TESTS_ENABLED)("legacy lead remediation scripts (DB)", () =>
   let db: Database;
   let wrongCompanyId = "";
   const thirdPartyCompanyIds: string[] = [];
-  const dedupeCompanyIds: string[] = [];
 
   beforeAll(async () => {
     loadDatabaseUrl();
@@ -58,9 +58,6 @@ describe.skipIf(!DB_TESTS_ENABLED)("legacy lead remediation scripts (DB)", () =>
     await db.delete(leads).where(eq(leads.campaignId, campaignId));
     if (wrongCompanyId) await db.delete(companies).where(eq(companies.id, wrongCompanyId));
     for (const companyId of thirdPartyCompanyIds) {
-      await db.delete(companies).where(eq(companies.id, companyId));
-    }
-    for (const companyId of dedupeCompanyIds) {
       await db.delete(companies).where(eq(companies.id, companyId));
     }
     await closeDatabase();
@@ -362,7 +359,6 @@ describe.skipIf(!DB_TESTS_ENABLED)("legacy lead remediation scripts (DB)", () =>
         },
       ])
       .returning({ id: companies.id });
-    dedupeCompanyIds.push(survivor!.id, duplicate!.id);
     await db.insert(companyDomains).values({
       companyId: survivor!.id,
       domain,
@@ -395,24 +391,35 @@ describe.skipIf(!DB_TESTS_ENABLED)("legacy lead remediation scripts (DB)", () =>
         },
       ])
       .returning({ id: leads.id });
-    await db.insert(candidates).values([
-      {
-        companyId: survivor!.id,
-        rationale: {
-          whyInteresting: ["survivor evidence"],
-          risks: [],
-          unknowns: [],
+    const insertedCandidates = await db
+      .insert(candidates)
+      .values([
+        {
+          companyId: survivor!.id,
+          rationale: {
+            whyInteresting: ["survivor evidence"],
+            risks: [],
+            unknowns: [],
+          },
         },
-      },
-      {
-        companyId: duplicate!.id,
-        rationale: {
-          whyInteresting: ["duplicate evidence"],
-          risks: [],
-          unknowns: [],
+        {
+          companyId: duplicate!.id,
+          rationale: {
+            whyInteresting: ["duplicate evidence"],
+            risks: [],
+            unknowns: [],
+          },
         },
-      },
-    ]);
+      ])
+      .returning({ id: candidates.id, companyId: candidates.companyId });
+    await db.insert(candidateScores).values(
+      insertedCandidates.map((candidate, index) => ({
+        candidateId: candidate.id,
+        axis: "fit" as const,
+        value: index === 0 ? "80" : "70",
+        details: { immutableTestEvidence: domain },
+      })),
+    );
 
     const dryRun = await dedupeCompanyDomains(db, { domain, apply: false });
     expect(dryRun).toMatchObject({
@@ -448,14 +455,61 @@ describe.skipIf(!DB_TESTS_ENABLED)("legacy lead remediation scripts (DB)", () =>
       .from(candidates)
       .where(eq(candidates.companyId, survivor!.id));
     expect(survivingCandidates).toHaveLength(1);
-    expect(survivingCandidates[0]!.rationale.whyInteresting).toEqual(
-      expect.arrayContaining(["survivor evidence", "duplicate evidence"]),
+    expect(survivingCandidates[0]).toMatchObject({
+      id: insertedCandidates[0]!.id,
+      status: "queued_research",
+      rationale: { whyInteresting: ["survivor evidence"] },
+    });
+    const archivedSourceCandidate = (
+      await db
+        .select()
+        .from(candidates)
+        .where(eq(candidates.id, insertedCandidates[1]!.id))
+        .limit(1)
+    )[0]!;
+    expect(archivedSourceCandidate).toMatchObject({
+      companyId: duplicate!.id,
+      status: "archived",
+    });
+    expect(archivedSourceCandidate.rationale.risks).toEqual([
+      `merged_duplicate_company; survivorCandidateId=${insertedCandidates[0]!.id}`,
+    ]);
+    const preservedScores = await db
+      .select({ candidateId: candidateScores.candidateId })
+      .from(candidateScores)
+      .where(
+        and(
+          eq(candidateScores.details, { immutableTestEvidence: domain }),
+          eq(candidateScores.axis, "fit"),
+        ),
+      );
+    expect(new Set(preservedScores.map((score) => score.candidateId))).toEqual(
+      new Set(insertedCandidates.map((candidate) => candidate.id)),
     );
+    const mergedCompanies = await db
+      .select({ id: companies.id, status: companies.status })
+      .from(companies)
+      .where(and(eq(companies.id, survivor!.id), eq(companies.status, "active")));
+    expect(mergedCompanies).toEqual([{ id: survivor!.id, status: "active" }]);
+    expect(
+      (
+        await db
+          .select({ status: companies.status })
+          .from(companies)
+          .where(eq(companies.id, duplicate!.id))
+          .limit(1)
+      )[0]!.status,
+    ).toBe("inactive");
     expect(
       await db
         .select()
         .from(companyAliases)
-        .where(and(eq(companyAliases.companyId, survivor!.id), eq(companyAliases.alias, "A&B Castings"))),
+        .where(
+          and(
+            eq(companyAliases.companyId, survivor!.id),
+            eq(companyAliases.alias, "A&B Castings"),
+          ),
+        ),
     ).toHaveLength(1);
     expect(
       await db.select().from(companyDomains).where(eq(companyDomains.domain, domain)),
