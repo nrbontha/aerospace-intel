@@ -10,10 +10,12 @@ import { SourceFetchError } from "./types.js";
  * No API key required (public_no_auth).
  *
  * HONEST SCOPE NOTE: spending_by_award returns RECIPIENTS of federal
- * awards, not a manufacturer registry. This adapter therefore applies a
- * conservative post-fetch qualification gate before it emits any candidate:
- * returned NAICS must be a strict aerospace-manufacturing code and the
- * award/business text must carry aerospace or defense manufacturing evidence.
+ * awards, not a manufacturer registry. Every emitted candidate is therefore
+ * only a quarantined source signal. A row may pass on strict returned NAICS
+ * evidence, or on the serialized request's complete strict aerospace NAICS
+ * filter when USAspending omits the returned code. Explicit wrong-sector and
+ * service signals are still rejected here; official-site research decides
+ * whether the company is actually a target.
  */
 
 export const USASPENDING_SEARCH_URL =
@@ -34,8 +36,8 @@ export const AEROSPACE_NAICS = [
 
 /**
  * Aircraft-related PSC values remain available to explicitly configured
- * campaigns, but are never part of the default discovery query and cannot
- * qualify a recipient without strict returned NAICS evidence.
+ * campaigns, but are never part of the default discovery query and are
+ * recorded only as weak provenance rather than target proof.
  */
 export const AIRCRAFT_COMPONENT_PSC = [
   "1510",
@@ -51,6 +53,7 @@ export const AIRCRAFT_COMPONENT_PSC = [
 ] as const;
 
 export interface SourceQualification {
+  readonly evidenceStrength: "returned_strict_naics" | "request_filter_only";
   readonly appliedFilters: {
     readonly awardTypeCodes: readonly string[];
     readonly naicsCodes: readonly string[];
@@ -59,10 +62,17 @@ export interface SourceQualification {
     readonly placeOfPerformanceLocations: readonly UsaspendingPlaceOfPerformance[];
     readonly keywords: readonly string[];
   };
-  readonly returnedNaics: readonly string[];
-  readonly returnedPsc: readonly string[];
+  /** Exact returned values; null means USAspending omitted the field. */
+  readonly returnedNaics: readonly string[] | null;
+  readonly returnedPsc: readonly string[] | null;
   readonly awardDescriptionExcerpt: string;
   readonly awardAgency?: string;
+  readonly awardLocation: {
+    readonly addressLine: string | null;
+    readonly city: string | null;
+    readonly state: string | null;
+    readonly zip: string | null;
+  } | null;
   /** Stable endpoint + canonicalized query/recipient locator for replay. */
   readonly queryLocator: string;
 }
@@ -305,12 +315,8 @@ const STRICT_NAICS: Record<string, true> = {
   "336419": true,
   "334511": true,
 };
-const AEROSPACE_DEFENSE_RELEVANCE =
-  /\b(?:aerospace|aviation|aircraft|airframe|avionics|rotary[-\s]?wing|defen[cs]e|military)\b/iu;
-const MANUFACTURING_SIGNAL =
-  /\b(?:manufactur(?:e|ed|ing)|machin(?:e|ed|ing)|fabricat(?:e|ed|ing)|assembly|assembl(?:e|ed|ing)|tooling|production)\b/iu;
-const EXCLUDED_SERVICE_SIGNAL =
-  /\b(?:service(?:s|ing)?|distribution|distributor|procurement|consult(?:ant|ing)|staffing|brokerage|reseller)\b/iu;
+const EXPLICIT_WRONG_SECTOR_OR_SERVICE =
+  /\b(?:service(?:s|ing)?|distribution|distributor|procurement|purchasing|consult(?:ant|ing|ancy)?|advisory|staffing|brokerage|broker|reseller|medical|health(?:care)?|hospital|clinical|pharmaceutical)\b/iu;
 
 function codeList(raw: unknown): string[] {
   if (typeof raw === "number") return [String(raw)];
@@ -319,6 +325,11 @@ function codeList(raw: unknown): string[] {
     .split(/[,\s;]+/u)
     .map((value) => value.trim())
     .filter((value) => value.length > 0);
+}
+
+function requestCarriesStrictNaics(query: UsaspendingQuery): boolean {
+  const requested = new Set((query.naicsCodes ?? []).map((code) => code.trim()));
+  return AEROSPACE_NAICS.every((code) => requested.has(code));
 }
 
 function queryLocator(
@@ -363,24 +374,24 @@ function appliedFilters(query: UsaspendingQuery): SourceQualification["appliedFi
 
 function qualificationRejection(
   row: AwardRow,
+  query: UsaspendingQuery,
 ): keyof QualificationFindings["rejected"] | null {
-  const naics = codeList(row["NAICS Code"]);
-  if (!naics.some((code) => STRICT_NAICS[code] === true)) {
-    return "missingStrictNaics";
-  }
   const businessText = [
     row["Recipient Name"] ?? "",
     row.Description ?? "",
   ].join(" ");
-  if (!AEROSPACE_DEFENSE_RELEVANCE.test(businessText)) {
-    return "missingAerospaceDefenseEvidence";
-  }
-  if (
-    EXCLUDED_SERVICE_SIGNAL.test(businessText) &&
-    !MANUFACTURING_SIGNAL.test(businessText)
-  ) {
+  // Explicit negative evidence wins even when a returned/requested code looks
+  // relevant. Manufacturing relevance may otherwise remain unknown here.
+  if (EXPLICIT_WRONG_SECTOR_OR_SERVICE.test(businessText)) {
     return "excludedServiceWithoutManufacturing";
   }
+  const naics = codeList(row["NAICS Code"]);
+  const hasReturnedStrictNaics = naics.some((code) => STRICT_NAICS[code] === true);
+  if (!hasReturnedStrictNaics && !requestCarriesStrictNaics(query)) {
+    return "missingStrictNaics";
+  }
+  // A complete strict request is itself sufficient only for quarantine.
+  // Official-site qualification establishes aerospace/manufacturing truth.
   return null;
 }
 
@@ -470,7 +481,7 @@ export class UsaspendingClient {
         if (name === undefined || name === null || name.trim() === "") {
           continue;
         }
-        const rejection = qualificationRejection(row);
+        const rejection = qualificationRejection(row, query);
         if (rejection !== null) {
           findings.rejected[rejection] += 1;
           continue;
@@ -482,14 +493,28 @@ export class UsaspendingClient {
         const returnedPsc = codeList(row["Product or Service Code"]);
         const location = row["Recipient Location"];
         const qualification: SourceQualification = {
+          evidenceStrength: returnedNaics.some((code) => STRICT_NAICS[code] === true)
+            ? "returned_strict_naics"
+            : "request_filter_only",
           appliedFilters: filters,
-          returnedNaics,
-          returnedPsc,
+          returnedNaics: returnedNaics.length === 0 ? null : returnedNaics,
+          returnedPsc: returnedPsc.length === 0 ? null : returnedPsc,
           awardDescriptionExcerpt: (row.Description ?? "").slice(0, 1_000),
           ...(row["Awarding Agency"] === undefined ||
           row["Awarding Agency"] === null
             ? {}
             : { awardAgency: row["Awarding Agency"] }),
+          awardLocation:
+            location === undefined || location === null
+              ? null
+              : {
+                  addressLine: location.address_line1 ?? null,
+                  city: location.city_name ?? null,
+                  state: location.state_code ?? null,
+                  zip: location.zip5 === undefined || location.zip5 === null
+                    ? null
+                    : String(location.zip5),
+                },
           queryLocator: queryLocator(query, name, uei),
         };
         const agg = byRecipient.get(key);
@@ -524,6 +549,12 @@ export class UsaspendingClient {
         agg.count += 1;
         for (const code of returnedNaics) agg.naics.add(code);
         for (const code of returnedPsc) agg.psc.add(code);
+        if (
+          agg.qualification.evidenceStrength === "request_filter_only" &&
+          qualification.evidenceStrength === "returned_strict_naics"
+        ) {
+          agg.qualification = qualification;
+        }
         const start = row["Start Date"];
         if (
           start &&
@@ -595,8 +626,8 @@ export class UsaspendingClient {
         ),
         sourceQualification: {
           ...agg.qualification,
-          returnedNaics: [...agg.naics],
-          returnedPsc: [...agg.psc],
+          returnedNaics: agg.naics.size === 0 ? null : [...agg.naics],
+          returnedPsc: agg.psc.size === 0 ? null : [...agg.psc],
         },
       };
     });

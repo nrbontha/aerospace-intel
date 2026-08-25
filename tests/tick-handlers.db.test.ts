@@ -46,6 +46,7 @@ import { closeDatabase as closeSourceDatabase } from "../packages/database/src/c
 import { OpenRouterClient, rescoreCandidateAfterResearch } from "@asi/research";
 import {
   createV1TickHandlerRegistry,
+  type SourceSignalClassification,
   type TickHandlerDeps,
 } from "../apps/worker/src/supervisor/handlers.js";
 
@@ -184,17 +185,43 @@ function depsWith(options: {
 
 function qualifiedSourceQualification(naics = "336413") {
   return {
+    evidenceStrength: "returned_strict_naics",
     appliedFilters: {
       awardTypeCodes: ["A", "B", "C", "D"],
       naicsCodes: [naics],
       pscCodes: [],
       timePeriods: [{ startDate: "2025-01-01", endDate: "2025-12-31" }],
+      placeOfPerformanceLocations: [],
+      keywords: [],
     },
     returnedNaics: [naics],
-    returnedPsc: [],
+    returnedPsc: null,
     awardDescriptionExcerpt: "Manufacturing aircraft components",
     awardAgency: "Department of Defense",
+    awardLocation: null,
     queryLocator: "https://api.usaspending.gov/api/v2/search/spending_by_award/",
+  };
+}
+
+function sourceSignalClassification(
+  pageUrl: string,
+  overrides: Partial<SourceSignalClassification> = {},
+): SourceSignalClassification {
+  const excerpt = "manufactures flight-control components for aerospace and defense programs";
+  return {
+    manufacturer: true,
+    aerospaceDefenseRelevance: true,
+    businessModel: "manufacturer",
+    headquartersCountry: "United States",
+    ownershipType: "independent",
+    sizeFit: "likely_under_50m",
+    proprietarySignals: ["Flight-control component manufacturing"],
+    manufacturerEvidence: { excerpt, url: pageUrl },
+    aerospaceDefenseEvidence: { excerpt, url: pageUrl },
+    targetDecision: "yes_target",
+    reasons: ["Official-site evidence supports target fit"],
+    confidence: 0.92,
+    ...overrides,
   };
 }
 
@@ -491,7 +518,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     expect(signals).toHaveLength(25);
   });
 
-  it("qualify_award_lead creates only evidence-backed aerospace manufacturers", async () => {
+  it("qualify_award_lead applies the generic deterministic gate to all source keys", async () => {
     const qualifier = await insertAgent({
       key: "qualify-award-leads-test",
       agentType: "qualify_award_lead",
@@ -499,14 +526,17 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     const rawSignals = [
       "Atlas Precision Components LLC",
       "Orbit Consulting LLC",
-      "Health Device Manufacturing LLC",
+      "York Precision Systems",
       "Aircraft Parts Distributor LLC",
       "Identity Mismatch Manufacturing LLC",
     ];
     await getDatabase().insert(sourceSignals).values(
       rawSignals.map((rawName, index) => ({
-        sourceKey: "usaspending",
-        sourceLocator: `usaspending://qualification/${index}`,
+        sourceKey: index === 0 ? "exa_web_catalog" : "usaspending",
+        sourceLocator:
+          index === 0
+            ? "exa://web-catalog/atlas-precision"
+            : `usaspending://qualification/${index}`,
         sourceFingerprint: `qualification-test-${index}`,
         agentId: qualifier.id,
         rawName,
@@ -550,15 +580,34 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
           reason: "location corroborated",
         }),
       },
-      classifyAwardLead: async ({ legalName, pageUrl }) => ({
-        manufacturer: legalName.includes("Atlas") || legalName.includes("Health"),
-        aerospaceDefenseRelevance: legalName.includes("Atlas"),
-        businessModel: legalName.includes("Distributor") ? "distributor" : "manufacturer",
-        evidenceExcerpt:
-          "manufactures flight-control components for aerospace and defense programs",
-        evidenceUrl: pageUrl,
-        confidence: 0.92,
-      }),
+      classifySourceSignal: async ({ legalName, pageUrl }) => {
+        const manufacturer =
+          legalName.includes("Atlas") || legalName.includes("York");
+        const aerospaceDefenseRelevance =
+          legalName.includes("Atlas") || legalName.includes("York");
+        const needsMoreResearch = legalName.includes("York");
+        return sourceSignalClassification(pageUrl, {
+          manufacturer,
+          aerospaceDefenseRelevance,
+          ownershipType: needsMoreResearch ? "unknown" : "independent",
+          sizeFit: needsMoreResearch ? "unknown" : "likely_under_50m",
+          businessModel: legalName.includes("Distributor") ? "distributor" : "manufacturer",
+          manufacturerEvidence: manufacturer
+            ? {
+                excerpt:
+                  "manufactures flight-control components for aerospace and defense programs",
+                url: pageUrl,
+              }
+            : null,
+          aerospaceDefenseEvidence: aerospaceDefenseRelevance
+            ? {
+                excerpt:
+                  "manufactures flight-control components for aerospace and defense programs",
+                url: pageUrl,
+              }
+            : null,
+        });
+      },
     });
     const result = await handler.get("qualify_award_lead")!({
       agent: qualifier,
@@ -567,9 +616,14 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     expect(result.findings).toMatchObject({
       selected: 5,
       statusTransitions: {
-        "qualifying->qualified": 1,
-        "qualifying->rejected": 4,
+        "qualifying->qualified": 2,
+        "qualifying->rejected": 3,
         "qualifying->quarantined": 0,
+      },
+      targetDecisions: {
+        yes_target: 1,
+        needs_more_research: 1,
+        no_target: 3,
       },
     });
     const signals = await getDatabase()
@@ -578,24 +632,78 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       .where(eq(sourceSignals.agentId, qualifier.id))
       .orderBy(asc(sourceSignals.rawName));
     const qualified = signals.filter((signal) => signal.status === "qualified");
-    expect(qualified).toHaveLength(1);
-    expect(qualified[0]).toMatchObject({
-      rawName: "Atlas Precision Components LLC",
-      leadId: expect.any(String),
-      companyId: expect.any(String),
+    expect(qualified).toHaveLength(2);
+    expect(qualified).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          rawName: "Atlas Precision Components LLC",
+          leadId: expect.any(String),
+          companyId: expect.any(String),
+        }),
+        expect.objectContaining({
+          rawName: "York Precision Systems",
+          leadId: expect.any(String),
+          companyId: expect.any(String),
+        }),
+      ]),
+    );
+    const atlas = qualified.find((signal) => signal.rawName.startsWith("Atlas"))!;
+    const york = qualified.find((signal) => signal.rawName.startsWith("York"))!;
+    expect((atlas.qualification as Record<string, unknown>)["evidence"]).toMatchObject({
+      modelProposal: {
+        manufacturerEvidence: {
+          excerpt:
+            "manufactures flight-control components for aerospace and defense programs",
+        },
+      },
+      deterministicDecision: { targetDecision: "yes_target" },
     });
-    expect((qualified[0]!.qualification as Record<string, unknown>)["evidence"]).toMatchObject({
-      classification: {
-        evidenceExcerpt:
-          "manufactures flight-control components for aerospace and defense programs",
+    expect((york.qualification as Record<string, unknown>)["evidence"]).toMatchObject({
+      deterministicDecision: {
+        targetDecision: "needs_more_research",
+        reasons: ["ownership_requires_research", "size_requires_research"],
       },
     });
-    expect(signals.filter((signal) => signal.status === "rejected")).toHaveLength(4);
+    expect(signals.filter((signal) => signal.status === "rejected")).toHaveLength(3);
     const leadRows = await getDatabase()
       .select()
       .from(leads)
       .where(eq(leads.campaignId, qualifier.id));
-    expect(leadRows).toHaveLength(1);
+    expect(leadRows).toHaveLength(2);
+    const routedCandidates = await getDatabase()
+      .select({
+        companyId: candidates.companyId,
+        status: candidates.status,
+        rationale: candidates.rationale,
+        tierOverride: candidates.tierOverride,
+        tierSource: candidates.tierSource,
+      })
+      .from(candidates)
+      .where(
+        inArray(
+          candidates.companyId,
+          qualified.map((signal) => signal.companyId!),
+        ),
+      );
+    expect(routedCandidates).toHaveLength(2);
+    expect(routedCandidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "queued_research",
+          tierOverride: null,
+          tierSource: "engine",
+        }),
+      ]),
+    );
+    const yorkCandidate = routedCandidates.find(
+      (candidate) => candidate.companyId === york.companyId,
+    )!;
+    expect(yorkCandidate.rationale.unknowns).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining("Ownership"),
+        expect.stringContaining("Size fit"),
+      ]),
+    );
   });
   it("qualify_award_lead corroborates identity across two first-party pages only", async () => {
     const qualifier = await insertAgent({
@@ -696,14 +804,14 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
           reason: "official pages identify the business",
         }),
       },
-      classifyAwardLead: async ({ pageUrl }) => ({
-        manufacturer: true,
-        aerospaceDefenseRelevance: true,
-        businessModel: "manufacturer",
-        evidenceExcerpt: "manufactures aerospace components in Niceville, Florida",
-        evidenceUrl: pageUrl,
-        confidence: 0.9,
-      }),
+      classifySourceSignal: async ({ pageUrl }) => {
+        const excerpt = "manufactures aerospace components in Niceville, Florida";
+        return sourceSignalClassification(pageUrl, {
+          manufacturerEvidence: { excerpt, url: pageUrl },
+          aerospaceDefenseEvidence: { excerpt, url: pageUrl },
+          confidence: 0.9,
+        });
+      },
     });
     const result = await handler.get("qualify_award_lead")!({
       agent: qualifier,
@@ -1103,7 +1211,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       .insert(goldenExamples)
       .values({
         name: "Golden Drill Corp",
-        reviewStatus: "reviewed",
+        reviewStatus: "proposed",
         archetypeFit: "positive",
         grataPayload: { industryNaics: ["336413"], certifications: ["1560"] },
       })
@@ -1163,7 +1271,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     expect(leadRows).toHaveLength(0);
   });
 
-  it("golden_neighbor idles when no reviewed-positive examples exist", async () => {
+  it("golden_neighbor idles when no positive proposed or reviewed examples exist", async () => {
     const agent = await insertAgent({ key: "golden-neighbor-empty", agentType: "golden_neighbor" });
     const handler = createV1TickHandlerRegistry(
       depsWith({
@@ -1176,7 +1284,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     });
     expect(result.outcome).toBe("done");
     expect(result.findings).toMatchObject({
-      idleReason: "no_reviewed_positive_golden_examples",
+      idleReason: "no_positive_golden_examples",
     });
   });
 });

@@ -249,7 +249,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
       agentType: "resolve_domain",
       cadenceSeconds: 600,
       budgetSharePct: "15.00",
-      status: "running",
+      status: "paused",
     });
   });
 

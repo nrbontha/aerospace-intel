@@ -1,4 +1,4 @@
-import { and, asc, desc, eq, inArray, sql, type SQL } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, or, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 
 import {
@@ -94,7 +94,7 @@ import type {
 // Injectable dependencies (tests fake the gateway / fetchers / search client).
 // ---------------------------------------------------------------------------
 
-/** USAspending recipient shape (structural subset of research's LeadCandidate). */
+/** Source-agnostic company observation mined into the quarantine boundary. */
 export interface DiscoveredRecipient {
   readonly rawName: string;
   readonly uei?: string;
@@ -109,24 +109,46 @@ export interface DiscoveredRecipient {
   readonly sourceLocator: string;
 }
 
-export interface AwardLeadClassification {
+export type SourceSignalTargetDecision =
+  | "yes_target"
+  | "no_target"
+  | "needs_more_research";
+
+export interface PageGroundedClaim {
+  readonly excerpt: string;
+  readonly url: string;
+}
+
+export interface SourceSignalClassification {
   readonly manufacturer: boolean;
   readonly aerospaceDefenseRelevance: boolean;
   readonly businessModel: "manufacturer" | "distributor" | "service" | "btp" | "unknown";
-  readonly evidenceExcerpt: string;
-  readonly evidenceUrl: string;
+  readonly headquartersCountry: string;
+  readonly ownershipType:
+    | "independent"
+    | "founder_family"
+    | "pe_owned"
+    | "strategic_parent"
+    | "public"
+    | "unknown";
+  readonly sizeFit: "likely_under_50m" | "likely_over_50m" | "unknown";
+  readonly proprietarySignals: readonly string[];
+  readonly manufacturerEvidence: PageGroundedClaim | null;
+  readonly aerospaceDefenseEvidence: PageGroundedClaim | null;
+  readonly targetDecision: SourceSignalTargetDecision;
+  readonly reasons: readonly string[];
   readonly confidence: number;
 }
 
-export interface AwardLeadClassifierInput {
+export interface SourceSignalClassifierInput {
   readonly legalName: string;
   readonly pageText: string;
   readonly pageUrl: string;
 }
 
-export type AwardLeadClassifier = (
-  input: AwardLeadClassifierInput,
-) => Promise<AwardLeadClassification>;
+export type SourceSignalClassifier = (
+  input: SourceSignalClassifierInput,
+) => Promise<SourceSignalClassification>;
 
 export type OfficialDomainSearcher = (
   identity: {
@@ -159,8 +181,8 @@ export interface TickHandlerDeps {
   /** USAspending search override (tests); default is the real client. */
   /** Exa official-domain proposal override (tests). */
   readonly searchOfficialDomains?: OfficialDomainSearcher;
-  /** Official-site manufacturing classifier override (tests). */
-  readonly classifyAwardLead?: AwardLeadClassifier;
+  /** Generic official-site source-signal classifier override (tests). */
+  readonly classifySourceSignal?: SourceSignalClassifier;
   readonly searchRecipients?: UsaspendingSearchClient["searchRecipients"];
   /** Document fetcher override (tests); default is safe-fetch. */
   readonly fetchDocument?: (
@@ -283,8 +305,8 @@ export function createV1TickHandlerRegistry(
 const MAX_STATE_IDS = 20;
 const STALE_EVIDENCE_DAYS = 30;
 const MAX_DOCUMENT_CHARACTERS = 120_000;
-/** Safety circuit-breaker: a qualified tick may never ingest more than 25 leads. */
-const MAX_LEADS_PER_TICK = 25;
+/** Safety circuit-breaker: discovery may queue at most 25 source signals/tick. */
+const MAX_SOURCE_SIGNALS_PER_HARVEST_TICK = 25;
 
 const OWNERSHIP_TYPES = [
   "private",
@@ -545,7 +567,7 @@ async function runUsaspendingExpansion(
   const qualifiedProposals = allProposals.filter(
     (proposal) => proposal.itemType === "company",
   );
-  const proposals = qualifiedProposals.slice(0, MAX_LEADS_PER_TICK);
+  const proposals = qualifiedProposals.slice(0, MAX_SOURCE_SIGNALS_PER_HARVEST_TICK);
   return {
     queryRan: true,
     proposals,
@@ -1550,16 +1572,25 @@ function collectNaicsPscSeeds(records: unknown[]): {
   return { naics: [...naics], psc: [...psc] };
 }
 
-async function selectPositiveReviewedGoldenExamples(
+async function selectPositiveGoldenExamples(
   db: Database,
 ): Promise<Array<{ grataPayload: Record<string, unknown> }>> {
   const rows = await db
     .select({ grataPayload: goldenExamples.grataPayload })
     .from(goldenExamples)
+    .leftJoin(candidates, eq(goldenExamples.companyId, candidates.companyId))
     .where(
       and(
-        eq(goldenExamples.reviewStatus, "reviewed"),
-        inArray(goldenExamples.archetypeFit, ["strong_positive", "positive"]),
+        inArray(goldenExamples.reviewStatus, ["proposed", "reviewed"]),
+        or(
+          inArray(goldenExamples.archetypeFit, ["strong_positive", "positive"]),
+          inArray(goldenExamples.currentActionability, ["strong_positive", "positive"]),
+          inArray(goldenExamples.goldenExampleType, [
+            "strong_positive",
+            "positive_with_caveat",
+          ]),
+          eq(candidates.tierOverride, "high_interest"),
+        ),
       ),
     )
     .limit(50);
@@ -1579,7 +1610,7 @@ function archetypeFiltersFromExamples(
 function createGoldenNeighborHandler(deps: Partial<TickHandlerDeps>): TickHandler {
   return async (context): Promise<TickResult> => {
     const planned = await planAgentTick(deps, context, async (db) => {
-      const examples = await selectPositiveReviewedGoldenExamples(db);
+      const examples = await selectPositiveGoldenExamples(db);
       return { archetypeFilters: archetypeFiltersFromExamples(examples) };
     });
     if ("shortCircuit" in planned) return planned.shortCircuit;
@@ -1587,12 +1618,12 @@ function createGoldenNeighborHandler(deps: Partial<TickHandlerDeps>): TickHandle
     const planJson = { ...plan };
 
     const db = getDatabase();
-    const examples = await selectPositiveReviewedGoldenExamples(db);
+    const examples = await selectPositiveGoldenExamples(db);
     if (examples.length === 0) {
       return {
         outcome: "done",
         plan: planJson,
-        findings: { idleReason: "no_reviewed_positive_golden_examples" },
+        findings: { idleReason: "no_positive_golden_examples" },
       };
     }
     const neighborActions = plan.actions.slice(0, 1) as GoldenNeighborAction[];
@@ -1602,10 +1633,12 @@ function createGoldenNeighborHandler(deps: Partial<TickHandlerDeps>): TickHandle
     const actionSeeds = collectNaicsPscSeeds(
       neighborActions.map((action) => action.archetypeFilters),
     );
-    const naics = [...new Set([...actionSeeds.naics, ...exampleSeeds.naics])].slice(0, 8);
+    const naics = [
+      ...new Set([...AEROSPACE_NAICS, ...actionSeeds.naics, ...exampleSeeds.naics]),
+    ].slice(0, 8);
     const psc = [...new Set([...actionSeeds.psc, ...exampleSeeds.psc])].slice(0, 10);
     const expansion = await runUsaspendingExpansion(context.agent, deps, {
-      naics: naics.length > 0 ? naics : [...AEROSPACE_NAICS],
+      naics,
       ...(psc.length > 0 ? { psc } : {}),
     });
     if (!expansion.queryRan) {
@@ -1993,34 +2026,73 @@ export function judgeCostUsd(judge: DomainJudge): number {
 }
 
 // ---------------------------------------------------------------------------
-// qualify_award_lead.
+// Generic source-signal qualification (legacy DB agent_type: qualify_award_lead).
 // ---------------------------------------------------------------------------
 
-const MAX_AWARD_SIGNALS_PER_TICK = 5;
+const MAX_SOURCE_SIGNALS_PER_TICK = 5;
 const MAX_EXA_PROPOSALS_PER_SIGNAL = 5;
+const MAX_CLASSIFICATION_TEXT_CHARS = 12_000;
 
-const awardLeadClassificationSchema = z.strictObject({
-  manufacturer: z.boolean(),
-  aerospaceDefenseRelevance: z.boolean(),
-  businessModel: z.enum(["manufacturer", "distributor", "service", "btp", "unknown"]),
-  evidenceExcerpt: z.string().trim().min(1).max(2_000),
-  evidenceUrl: z.string().url().max(2_000),
-  confidence: z.number().min(0).max(1),
+const pageGroundedClaimSchema = z.strictObject({
+  excerpt: z.string().trim().min(1).max(2_000),
+  url: z.string().url().max(2_000),
 });
+const sourceSignalClassificationSchema = z
+  .strictObject({
+    manufacturer: z.boolean(),
+    aerospaceDefenseRelevance: z.boolean(),
+    businessModel: z.enum(["manufacturer", "distributor", "service", "btp", "unknown"]),
+    headquartersCountry: z.string().trim().min(1).max(100),
+    ownershipType: z.enum([
+      "independent",
+      "founder_family",
+      "pe_owned",
+      "strategic_parent",
+      "public",
+      "unknown",
+    ]),
+    sizeFit: z.enum(["likely_under_50m", "likely_over_50m", "unknown"]),
+    proprietarySignals: z.array(z.string().trim().min(1).max(500)).max(20),
+    manufacturerEvidence: pageGroundedClaimSchema.nullable(),
+    aerospaceDefenseEvidence: pageGroundedClaimSchema.nullable(),
+    targetDecision: z.enum(["yes_target", "no_target", "needs_more_research"]),
+    reasons: z.array(z.string().trim().min(1).max(500)).min(1).max(20),
+    confidence: z.number().min(0).max(1),
+  })
+  .superRefine((value, context) => {
+    if (value.manufacturer && value.manufacturerEvidence === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["manufacturerEvidence"],
+        message: "manufacturer=true requires page-grounded evidence",
+      });
+    }
+    if (value.aerospaceDefenseRelevance && value.aerospaceDefenseEvidence === null) {
+      context.addIssue({
+        code: "custom",
+        path: ["aerospaceDefenseEvidence"],
+        message: "aerospaceDefenseRelevance=true requires page-grounded evidence",
+      });
+    }
+  });
 
-const AWARD_LEAD_CLASSIFIER_PROMPT =
-  "You classify a verified official company webpage for lead qualification. " +
-  "Use only the supplied webpage text. manufacturer=true only when it says the " +
-  "company makes, manufactures, machines, fabricates, or builds physical products. " +
-  "aerospaceDefenseRelevance=true only when it explicitly supports aerospace, aviation, " +
-  "space, defense, military, or named aerospace/defense programs. businessModel is one " +
-  "of manufacturer, distributor, service, btp, unknown. A consulting, engineering-only, " +
-  "repair-only, medical-only, or distributor business is not a qualifying manufacturer. " +
-  "Return an exact excerpt copied from the supplied page text and the supplied page URL. " +
-  "Reply with exactly one raw JSON object and no markdown.";
+const SOURCE_SIGNAL_CLASSIFIER_PROMPT =
+  "You classify a company after Exa discovery and verified first-party website identity. " +
+  "The original discovery source is only a weak signal; use only the supplied official-site pages. " +
+  "manufacturer=true only when a page says the company makes, manufactures, machines, fabricates, " +
+  "assembles, or builds physical products. aerospaceDefenseRelevance=true only for explicit aerospace, " +
+  "aviation, space, defense, military, or named-program evidence. For each true claim, copy an exact " +
+  "excerpt and its [Source URL]; otherwise return null evidence. Determine headquartersCountry, " +
+  "ownershipType (independent|founder_family|pe_owned|strategic_parent|public|unknown), sizeFit " +
+  "(likely_under_50m|likely_over_50m|unknown), and proprietarySignals. Unknown ownership or size " +
+  "is uncertainty, never positive evidence. Propose targetDecision yes_target only for a verified US " +
+  "aerospace/defense physical-product manufacturer that is not a distributor/service business, has no " +
+  "known PE/strategic/public owner, and is not clearly over $50m. Use needs_more_research only when the " +
+  "company is a real US aerospace/defense manufacturer but ownership or size remains unknown; all " +
+  "other failures are no_target. Reply with exactly one raw JSON object and no markdown.";
 
-function createAwardLeadClassifier(model: ResolvedModelDeps): {
-  readonly classify: AwardLeadClassifier;
+function createSourceSignalClassifier(model: ResolvedModelDeps): {
+  readonly classify: SourceSignalClassifier;
   readonly costUsd: () => number;
 } {
   let costUsd = 0;
@@ -2029,15 +2101,15 @@ function createAwardLeadClassifier(model: ResolvedModelDeps): {
       const result = await model.client.generateStructured({
         route: "fast",
         models: model.models,
-        schemaName: "award_lead_classification_v1",
-        schema: awardLeadClassificationSchema,
-        systemPrompt: AWARD_LEAD_CLASSIFIER_PROMPT,
+        schemaName: "source_signal_target_classification_v2",
+        schema: sourceSignalClassificationSchema,
+        systemPrompt: SOURCE_SIGNAL_CLASSIFIER_PROMPT,
         prompt:
           `Company legal name: ${input.legalName}` +
-          `\nPage URL: ${input.pageUrl}` +
-          `\n\nWebpage text:\n"""\n${input.pageText.slice(0, MAX_IDENTITY_TEXT_CHARS)}\n"""`,
+          `\nPrimary verified page URL: ${input.pageUrl}` +
+          `\n\nVerified official-site pages:\n"""\n${input.pageText.slice(0, MAX_CLASSIFICATION_TEXT_CHARS)}\n"""`,
         temperature: 0,
-        maxOutputTokens: 512,
+        maxOutputTokens: 1_024,
         maxAttempts: 1,
       });
       costUsd += result.telemetry.costUsd ?? 0;
@@ -2052,7 +2124,7 @@ function officialDomainSearcher(): OfficialDomainSearcher {
   return (identity) => searchOfficialDomainCandidates(identity, client);
 }
 
-function awardIdentityHints(signal: {
+function sourceSignalIdentityHints(signal: {
   readonly city: string | null;
   readonly state: string | null;
   readonly uei: string | null;
@@ -2112,23 +2184,131 @@ function identityCorroborates(
   );
 }
 
-function classifierQualifies(
-  classification: AwardLeadClassification,
+function isPageGroundedClaim(
+  claim: PageGroundedClaim | null,
   pageText: string,
   fetchedUrls: readonly string[],
 ): boolean {
   return (
-    classification.manufacturer &&
-    classification.aerospaceDefenseRelevance &&
-    classification.businessModel !== "distributor" &&
-    classification.businessModel !== "service" &&
-    classification.confidence >= 0.75 &&
-    normalizedContains(pageText, classification.evidenceExcerpt) &&
-    fetchedUrls.includes(classification.evidenceUrl)
+    claim !== null &&
+    normalizedContains(pageText, claim.excerpt) &&
+    fetchedUrls.includes(claim.url)
   );
 }
 
-async function linkedLeadForQualifiedSignal(
+export interface DeterministicSourceSignalDecision {
+  readonly targetDecision: SourceSignalTargetDecision;
+  readonly reasons: readonly string[];
+}
+
+async function recordTargetDecision(
+  db: Database,
+  signalId: string,
+  input: {
+    readonly status: "qualified" | "rejected";
+    readonly modelProposal: SourceSignalClassification | null;
+    readonly deterministicDecision: DeterministicSourceSignalDecision;
+    readonly evidence: Record<string, unknown>;
+    readonly leadId?: string;
+    readonly companyId?: string;
+  },
+): Promise<void> {
+  await recordSourceSignalQualification(db, signalId, {
+    decision: input.status,
+    reason: input.deterministicDecision.targetDecision,
+    evidence: {
+      ...input.evidence,
+      modelProposal: input.modelProposal,
+      deterministicDecision: input.deterministicDecision,
+    },
+    ...(input.leadId === undefined ? {} : { leadId: input.leadId }),
+    ...(input.companyId === undefined ? {} : { companyId: input.companyId }),
+  });
+  // Keep the proposal/override directly addressable while retaining the full
+  // decision envelope produced by the canonical qualification recorder.
+  await db
+    .update(sourceSignals)
+    .set({
+      qualification: sql`${sourceSignals.qualification} || ${JSON.stringify({
+        modelProposal: input.modelProposal,
+        deterministicDecision: input.deterministicDecision,
+      })}::jsonb`,
+      updatedAt: new Date(),
+    })
+    .where(eq(sourceSignals.id, signalId));
+}
+
+/** The model proposes; this policy function owns the terminal target decision. */
+export function deterministicSourceSignalDecision(
+  classification: SourceSignalClassification,
+  pageText: string,
+  fetchedUrls: readonly string[],
+): DeterministicSourceSignalDecision {
+  const noTargetReasons: string[] = [];
+  if (!classification.manufacturer) noTargetReasons.push("manufacturer_not_verified");
+  else if (!isPageGroundedClaim(classification.manufacturerEvidence, pageText, fetchedUrls)) {
+    noTargetReasons.push("manufacturer_evidence_not_page_grounded");
+  }
+  if (!classification.aerospaceDefenseRelevance) {
+    noTargetReasons.push("aerospace_defense_not_verified");
+  } else if (
+    !isPageGroundedClaim(classification.aerospaceDefenseEvidence, pageText, fetchedUrls)
+  ) {
+    noTargetReasons.push("aerospace_defense_evidence_not_page_grounded");
+  }
+  if (classification.confidence < 0.75) {
+    noTargetReasons.push("classification_confidence_below_threshold");
+  }
+
+  const country = normalizeText(classification.headquartersCountry).replace(/[.,]/gu, "");
+  const headquartersIsUs =
+    country === "us" ||
+    country === "usa" ||
+    country === "united states" ||
+    country === "united states of america";
+  if (!headquartersIsUs) {
+    noTargetReasons.push(
+      country === "unknown" || country === "unclear"
+        ? "headquarters_not_verified_us"
+        : "non_us_headquarters",
+    );
+  }
+  if (
+    classification.businessModel === "distributor" ||
+    classification.businessModel === "service"
+  ) {
+    noTargetReasons.push(`ineligible_business_model:${classification.businessModel}`);
+  }
+  if (
+    classification.ownershipType === "pe_owned" ||
+    classification.ownershipType === "strategic_parent" ||
+    classification.ownershipType === "public"
+  ) {
+    noTargetReasons.push(`ineligible_ownership:${classification.ownershipType}`);
+  }
+  if (classification.sizeFit === "likely_over_50m") {
+    noTargetReasons.push("likely_over_50m");
+  }
+  if (noTargetReasons.length > 0) {
+    return { targetDecision: "no_target", reasons: noTargetReasons };
+  }
+
+  const researchReasons: string[] = [];
+  if (classification.ownershipType === "unknown") {
+    researchReasons.push("ownership_requires_research");
+  }
+  if (classification.sizeFit === "unknown") {
+    researchReasons.push("size_requires_research");
+  }
+  return researchReasons.length > 0
+    ? { targetDecision: "needs_more_research", reasons: researchReasons }
+    : {
+        targetDecision: "yes_target",
+        reasons: ["verified_us_aerospace_physical_product_manufacturer"],
+      };
+}
+
+async function linkedLeadForSourceSignal(
   db: Database,
   qualifierAgentId: string,
   rawName: string,
@@ -2149,15 +2329,55 @@ async function linkedLeadForQualifiedSignal(
   return rows[0] ?? null;
 }
 
-async function qualifyAwardSignal(input: {
+async function routeQualifiedCandidate(
+  db: Database,
+  companyId: string,
+  signal: SourceSignal,
+  decision: DeterministicSourceSignalDecision,
+): Promise<void> {
+  const rationale = {
+    whyInteresting: [
+      "Verified from first-party pages as a US aerospace/defense physical-product manufacturer.",
+      `Qualified from ${signal.sourceKey}: ${signal.sourceLocator}`,
+    ],
+    risks: [
+      "Initial source-signal qualification only; enrichment confidence does not yet support evaluate tier.",
+    ],
+    unknowns:
+      decision.targetDecision === "needs_more_research"
+        ? [
+            "Ownership: independent/founder-family versus PE, strategic, or public control",
+            "Size fit: evidence that revenue is likely under $50m",
+            "Qualifications and customer concentration",
+          ]
+        : ["Exact revenue and employee count", "Qualifications", "Customer concentration"],
+  };
+  await db
+    .insert(candidates)
+    .values({ companyId, status: "queued_research", rationale })
+    .onConflictDoNothing({ target: candidates.companyId });
+  // Never regress an already enriched candidate. Newly created and existing
+  // queued candidates remain engine-owned needs_research until enrichment.
+  await db
+    .update(candidates)
+    .set({ rationale, updatedAt: new Date() })
+    .where(
+      and(
+        eq(candidates.companyId, companyId),
+        eq(candidates.status, "queued_research"),
+      ),
+    );
+}
+
+async function qualifySourceSignal(input: {
   readonly db: Database;
   readonly qualifierAgent: ResearchAgent;
   readonly signal: SourceSignal;
   readonly searchDomains: OfficialDomainSearcher;
   readonly pageProber: IdentityPageProber;
   readonly judge: DomainJudge;
-  readonly classifier: AwardLeadClassifier;
-}): Promise<"qualified" | "rejected"> {
+  readonly classifier: SourceSignalClassifier;
+}): Promise<SourceSignalTargetDecision> {
   const proposals = await input.searchDomains({
     legalName: input.signal.rawName,
     ...(input.signal.city === null ? {} : { city: input.signal.city }),
@@ -2182,13 +2402,14 @@ async function qualifyAwardSignal(input: {
     const pageText = pages
       .map((page) => `[Source URL: ${page.finalUrl}]\n${page.text}`)
       .join("\n\n");
+    const identityUrls = pages.map((page) => page.finalUrl);
     const corroborationUrl = identityCorroborationUrl(input.signal, pages);
     const hasIdentityHints =
       input.signal.city !== null || input.signal.uei !== null || input.signal.cage !== null;
     const judgment = await input.judge.judgeIdentity(
       input.signal.rawName,
       pageText,
-      awardIdentityHints(input.signal),
+      sourceSignalIdentityHints(input.signal),
     );
     if (
       !identityCorroborates(
@@ -2201,34 +2422,45 @@ async function qualifyAwardSignal(input: {
     ) {
       attempts.push({
         domain: proposal.domain,
-        urls: pages.map((page) => page.finalUrl),
+        urls: identityUrls,
         outcome: "identity_mismatch",
         identity: judgment,
       });
       continue;
     }
-    const evidenceUrl = corroborationUrl ?? homepage.finalUrl;
-    const classification = await input.classifier({
+
+    const modelProposal = await input.classifier({
       legalName: input.signal.rawName,
       pageText,
-      pageUrl: evidenceUrl,
+      pageUrl: corroborationUrl ?? homepage.finalUrl,
     });
-    if (
-      !classifierQualifies(
-        classification,
-        pageText,
-        pages.map((page) => page.finalUrl),
-      )
-    ) {
-      attempts.push({
+    const deterministicDecision = deterministicSourceSignalDecision(
+      modelProposal,
+      pageText,
+      identityUrls,
+    );
+    const evidence = {
+      proposal: {
         domain: proposal.domain,
-        urls: pages.map((page) => page.finalUrl),
-        outcome: "classifier_rejected",
-        identity: judgment,
-        classification,
+        url: proposal.url,
+        title: proposal.title,
+        snippet: proposal.textSnippet,
+      },
+      identity: judgment,
+      identityUrls,
+      corroborationUrl,
+      attempts,
+    };
+    if (deterministicDecision.targetDecision === "no_target") {
+      await recordTargetDecision(input.db, input.signal.id, {
+        status: "rejected",
+        modelProposal,
+        deterministicDecision,
+        evidence,
       });
-      continue;
+      return "no_target";
     }
+
     await ingestLeadCandidates(input.qualifierAgent.id, [
       {
         rawName: input.signal.rawName,
@@ -2245,47 +2477,64 @@ async function qualifyAwardSignal(input: {
         sourceLocator: input.signal.sourceLocator,
       },
     ]);
-    const lead = await linkedLeadForQualifiedSignal(
+    const lead = await linkedLeadForSourceSignal(
       input.db,
       input.qualifierAgent.id,
       input.signal.rawName,
       proposal.domain,
     );
     if (lead === null) {
-      throw new Error("qualified lead ingestion returned no lead");
+      throw new Error("qualified source-signal ingestion returned no lead");
     }
-    await recordSourceSignalQualification(input.db, input.signal.id, {
-      decision: "qualified",
-      reason: "official_identity_and_manufacturing_gate_passed",
-      evidence: {
-        proposal: {
-          domain: proposal.domain,
-          url: proposal.url,
-          title: proposal.title,
-          snippet: proposal.textSnippet,
-        },
-        identity: judgment,
-        identityUrls: pages.map((page) => page.finalUrl),
-        corroborationUrl,
-        classification,
-        ownershipActionability: {
-          outcome: "passed",
-          reason: "manufacturer business model is eligible for downstream ownership screening",
-        },
-      },
+    await input.db
+      .update(leads)
+      .set({
+        context: sql`${leads.context} || ${JSON.stringify({
+          sourceSignalQualification: {
+            sourceSignalId: input.signal.id,
+            sourceKey: input.signal.sourceKey,
+            modelProposal,
+            deterministicDecision,
+            candidateRouting: {
+              status: "queued_research",
+              effectiveTier: "needs_research",
+              evaluateRequiresEnrichmentConfidence: true,
+            },
+          },
+        })}::jsonb`,
+        updatedAt: new Date(),
+      })
+      .where(eq(leads.id, lead.id));
+    if (lead.companyId !== null) {
+      await routeQualifiedCandidate(
+        input.db,
+        lead.companyId,
+        input.signal,
+        deterministicDecision,
+      );
+    }
+    await recordTargetDecision(input.db, input.signal.id, {
+      status: "qualified",
+      modelProposal,
+      deterministicDecision,
+      evidence,
       leadId: lead.id,
       ...(lead.companyId === null ? {} : { companyId: lead.companyId }),
     });
-    return "qualified";
+    return deterministicDecision.targetDecision;
   }
-  await recordSourceSignalQualification(input.db, input.signal.id, {
-    decision: "rejected",
-    reason: attempts.some((attempt) => attempt.outcome === "identity_mismatch")
-      ? "official_identity_not_verified"
-      : "official_manufacturing_classifier_not_qualified",
+
+  const deterministicDecision: DeterministicSourceSignalDecision = {
+    targetDecision: "no_target",
+    reasons: ["official_identity_not_verified"],
+  };
+  await recordTargetDecision(input.db, input.signal.id, {
+    status: "rejected",
+    modelProposal: null,
+    deterministicDecision,
     evidence: { attempts },
   });
-  return "rejected";
+  return "no_target";
 }
 
 function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHandler {
@@ -2297,7 +2546,7 @@ function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHand
           .from(sourceSignals)
           .where(eq(sourceSignals.status, "queued_qualification"))
           .orderBy(asc(sourceSignals.createdAt))
-          .limit(MAX_AWARD_SIGNALS_PER_TICK)
+          .limit(MAX_SOURCE_SIGNALS_PER_TICK)
       ).map((signal) => signal.id),
     }));
     if ("shortCircuit" in planned) return planned.shortCircuit;
@@ -2308,7 +2557,7 @@ function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHand
         findings: { idle: true, idleReason: "missing_exa_api_key" },
       };
     }
-    const needsModel = deps.classifyAwardLead === undefined || deps.domainJudge === undefined;
+    const needsModel = deps.classifySourceSignal === undefined || deps.domainJudge === undefined;
     const model = needsModel ? resolveModelDeps(deps) : null;
     if (needsModel && model === null) {
       return {
@@ -2346,8 +2595,10 @@ function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHand
             },
           });
     const defaultClassifier =
-      deps.classifyAwardLead === undefined && model !== null ? createAwardLeadClassifier(model) : null;
-    const classifier = deps.classifyAwardLead ?? defaultClassifier?.classify;
+      deps.classifySourceSignal === undefined && model !== null
+        ? createSourceSignalClassifier(model)
+        : null;
+    const classifier = deps.classifySourceSignal ?? defaultClassifier?.classify;
     if (classifier === undefined) {
       return {
         outcome: "stuck",
@@ -2356,13 +2607,14 @@ function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHand
       };
     }
     const db = getDatabase();
-    const signals = await claimQueuedSourceSignals(db, MAX_AWARD_SIGNALS_PER_TICK);
-    let qualified = 0;
-    let rejected = 0;
+    const signals = await claimQueuedSourceSignals(db, MAX_SOURCE_SIGNALS_PER_TICK);
+    let yesTarget = 0;
+    let needsMoreResearch = 0;
+    let noTarget = 0;
     let quarantined = 0;
     for (const signal of signals) {
       try {
-        const result = await qualifyAwardSignal({
+        const result = await qualifySourceSignal({
           db,
           qualifierAgent: context.agent,
           signal,
@@ -2371,8 +2623,9 @@ function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHand
           judge: runtime.judge,
           classifier,
         });
-        if (result === "qualified") qualified += 1;
-        else rejected += 1;
+        if (result === "yes_target") yesTarget += 1;
+        else if (result === "needs_more_research") needsMoreResearch += 1;
+        else noTarget += 1;
       } catch (error) {
         quarantined += 1;
         await recordSourceSignalQualification(db, signal.id, {
@@ -2389,9 +2642,14 @@ function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHand
       findings: {
         selected: signals.length,
         statusTransitions: {
-          "qualifying->qualified": qualified,
-          "qualifying->rejected": rejected,
+          "qualifying->qualified": yesTarget + needsMoreResearch,
+          "qualifying->rejected": noTarget,
           "qualifying->quarantined": quarantined,
+        },
+        targetDecisions: {
+          yes_target: yesTarget,
+          needs_more_research: needsMoreResearch,
+          no_target: noTarget,
         },
       },
       costUsd: judgeCostUsd(runtime.judge) + (defaultClassifier?.costUsd() ?? 0),

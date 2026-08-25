@@ -276,6 +276,73 @@ describe("UsaspendingDiscoveryStrategy", () => {
       returnedNaics: ["336413"],
       returnedPsc: ["1560"],
       awardAgency: "Department of the Air Force",
+      evidenceStrength: "returned_strict_naics",
+    });
+  });
+
+  it("queues a null-code row as request-filter-only evidence from the complete strict request", async () => {
+    const client = new UsaspendingClient({
+      maxPages: 1,
+      maxRetries: 0,
+      fetchImpl: async () =>
+        new Response(
+          JSON.stringify({
+            results: [
+              {
+                "Recipient Name": "Unknown Relevance Components LLC",
+                "Recipient UEI": "UNKNOWN000001",
+                "Award Amount": 42_000,
+                "Awarding Agency": "Department of the Air Force",
+                "Start Date": "2025-06-15",
+                Description: "Precision actuator components",
+                "NAICS Code": null,
+                "Product or Service Code": null,
+                "Recipient Location": {
+                  address_line1: "100 Industrial Way",
+                  city_name: "Dayton",
+                  state_code: "OH",
+                  zip5: "45402",
+                },
+              },
+            ],
+          }),
+          { status: 200 },
+        ),
+    });
+    const result = await client.searchRecipientsPage({
+      naicsCodes: [...AEROSPACE_NAICS],
+      timePeriod: { startDate: "2025-01-01", endDate: "2025-12-31" },
+    });
+    expect(result.leads).toHaveLength(1);
+    expect(result.leads[0]?.sourceQualification).toMatchObject({
+      evidenceStrength: "request_filter_only",
+      appliedFilters: {
+        awardTypeCodes: ["A", "B", "C", "D"],
+        naicsCodes: [...AEROSPACE_NAICS],
+        pscCodes: [],
+        timePeriods: [{ startDate: "2025-01-01", endDate: "2025-12-31" }],
+        placeOfPerformanceLocations: [],
+        keywords: [],
+      },
+      returnedNaics: null,
+      returnedPsc: null,
+      awardDescriptionExcerpt: "Precision actuator components",
+      awardAgency: "Department of the Air Force",
+      awardLocation: {
+        addressLine: "100 Industrial Way",
+        city: "Dayton",
+        state: "OH",
+        zip: "45402",
+      },
+    });
+    expect(result.leads[0]?.sourceQualification.queryLocator).toContain(
+      "naics_codes=336411%2C336412%2C336413%2C336419%2C334511",
+    );
+    expect(result.leads[0]?.sourceLocator).toContain("usaspending://spending_by_award");
+    expect(result.qualificationFindings.rejected).toEqual({
+      missingStrictNaics: 0,
+      missingAerospaceDefenseEvidence: 0,
+      excludedServiceWithoutManufacturing: 0,
     });
   });
 
@@ -340,11 +407,12 @@ describe("UsaspendingDiscoveryStrategy", () => {
     for (const lead of result.leads) {
       expect(lead.naics?.some((code) => AEROSPACE_NAICS.includes(code as never))).toBe(true);
       expect(lead.sourceQualification.awardDescriptionExcerpt.length).toBeGreaterThan(0);
+      expect(lead.sourceQualification.evidenceStrength).toBe("returned_strict_naics");
     }
     expect(result.qualificationFindings.rejected).toEqual({
-      missingStrictNaics: 1,
+      missingStrictNaics: 0,
       missingAerospaceDefenseEvidence: 0,
-      excludedServiceWithoutManufacturing: 3,
+      excludedServiceWithoutManufacturing: 4,
     });
   });
   it("continues past the API ceiling when the payload carries a cursor", async () => {
