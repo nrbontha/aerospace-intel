@@ -10,7 +10,7 @@ import type { Database } from "../client.js";
 export interface HarvestedSourceSignal {
   readonly sourceKey: string;
   readonly sourceLocator: string;
-  readonly agentId: string;
+  readonly agentId?: string;
   readonly rawName: string;
   readonly rawDomain?: string;
   readonly uei?: string;
@@ -57,7 +57,7 @@ export async function upsertHarvestedSourceSignal(
       sourceKey: input.sourceKey,
       sourceLocator: input.sourceLocator,
       sourceFingerprint,
-      agentId: input.agentId,
+      ...(input.agentId === undefined ? {} : { agentId: input.agentId }),
       rawName: input.rawName,
       ...(input.rawDomain === undefined ? {} : { rawDomain: input.rawDomain }),
       ...(input.uei === undefined ? {} : { uei: input.uei }),

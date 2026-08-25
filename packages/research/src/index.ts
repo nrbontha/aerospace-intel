@@ -13,3 +13,4 @@ export * from "./scoring-axial/index.js";
 export * from "./sources/index.js";
 export * from "./campaigns/index.js";
 export * from "./search/index.js";
+export * from "./signals/index.js";

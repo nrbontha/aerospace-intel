@@ -237,12 +237,8 @@ export async function searchOfficialDomainCandidates(
   const seenDomains = new Set<string>();
 
   for (const result of results) {
-    const normalized = normalizeOfficialCandidate(result);
-    if (
-      normalized === null ||
-      seenDomains.has(normalized.domain) ||
-      isSuppressedDirectoryDomain(normalized.domain)
-    ) {
+    const normalized = normalizeExaOfficialCandidate(result);
+    if (normalized === null || seenDomains.has(normalized.domain)) {
       continue;
     }
     seenDomains.add(normalized.domain);
@@ -260,7 +256,7 @@ function normalizeQuery(query: string): string {
   return normalized;
 }
 
-function normalizeOfficialCandidate(
+export function normalizeExaOfficialCandidate(
   result: ExaSearchResult,
 ): OfficialDomainCandidate | null {
   let url: URL;
@@ -278,7 +274,7 @@ function normalizeOfficialCandidate(
   }
 
   const domain = normalizeDomain(url.hostname);
-  if (domain === null) return null;
+  if (domain === null || isSuppressedDirectoryDomain(domain)) return null;
   return {
     url: url.href,
     domain,
