@@ -19,3 +19,4 @@ export * from "./golden/index.js";
 export * from "./agents/index.js";
 export * from "./source-signals/index.js";
 export * from "./experiments/index.js";
+export * from "./synthesis/index.js";

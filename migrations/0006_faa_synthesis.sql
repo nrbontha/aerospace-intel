@@ -34,6 +34,32 @@ ALTER TABLE source_document_links
     ) = 1
   );
 
+-- Historical ingestion could append the exact same relation more than once.
+-- Remove only relation-identical rows; preserve the deterministic oldest row
+-- (and lowest UUID when timestamps tie) before installing uniqueness.
+WITH ranked_source_document_links AS (
+  SELECT
+    id,
+    row_number() OVER (
+      PARTITION BY
+        source_document_id,
+        relationship,
+        company_id,
+        facility_id,
+        part_id,
+        platform_id,
+        platform_variant_id,
+        contract_id,
+        facility_qualification_id
+      ORDER BY created_at, id
+    ) AS duplicate_rank
+  FROM source_document_links
+)
+DELETE FROM source_document_links AS doomed
+USING ranked_source_document_links AS ranked
+WHERE doomed.id = ranked.id
+  AND ranked.duplicate_rank > 1;
+
 CREATE UNIQUE INDEX source_document_links_target_uidx
   ON source_document_links (
     source_document_id,

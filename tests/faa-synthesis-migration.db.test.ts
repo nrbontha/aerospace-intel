@@ -89,6 +89,8 @@ describe.skipIf(!DB_TESTS_ENABLED)(
     let countsBefore = new Map<string, number>();
     let countsAfter = new Map<string, number>();
     let migrationSummary: MigrationSummary = { applied: [], skipped: [] };
+    let canonicalSourceLinkId = "";
+    let duplicateFixtureDocumentId = "";
 
     beforeAll(async () => {
       if (!existsSync(DUMP_PATH)) {
@@ -133,6 +135,57 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       ]);
 
       countsBefore = await snapshotTableCounts();
+
+      const db = getDatabase();
+      const fixtureCompany = await db.execute<{ id: string }>(sql`
+        INSERT INTO companies (legal_name, display_name)
+        VALUES (
+          'FAA Migration Duplicate Fixture Company',
+          'FAA Migration Duplicate Fixture Company'
+        )
+        RETURNING id
+      `);
+      const fixtureSource = await db.execute<{ id: string }>(sql`
+        INSERT INTO data_sources (name, source_type, publisher)
+        VALUES (
+          'FAA Migration Duplicate Fixture Source',
+          'migration_fixture',
+          'FAA migration test'
+        )
+        RETURNING id
+      `);
+      const fixtureDocument = await db.execute<{ id: string }>(sql`
+        INSERT INTO source_documents (data_source_id, canonical_url)
+        VALUES (
+          ${fixtureSource.rows[0]?.id},
+          'https://example.test/faa-migration-duplicate-fixture'
+        )
+        RETURNING id
+      `);
+      duplicateFixtureDocumentId = fixtureDocument.rows[0]?.id ?? "";
+      const canonicalLink = await db.execute<{ id: string }>(sql`
+        INSERT INTO source_document_links (
+          source_document_id, company_id, relationship, created_at
+        ) VALUES (
+          ${duplicateFixtureDocumentId},
+          ${fixtureCompany.rows[0]?.id},
+          'supports',
+          '2026-08-01T00:00:00Z'
+        )
+        RETURNING id
+      `);
+      canonicalSourceLinkId = canonicalLink.rows[0]?.id ?? "";
+      await db.execute(sql`
+        INSERT INTO source_document_links (
+          source_document_id, company_id, relationship, created_at
+        ) VALUES (
+          ${duplicateFixtureDocumentId},
+          ${fixtureCompany.rows[0]?.id},
+          'supports',
+          '2026-08-02T00:00:00Z'
+        )
+      `);
+
       migrationSummary = await runMigrations();
       countsAfter = await snapshotTableCounts();
     }, 240_000);
@@ -148,11 +201,26 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       }
     });
 
-    it("keeps every pre-existing table count unchanged", () => {
+    it("keeps old counts and retains one deterministic duplicate fixture row", async () => {
       expect(migrationSummary.applied).toContain("0006_faa_synthesis.sql");
+      const fixtureDeltas: Readonly<Record<string, number>> = {
+        companies: 1,
+        data_sources: 1,
+        source_documents: 1,
+        source_document_links: 1,
+      };
       for (const [table, count] of countsBefore) {
-        expect(countsAfter.get(table), `table ${table}`).toBe(count);
+        expect(countsAfter.get(table), `table ${table}`).toBe(
+          count + (fixtureDeltas[table] ?? 0),
+        );
       }
+
+      const retained = await getDatabase().execute<{ id: string }>(sql`
+        SELECT id
+        FROM source_document_links
+        WHERE source_document_id = ${duplicateFixtureDocumentId}
+      `);
+      expect(retained.rows).toEqual([{ id: canonicalSourceLinkId }]);
     });
 
     it("is a no-op after the committed enum alteration", async () => {
