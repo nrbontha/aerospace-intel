@@ -41,26 +41,26 @@ const physicalAddressSchema = z
 
 const naicsItemSchema = z
   .object({
-    naicsCode: nonemptyString,
-    naicsDescription: optionalString,
+    naicsCode: z.string().nullish(),
+    naicsDescription: z.string().nullish(),
     sbaSmallBusiness: booleanish,
   })
   .passthrough();
 
 const pscItemSchema = z.union([
-  nonemptyString,
+  z.string(),
   z
     .object({
-      pscCode: nonemptyString,
-      pscDescription: optionalString,
-      pscName: optionalString,
+      pscCode: z.string().nullish(),
+      pscDescription: z.string().nullish(),
+      pscName: z.string().nullish(),
     })
     .passthrough(),
 ]);
 
 const goodsAndServicesSchema = z
   .object({
-    primaryNaics: z.union([nonemptyString, naicsItemSchema]).nullish(),
+    primaryNaics: z.union([z.string(), naicsItemSchema]).nullish(),
     naicsList: z.array(naicsItemSchema).nullish(),
     pscList: z.array(pscItemSchema).nullish(),
   })
@@ -207,8 +207,21 @@ export function normalizeSamEntity(
   const registration = record.entityRegistration;
   const address = record.coreData?.physicalAddress;
   const goods = record.assertions?.goodsAndServices;
-  const naics = dedupeNaics((goods?.naicsList ?? []).map(normalizeNaics));
-  const primaryNaics = normalizePrimaryNaics(goods?.primaryNaics, naics);
+  const naics: SamNaicsClassification[] = [];
+  for (const item of goods?.naicsList ?? []) {
+    const normalized = normalizeNaics(item);
+    if (normalized !== null) naics.push(normalized);
+  }
+  const dedupedNaics = dedupeNaics(naics);
+  const primaryNaics = normalizePrimaryNaics(
+    goods?.primaryNaics,
+    dedupedNaics,
+  );
+  const psc: SamPscClassification[] = [];
+  for (const item of goods?.pscList ?? []) {
+    const normalized = normalizePsc(item);
+    if (normalized !== null) psc.push(normalized);
+  }
   const official = normalizeOfficialUrl(record.coreData?.entityInformation?.entityURL);
 
   return {
@@ -226,8 +239,11 @@ export function normalizeSamEntity(
     registrationStatus: valueOrNull(registration.registrationStatus),
     exclusionStatusFlag: normalizeBoolean(registration.exclusionStatusFlag),
     primaryNaics,
-    naics: primaryNaics === null ? naics : dedupeNaics([primaryNaics, ...naics]),
-    psc: dedupePsc((goods?.pscList ?? []).map(normalizePsc)),
+    naics:
+      primaryNaics === null
+        ? dedupedNaics
+        : dedupeNaics([primaryNaics, ...dedupedNaics]),
+    psc: dedupePsc(psc),
     entityTypeHints: collectHints(
       record.assertions?.entityTypes,
       record.coreData?.generalInformation,
@@ -450,9 +466,13 @@ function normalizeBoolean(value: boolean | string | number | null | undefined): 
   return null;
 }
 
-function normalizeNaics(item: z.output<typeof naicsItemSchema>): SamNaicsClassification {
+function normalizeNaics(
+  item: z.output<typeof naicsItemSchema>,
+): SamNaicsClassification | null {
+  const code = item.naicsCode?.trim();
+  if (!code) return null;
   return {
-    code: item.naicsCode,
+    code,
     description: valueOrNull(item.naicsDescription),
     sbaSmallBusiness: normalizeBoolean(item.sbaSmallBusiness),
   };
@@ -464,18 +484,25 @@ function normalizePrimaryNaics(
 ): SamNaicsClassification | null {
   if (!value) return null;
   if (typeof value !== "string") return normalizeNaics(value);
-  return naics.find((item) => item.code === value) ?? {
-    code: value,
+  const code = value.trim();
+  if (!code) return null;
+  return naics.find((item) => item.code === code) ?? {
+    code,
     description: null,
     sbaSmallBusiness: null,
   };
 }
 
-function normalizePsc(item: z.output<typeof pscItemSchema>): SamPscClassification {
+function normalizePsc(
+  item: z.output<typeof pscItemSchema>,
+): SamPscClassification | null {
+  const code =
+    typeof item === "string" ? item.trim() : item.pscCode?.trim();
+  if (!code) return null;
   return typeof item === "string"
-    ? { code: item, description: null }
+    ? { code, description: null }
     : {
-        code: item.pscCode,
+        code,
         description: valueOrNull(item.pscDescription ?? item.pscName),
       };
 }

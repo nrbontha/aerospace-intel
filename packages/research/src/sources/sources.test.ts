@@ -610,6 +610,16 @@ describe("SamEntityClient", () => {
     );
     expect(entities[0]!.ownershipHints).toContain("womanOwnedBusiness");
     expect(entities[0]!.raw).toMatchObject({
+      assertions: {
+        goodsAndServices: {
+          naicsList: expect.arrayContaining([
+            expect.objectContaining({ naicsCode: null }),
+          ]),
+          pscList: expect.arrayContaining([
+            { pscCode: null, pscDescription: null },
+          ]),
+        },
+      },
       providerAddedField: { preserved: true },
     });
     expect(entities[1]).toMatchObject({

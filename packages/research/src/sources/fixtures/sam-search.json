@@ -42,12 +42,21 @@
               "naicsCode": "332722",
               "naicsDescription": "Bolt, Nut, Screw, Rivet, and Washer Manufacturing",
               "sbaSmallBusiness": false
+            },
+            {
+              "naicsCode": null,
+              "naicsDescription": null,
+              "sbaSmallBusiness": null
             }
           ],
           "pscList": [
             {
               "pscCode": "1560",
               "pscDescription": "Airframe Structural Components"
+            },
+            {
+              "pscCode": null,
+              "pscDescription": null
             }
           ]
         },
