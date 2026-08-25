@@ -12,108 +12,24 @@ import {
   TableHeader,
   TableRow,
 } from "@asi/ui";
+import type {
+  CompanySynthesisTrail,
+  SynthesisFact,
+  SynthesisFactStatus,
+} from "@asi/database";
 import type { ReactNode } from "react";
 
-export type SynthesisFactStatus =
-  | "canonical"
-  | "pending"
-  | "conflict"
-  | "unknown";
+export type {
+  CompanySynthesisTrail,
+  SynthesisFact,
+  SynthesisFactStatus,
+} from "@asi/database";
 
-export interface SynthesisFact {
-  id: string;
-  label: string;
-  value: string;
-  status: SynthesisFactStatus;
-  authority?: string | null;
-  officialUrl?: string | null;
-  excerpt?: string | null;
-  locator?: string | null;
-  freshness?: string | null;
-}
-
-export interface SynthesisFacility {
-  id: string;
-  name: string;
-  address?: string | null;
-  status: SynthesisFactStatus;
-  authority?: string | null;
-  officialUrl?: string | null;
-  excerpt?: string | null;
-  locator?: string | null;
-  freshness?: string | null;
-}
-
-export interface SynthesisSourceRecord {
-  id: string;
-  sourceKey: string;
-  locator: string;
-  authority: string;
-  status: string;
-  facts: readonly SynthesisFact[];
-  evidenceUrls: readonly string[];
-  expectedObservationIds: readonly string[];
-  freshness?: string | null;
-}
-
-export interface FaaPmaQualification {
-  id: string;
-  holderNumber: string;
-  status: string;
-  part: {
-    number: string;
-    name: string;
-    replacementFor?: string | null;
-  };
-  make: string;
-  models: readonly string[];
-  approvalBasis?: string | null;
-  supplement?: string | null;
-  facility?: {
-    id?: string | null;
-    name: string;
-    address?: string | null;
-  } | null;
-  materializationStatus: "draft" | "active";
-  authority?: string | null;
-  officialUrl?: string | null;
-  locator?: string | null;
-  freshness?: string | null;
-}
-
-export interface SynthesisConflict {
-  id: string;
-  field: string;
-  summary: string;
-  facts: readonly SynthesisFact[];
-}
-
-export interface SynthesisResearchGap {
-  id: string;
-  question: string;
-  reason: string;
-  priority?: "low" | "medium" | "high" | null;
-}
-
-export interface CompanySynthesisTrail {
-  company: {
-    id: string;
-    name: string;
-    domain?: string | null;
-  };
-  identifiers: readonly SynthesisFact[];
-  facilities: readonly SynthesisFacility[];
-  sourceRecords: readonly SynthesisSourceRecord[];
-  qualifications: readonly FaaPmaQualification[];
-  conflicts: readonly SynthesisConflict[];
-  gaps: readonly SynthesisResearchGap[];
-  confidence: {
-    sourceCount: number;
-    primarySourceCount: number;
-    conflictCount: number;
-    score?: number | null;
-  };
-}
+export type SynthesisFacility = CompanySynthesisTrail["facilities"][number];
+export type SynthesisSourceRecord = CompanySynthesisTrail["sourceRecords"][number];
+export type FaaPmaQualification = CompanySynthesisTrail["qualifications"][number];
+export type SynthesisConflict = CompanySynthesisTrail["conflicts"][number];
+export type SynthesisResearchGap = CompanySynthesisTrail["gaps"][number];
 
 export interface ConfirmedScarcityInput {
   confirmed: boolean;
@@ -129,6 +45,7 @@ export interface SynthesisTrailProps {
   error?: string | null;
   role?: "analyst" | "viewer";
   confirmedScarcity?: ConfirmedScarcityInput | null;
+  reviewing?: boolean;
   onAcceptSourceRecord?: (
     id: string,
     expectedObservationIds: readonly string[],
@@ -311,11 +228,13 @@ function FacilitiesSection({ facilities }: { facilities: readonly SynthesisFacil
 function SourceRecordsSection({
   records,
   role,
+  reviewing,
   onAcceptSourceRecord,
   onReject,
 }: {
   records: readonly SynthesisSourceRecord[];
   role: "analyst" | "viewer";
+  reviewing: boolean;
   onAcceptSourceRecord?: SynthesisTrailProps["onAcceptSourceRecord"];
   onReject?: SynthesisTrailProps["onReject"];
 }) {
@@ -375,14 +294,26 @@ function SourceRecordsSection({
             />
             <div aria-label={`Review ${record.sourceKey}`}>
               <Button
-                disabled={viewer || !onAcceptSourceRecord}
+                disabled={
+                  viewer ||
+                  reviewing ||
+                  record.status !== "pending" ||
+                  record.expectedObservationIds.length === 0 ||
+                  !onAcceptSourceRecord
+                }
                 onClick={() => onAcceptSourceRecord?.(record.id, record.expectedObservationIds)}
                 size="small"
               >
                 Accept source record
               </Button>{" "}
               <Button
-                disabled={viewer || !onReject}
+                disabled={
+                  viewer ||
+                  reviewing ||
+                  record.status !== "pending" ||
+                  record.expectedObservationIds.length === 0 ||
+                  !onReject
+                }
                 onClick={() => onReject?.(record.id, record.expectedObservationIds)}
                 size="small"
                 variant="danger"
@@ -591,6 +522,7 @@ export function SynthesisTrail({
   error = null,
   role = "viewer",
   confirmedScarcity = null,
+  reviewing = false,
   onAcceptSourceRecord,
   onReject,
 }: SynthesisTrailProps) {
@@ -653,6 +585,7 @@ export function SynthesisTrail({
         <SourceRecordsSection
           records={trail.sourceRecords}
           role={role}
+          reviewing={reviewing}
           onAcceptSourceRecord={onAcceptSourceRecord}
           onReject={onReject}
         />
@@ -692,6 +625,49 @@ export function SynthesisTrail({
           </p>
         </section>
       ) : null}
+    </div>
+  );
+}
+
+export function CandidateSynthesisSection({
+  trail,
+  loading,
+  error,
+  role,
+  reviewing,
+  onAccept,
+  onReject,
+}: {
+  trail: CompanySynthesisTrail | null;
+  loading: boolean;
+  error: string | null;
+  role: "analyst" | "viewer";
+  reviewing: boolean;
+  onAccept: (
+    sourceDocumentId: string,
+    expectedObservationIds: readonly string[],
+  ) => void;
+  onReject: (
+    sourceDocumentId: string,
+    expectedObservationIds: readonly string[],
+  ) => void;
+}) {
+  return (
+    <div className="admin-stack" data-candidate-section="synthesis">
+      {reviewing ? (
+        <p className="asi-page-description" role="status">
+          Saving source-record review…
+        </p>
+      ) : null}
+      <SynthesisTrail
+        trail={trail}
+        loading={loading}
+        error={error}
+        role={role}
+        reviewing={reviewing}
+        onAcceptSourceRecord={onAccept}
+        onReject={onReject}
+      />
     </div>
   );
 }

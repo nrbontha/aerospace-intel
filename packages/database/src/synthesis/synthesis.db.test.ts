@@ -16,6 +16,7 @@ import {
   platformVariants,
   platforms,
   researchProposals,
+  researchQuestions,
   sourceDocumentLinks,
   sourceDocuments,
   sourceSignals,
@@ -23,6 +24,8 @@ import {
 } from "../schema.js";
 import {
   acceptSynthesisGroup,
+  getCompanySynthesisTrail,
+  rejectSynthesisGroup,
   SynthesisConflictError,
   SynthesisStaleGroupError,
   synthesizeQualifiedSourceSignal,
@@ -382,6 +385,66 @@ describe.skipIf(!DB_TESTS_ENABLED)("source synthesis persistence (DB)", () => {
       "active",
     ]);
   });
+  it("rejects every pending proposal for one document without a partial review", async () => {
+    const companyId = await createCompany(`${testKey} Rejection Company`);
+    const entity = samEntity({
+      uei: `${testKey}J`.slice(-12).toUpperCase(),
+      cageCode: null,
+      sourceLocator: `sam://entity-information/v4/entities/${testKey}-reject`,
+      raw: {
+        entityRegistration: {
+          ueiSAM: `${testKey}J`.slice(-12).toUpperCase(),
+          legalBusinessName: `${testKey} Rejection Company`,
+        },
+        key: `${testKey}-reject`,
+      },
+    });
+    const persisted = await persistSamEntityForCompany(
+      getDatabase(),
+      companyId,
+      entity,
+    );
+    const expected = await pendingObservationIds(persisted.sourceDocumentId);
+
+    await expect(
+      rejectSynthesisGroup(getDatabase(), {
+        companyId,
+        sourceDocumentId: persisted.sourceDocumentId,
+        reviewerId,
+        expectedObservationIds: expected.slice(1),
+        reason: "Stale browser state",
+      }),
+    ).rejects.toBeInstanceOf(SynthesisStaleGroupError);
+    expect(await pendingObservationIds(persisted.sourceDocumentId)).toEqual(
+      expected,
+    );
+
+    const rejected = await rejectSynthesisGroup(getDatabase(), {
+      companyId,
+      sourceDocumentId: persisted.sourceDocumentId,
+      reviewerId,
+      expectedObservationIds: expected,
+      reason: "Entity record belongs to a different review scope",
+    });
+    expect(rejected).toEqual({
+      rejectedProposalCount: expected.length,
+      observationIds: expected,
+    });
+    const proposalStatuses = await getDatabase()
+      .select({ status: researchProposals.status })
+      .from(researchProposals)
+      .innerJoin(
+        observations,
+        eq(observations.id, researchProposals.observationId),
+      )
+      .innerJoin(evidence, eq(evidence.id, observations.evidenceId))
+      .where(eq(evidence.sourceDocumentId, persisted.sourceDocumentId));
+    expect(proposalStatuses).toHaveLength(expected.length);
+    expect(
+      proposalStatuses.every(({ status }) => status === "rejected"),
+    ).toBe(true);
+  });
+
 
   it("routes only qualified resolved known source keys and no-ops unknown sources", async () => {
     const companyId = await createCompany(`${testKey} Signal Router Company`);
@@ -434,4 +497,120 @@ describe.skipIf(!DB_TESTS_ENABLED)("source synthesis persistence (DB)", () => {
     const synthesized = await synthesizeQualifiedSourceSignal(getDatabase(), known.id);
     expect(synthesized).toMatchObject({ status: "materialized", sourceKey: "sam_entity" });
   });
+  it("reads SAM and FAA source groups, evidence states, qualification graph, conflicts, and gaps in one trail", async () => {
+    const companyId = await createCompany(`${testKey} Trail Company`);
+    const entity = samEntity({
+      uei: `${testKey}T`.slice(-12).toUpperCase(),
+      cageCode: `${testKey}Z`.slice(-5).toUpperCase(),
+      sourceLocator: `sam://entity-information/v4/entities/${testKey}-trail`,
+      raw: {
+        entityRegistration: {
+          ueiSAM: `${testKey}T`.slice(-12).toUpperCase(),
+          legalBusinessName: `${testKey} Trail Company`,
+        },
+        key: `${testKey}-trail`,
+      },
+    });
+    await persistSamEntityForCompany(getDatabase(), companyId, entity);
+    const faa = faaRecord("TRAIL", {
+      holderNumber: `${testKey}T`.slice(-9).toUpperCase(),
+      make: "Unresolved Trail Make",
+      models: ["Unresolved Trail Model"],
+    });
+    await persistFaaPmaRecordsForCompany(getDatabase(), companyId, [faa]);
+    await getDatabase().insert(researchQuestions).values({
+      companyId,
+      question: "Confirm the current beneficial owner",
+      priority: "90",
+    });
+    const [legalNameEvidence] = await getDatabase()
+      .select({ evidenceId: observations.evidenceId })
+      .from(observations)
+      .where(
+        and(
+          eq(observations.subjectType, "company"),
+          eq(observations.subjectId, companyId),
+          eq(observations.fieldKey, "legal_name"),
+        ),
+      )
+      .limit(1);
+    if (legalNameEvidence === undefined) {
+      throw new Error("test legal-name evidence was not inserted");
+    }
+    await getDatabase().insert(observations).values({
+      subjectType: "company",
+      subjectId: companyId,
+      fieldKey: "legal_name",
+      valueKind: "text",
+      value: `${testKey} Conflicting Legal Name`,
+      normalizedText: `${testKey} Conflicting Legal Name`,
+      confidence: "1",
+      evidenceId: legalNameEvidence.evidenceId,
+      conflictStatus: "confirmed",
+    });
+
+    const draftTrail = await getCompanySynthesisTrail(companyId);
+    expect(draftTrail).not.toBeNull();
+    expect(draftTrail?.sourceRecords.map(({ sourceKey }) => sourceKey)).toEqual(
+      expect.arrayContaining(["sam_entity", "faa_drs_pma"]),
+    );
+    expect(draftTrail?.identifiers).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          label: "UEI",
+          value: entity.uei,
+          status: "pending",
+          officialUrl: expect.any(String),
+        }),
+      ]),
+    );
+    expect(draftTrail?.qualifications).toEqual([
+      expect.objectContaining({
+        holderNumber: faa.holderNumber,
+        materializationStatus: "draft",
+        part: expect.objectContaining({
+          number: faa.pmaPartNumber,
+          replacementFor: faa.replacementPartNumber,
+        }),
+        make: faa.make,
+        models: faa.models,
+        approvalBasis: faa.approvalBasis,
+      }),
+    ]);
+    expect(draftTrail?.conflicts).toEqual([
+      expect.objectContaining({ field: "Legal Name" }),
+    ]);
+    expect(draftTrail?.gaps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          question: "Confirm the current beneficial owner",
+          priority: "high",
+        }),
+        expect.objectContaining({
+          question: expect.stringContaining("Resolve the exact platform"),
+        }),
+      ]),
+    );
+
+    const faaSource = draftTrail!.sourceRecords.find(
+      ({ sourceKey }) => sourceKey === "faa_drs_pma",
+    )!;
+    await acceptSynthesisGroup(getDatabase(), {
+      companyId,
+      sourceDocumentId: faaSource.id,
+      reviewerId,
+      expectedObservationIds: faaSource.expectedObservationIds,
+    });
+    const activeTrail = await getCompanySynthesisTrail(companyId);
+    expect(activeTrail?.qualifications[0]?.materializationStatus).toBe("active");
+    expect(activeTrail?.sourceRecords.find(({ id }) => id === faaSource.id)?.status).toBe(
+      "accepted",
+    );
+    expect(activeTrail?.confidence).toMatchObject({
+      sourceCount: 2,
+      primarySourceCount: 2,
+      conflictCount: 1,
+    });
+  });
+
 });

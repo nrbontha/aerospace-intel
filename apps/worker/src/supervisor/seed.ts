@@ -28,7 +28,7 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     agentType: "discover_source",
     goal: "Harvest bounded federal aerospace award observations into quarantined source signals; never create leads directly.",
     cadenceSeconds: 3600,
-    budgetSharePct: "10.00",
+    budgetSharePct: "8.00",
     status: "running",
   },
   {
@@ -37,7 +37,16 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     agentType: "discover_source",
     goal: "Surface registered aerospace entities via SAM.gov entity search (requires SAM_API_KEY; idles without one).",
     cadenceSeconds: 7200,
-    budgetSharePct: "0.00",
+    budgetSharePct: "5.00",
+    status: "paused",
+  },
+  {
+    key: "faa-pma-targeted",
+    name: "FAA PMA Targeted Discoverer",
+    agentType: "discover_source",
+    goal: "Query public FAA DRS PMA records for one prioritized known candidate per tick and quarantine source signals without forcing identity.",
+    cadenceSeconds: 86400,
+    budgetSharePct: "7.00",
     status: "paused",
   },
   {
@@ -46,7 +55,7 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     agentType: "enrich_candidate",
     goal: "Deep-research queued candidates oldest-first until evidence supports a routing decision.",
     cadenceSeconds: 300,
-    budgetSharePct: "20.00",
+    budgetSharePct: "18.00",
     status: "running",
   },
   {
@@ -73,7 +82,7 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     agentType: "golden_neighbor",
     goal: "Use positive or high-interest golden examples to find bounded Exa company-list source signals without creating leads.",
     cadenceSeconds: 86400,
-    budgetSharePct: "10.00",
+    budgetSharePct: "8.00",
     status: "running",
   },
   {
@@ -82,7 +91,7 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     agentType: "resolve_domain",
     goal: "Find and verify official websites for discovered leads lacking domains, then attach and promote them.",
     cadenceSeconds: 600,
-    budgetSharePct: "12.00",
+    budgetSharePct: "10.00",
     status: "running",
   },
   {
@@ -91,7 +100,7 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     agentType: "qualify_award_lead",
     goal: "Verify source-agnostic signals through Exa, first-party identity, manufacturing/aerospace evidence, ownership, size, and deterministic tri-state policy before creating leads.",
     cadenceSeconds: 600,
-    budgetSharePct: "25.00",
+    budgetSharePct: "23.00",
     status: "running",
   },
   {
@@ -100,7 +109,7 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     agentType: "discover_source",
     goal: "Catalog authoritative aerospace supplier datasets and directories for manual policy review; never mine them into source signals or leads.",
     cadenceSeconds: 86400,
-    budgetSharePct: "10.00",
+    budgetSharePct: "8.00",
     status: "running",
   },
 ] as const;

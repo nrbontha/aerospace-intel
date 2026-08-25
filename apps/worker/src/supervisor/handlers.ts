@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import { and, asc, desc, eq, inArray, or, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
 
@@ -13,6 +15,7 @@ import {
   claimQueuedSourceSignals,
   companies,
   companySourceLinks,
+  companyIdentifiers,
   dataSources,
   evidence,
   getDatabase,
@@ -29,6 +32,7 @@ import {
   upsertHarvestedSourceSignal,
   leads,
   resolveLeadDomain,
+  synthesizeQualifiedSourceSignal,
   MIN_JUDGE_CONFIDENCE,
   type AgentType,
   type Database,
@@ -47,6 +51,7 @@ import {
   CANDIDATE_RESEARCH_PROMPT_VERSION,
   collectCandidatePageLinks,
   ExaCompanyListHarvester,
+  FaaDrsBrowserClient,
   ExaSearchClient,
   OpenRouterClient,
   planTick,
@@ -56,6 +61,9 @@ import {
   isSuppressedDirectoryDomain,
   searchOfficialDomainCandidates,
   UsaspendingDiscoveryStrategy,
+  SamEntityClient,
+  SamEntityHarvester,
+  type SamEntitySearchClient,
   UsaspendingClient,
   wrapUntrustedSourceJson,
   type AgentPlan,
@@ -194,6 +202,10 @@ export interface TickHandlerDeps {
   readonly classifySourceSignal?: SourceSignalClassifier;
   readonly searchRecipients?: UsaspendingSearchClient["searchRecipients"];
   readonly searchRecipientsPage?: UsaspendingSearchClient["searchRecipientsPage"];
+  /** SAM v4 search override (tests); default is the credentialed public client. */
+  readonly searchSamEntities?: SamEntitySearchClient["search"];
+  /** FAA DRS guest-browser search override (tests). */
+  readonly searchFaaPma?: FaaDrsBrowserClient["search"];
   /** Generic Exa query override for company-list and source-catalog discovery (tests). */
   readonly searchExa?: (query: string) => Promise<readonly ExaSearchResult[]>;
   /** Document fetcher override (tests); default is safe-fetch. */
@@ -226,6 +238,8 @@ export interface TickHandlerDeps {
     resolutionDeps: LeadDomainDeps,
     options?: { readonly maxCandidates?: number },
   ) => Promise<ResolutionResult>;
+  /** Qualified-source synthesis override (tests); default is deterministic persistence. */
+  readonly synthesizeSourceSignal?: typeof synthesizeQualifiedSourceSignal;
 }
 
 /** safe-fetch takes an options bag; normalize the handler-side signature. */
@@ -497,11 +511,16 @@ function discoverSourceKey(agent: ResearchAgent): string {
     if (first !== undefined) return canonicalDiscoverSource(first);
   }
   if (agent.key.toLowerCase().includes("source-catalog")) return "source_catalog";
+  if (agent.key.toLowerCase() === "faa-pma-targeted") return "faa_pma_targeted";
   if (agent.key.toLowerCase().includes("sam")) return "sam";
   return "usaspending";
 }
 
 const SAM_API_KEY_ENV = "SAM_API_KEY";
+const FAA_DRS_BROWSER_ENABLED_ENV = "FAA_DRS_BROWSER_ENABLED";
+const FAA_DRS_CHROMIUM_PATH_ENV = "FAA_DRS_CHROMIUM_PATH";
+const FAA_DRS_CACHE_TTL_MS = 24 * 60 * 60 * 1_000;
+const STRICT_SAM_NAICS = ["336411", "336412", "336413", "336419", "334511"] as const;
 
 interface DiscoveryExpansion {
   readonly queryValue: string;
@@ -733,6 +752,226 @@ async function harvestUsaspendingSourceSignals(
   return { harvested, duplicate, rejected };
 }
 
+async function persistSourceSignalProposals(
+  db: Database,
+  agentId: string,
+  proposals: readonly SourceSignalProposal[],
+): Promise<{ readonly harvested: number; readonly duplicates: number }> {
+  let harvested = 0;
+  let duplicates = 0;
+  for (const proposal of proposals) {
+    const rows = await db
+      .insert(sourceSignals)
+      .values({
+        sourceKey: proposal.sourceKey,
+        sourceLocator: proposal.sourceLocator,
+        sourceFingerprint: proposal.sourceFingerprint,
+        agentId,
+        rawName: proposal.rawName,
+        ...(proposal.rawDomain === undefined ? {} : { rawDomain: proposal.rawDomain }),
+        ...(proposal.uei === undefined ? {} : { uei: proposal.uei }),
+        ...(proposal.cage === undefined ? {} : { cage: proposal.cage }),
+        ...(proposal.city === undefined ? {} : { city: proposal.city }),
+        ...(proposal.state === undefined ? {} : { state: proposal.state }),
+        ...(proposal.country === undefined ? {} : { country: proposal.country }),
+        ...(proposal.awardCount === undefined ? {} : { awardCount: proposal.awardCount }),
+        ...(proposal.awardValue === undefined
+          ? {}
+          : { awardValue: String(proposal.awardValue) }),
+        ...(proposal.freshestAward === undefined
+          ? {}
+          : { freshestAward: new Date(proposal.freshestAward) }),
+        sourcePayload: proposal.sourcePayload,
+        status: "queued_qualification",
+      })
+      .onConflictDoNothing({ target: sourceSignals.sourceFingerprint })
+      .returning({ id: sourceSignals.id });
+    if (rows.length === 0) duplicates += 1;
+    else harvested += 1;
+  }
+  return { harvested, duplicates };
+}
+
+async function harvestSamSourceSignals(
+  db: Database,
+  agent: ResearchAgent,
+  deps: Partial<TickHandlerDeps>,
+  signal: AbortSignal,
+): Promise<{
+  readonly fetched: number;
+  readonly harvested: number;
+  readonly duplicates: number;
+  readonly rejected: number;
+}> {
+  const apiKey = process.env[SAM_API_KEY_ENV]?.trim();
+  if (apiKey === undefined || apiKey === "") {
+    throw new Error("SAM_API_KEY is required for SAM entity harvesting");
+  }
+  const client =
+    deps.searchSamEntities === undefined
+      ? new SamEntityClient({ apiKey })
+      : { search: deps.searchSamEntities };
+  const harvested = await new SamEntityHarvester(client).harvest(
+    {
+      naicsCodes: [...STRICT_SAM_NAICS],
+      maxResults: MAX_SOURCE_SIGNALS_PER_HARVEST_TICK,
+    },
+    { limit: MAX_SOURCE_SIGNALS_PER_HARVEST_TICK, signal },
+  );
+  const persisted = await persistSourceSignalProposals(db, agent.id, harvested.signals);
+  return {
+    fetched: harvested.metrics.fetched,
+    harvested: persisted.harvested,
+    duplicates: persisted.duplicates + harvested.metrics.duplicateCandidates,
+    rejected: harvested.metrics.rejected,
+  };
+}
+
+interface FaaScrapeResult {
+  readonly query: unknown;
+  readonly records: readonly {
+    readonly guidUrl: string;
+    readonly holderName: string | null;
+  }[];
+  readonly source: unknown;
+}
+
+interface FaaCacheEntry {
+  readonly cachedAt: number;
+  readonly result: FaaScrapeResult;
+}
+
+interface FaaTargetCandidate {
+  readonly candidateId: string;
+  readonly companyId: string;
+  readonly legalName: string;
+  readonly displayName: string;
+}
+
+async function selectFaaTargetCandidate(db: Database): Promise<FaaTargetCandidate | null> {
+  const rows = await db
+    .select({
+      candidateId: candidates.id,
+      companyId: companies.id,
+      legalName: companies.legalName,
+      displayName: companies.displayName,
+    })
+    .from(candidates)
+    .innerJoin(companies, eq(companies.id, candidates.companyId))
+    .where(
+      and(
+        eq(companies.status, "active"),
+        sql`${candidates.status}::text NOT IN ('rejected', 'archived')`,
+        sql`NOT EXISTS (
+          SELECT 1 FROM ${companyIdentifiers}
+          WHERE ${companyIdentifiers.companyId} = ${companies.id}
+            AND ${companyIdentifiers.type} = 'faa_pma_holder'
+        )`,
+      ),
+    )
+    .orderBy(
+      sql`CASE COALESCE(
+        ${candidates.tierOverride}::text,
+        CASE ${candidates.status}::text
+          WHEN 'partner_review' THEN 'high_interest'
+          WHEN 'shortlist' THEN 'high_interest'
+          WHEN 'research_ready' THEN 'evaluate'
+          WHEN 'queued_research' THEN 'needs_research'
+          WHEN 'in_research' THEN 'researching'
+          WHEN 'watchlist' THEN 'watchlist'
+          WHEN 'hold' THEN 'watchlist'
+          ELSE 'low_interest'
+        END
+      )
+        WHEN 'high_interest' THEN 0
+        WHEN 'evaluate' THEN 1
+        WHEN 'needs_research' THEN 2
+        ELSE 3
+      END`,
+      desc(candidates.updatedAt),
+    )
+    .limit(1);
+  return rows[0] ?? null;
+}
+
+function faaRecordFingerprint(recordUrl: string): string {
+  return createHash("sha256")
+    .update(`faa_drs_pma\u0000${recordUrl}`, "utf8")
+    .digest("hex");
+}
+
+function faaBrowserEnabled(): boolean {
+  const normalized = process.env[FAA_DRS_BROWSER_ENABLED_ENV]?.trim().toLowerCase();
+  return normalized === "true" || normalized === "1";
+}
+
+async function harvestTargetedFaaSignals(
+  db: Database,
+  agent: ResearchAgent,
+  deps: Partial<TickHandlerDeps>,
+  cache: Map<string, FaaCacheEntry>,
+): Promise<
+  | { readonly candidate: null }
+  | {
+      readonly candidate: FaaTargetCandidate;
+      readonly fetched: number;
+      readonly harvested: number;
+      readonly duplicates: number;
+      readonly cacheHit: boolean;
+    }
+> {
+  const candidate = await selectFaaTargetCandidate(db);
+  if (candidate === null) return { candidate: null };
+
+  const cacheKey = candidate.legalName.normalize("NFKC").trim().toLocaleLowerCase("en-US");
+  const now = Date.now();
+  const cached = cache.get(cacheKey);
+  const cacheHit = cached !== undefined && now - cached.cachedAt < FAA_DRS_CACHE_TTL_MS;
+  const chromiumPath = process.env[FAA_DRS_CHROMIUM_PATH_ENV]?.trim();
+  const result =
+    cacheHit
+      ? cached.result
+      : await (
+          deps.searchFaaPma ??
+          ((query) =>
+            new FaaDrsBrowserClient(
+              chromiumPath === undefined || chromiumPath === ""
+                ? {}
+                : { chromiumPath },
+            ).search(query))
+        )({
+          holderName: candidate.legalName,
+          maxRecords: MAX_SOURCE_SIGNALS_PER_HARVEST_TICK,
+        });
+  if (!cacheHit) cache.set(cacheKey, { cachedAt: now, result });
+
+  const proposals: SourceSignalProposal[] = result.records.map((record) => ({
+    sourceKey: "faa_drs_pma",
+    sourceLocator: record.guidUrl,
+    sourceFingerprint: faaRecordFingerprint(record.guidUrl),
+    rawName: record.holderName ?? candidate.legalName,
+    sourcePayload: {
+      record,
+      query: result.query,
+      source: result.source,
+      knownCompanyHint: {
+        candidateId: candidate.candidateId,
+        companyId: candidate.companyId,
+        legalName: candidate.legalName,
+        displayName: candidate.displayName,
+      },
+    },
+  }));
+  const persisted = await persistSourceSignalProposals(db, agent.id, proposals);
+  return {
+    candidate,
+    fetched: result.records.length,
+    harvested: persisted.harvested,
+    duplicates: persisted.duplicates,
+    cacheHit,
+  };
+}
+
 interface SourceCatalogQuery {
   readonly query: string;
   readonly sourceType: string;
@@ -845,16 +1084,28 @@ async function scoutSourceCatalog(
 }
 
 function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandler {
+  const faaCache = new Map<string, FaaCacheEntry>();
   return async (context): Promise<TickResult> => {
     const agent = context.agent;
     const sourceKey = discoverSourceKey(agent);
 
     // SAM variant idles honestly without credentials — never pretends to work.
-    if (sourceKey === "sam" && !process.env[SAM_API_KEY_ENV]) {
+    if (sourceKey === "sam" && !process.env[SAM_API_KEY_ENV]?.trim()) {
       return {
         outcome: "stuck",
         plan: { reasoning: `source ${sourceKey} requires SAM_API_KEY`, actions: [] },
         findings: { idle: true, idleReason: "missing_sam_api_key", source: sourceKey },
+      };
+    }
+    if (sourceKey === "faa_pma_targeted" && !faaBrowserEnabled()) {
+      return {
+        outcome: "stuck",
+        plan: { reasoning: "FAA DRS browser access is disabled", actions: [] },
+        findings: {
+          idle: true,
+          idleReason: "faa_drs_browser_disabled",
+          source: "faa_drs_pma",
+        },
       };
     }
 
@@ -867,6 +1118,50 @@ function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandle
     const planJson = { ...plan };
 
     const db = getDatabase();
+    if (sourceKey === "sam") {
+      const harvest = await harvestSamSourceSignals(db, agent, deps, context.signal);
+      return {
+        outcome: "executed",
+        plan: planJson,
+        actionsExecuted: 1,
+        findings: {
+          source: "sam_entity",
+          naics: [...STRICT_SAM_NAICS],
+          fetched: harvest.fetched,
+          harvested: harvest.harvested,
+          duplicates: harvest.duplicates,
+          rejected: harvest.rejected,
+        },
+      };
+    }
+    if (sourceKey === "faa_pma_targeted") {
+      const harvest = await harvestTargetedFaaSignals(db, agent, deps, faaCache);
+      if (harvest.candidate === null) {
+        return {
+          outcome: "done",
+          plan: planJson,
+          findings: {
+            source: "faa_drs_pma",
+            note: "no active candidate without an FAA PMA holder identifier",
+          },
+        };
+      }
+      return {
+        outcome: "executed",
+        plan: planJson,
+        actionsExecuted: 1,
+        findings: {
+          source: "faa_drs_pma",
+          candidateId: harvest.candidate.candidateId,
+          companyId: harvest.candidate.companyId,
+          holderName: harvest.candidate.legalName,
+          fetched: harvest.fetched,
+          harvested: harvest.harvested,
+          duplicates: harvest.duplicates,
+          cacheHit: harvest.cacheHit,
+        },
+      };
+    }
     if (sourceKey === "source_catalog") {
       if (deps.searchExa === undefined && !process.env.EXA_API_KEY?.trim()) {
         return {
@@ -896,7 +1191,12 @@ function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandle
         plan: planJson,
         findings: {
           idleReason: `unsupported_source:${sourceKey}`,
-          supportedSources: ["usaspending", "source_catalog"],
+          supportedSources: [
+            "usaspending",
+            "sam",
+            "faa_pma_targeted",
+            "source_catalog",
+          ],
         },
       };
     }
@@ -2618,6 +2918,34 @@ async function recordTargetDecision(
     .where(eq(sourceSignals.id, signalId));
 }
 
+export type QualifiedSourceSynthesisState = "materialized" | "waiting" | "noop";
+
+export async function synthesizeQualifiedSignalIfReady(
+  db: Database,
+  signalId: string,
+  deps: Pick<TickHandlerDeps, "synthesizeSourceSignal"> = {},
+): Promise<QualifiedSourceSynthesisState> {
+  const [signal] = await db
+    .select({
+      sourceKey: sourceSignals.sourceKey,
+      status: sourceSignals.status,
+      companyId: sourceSignals.companyId,
+    })
+    .from(sourceSignals)
+    .where(eq(sourceSignals.id, signalId))
+    .limit(1);
+  if (
+    signal === undefined ||
+    (signal.sourceKey !== "sam_entity" && signal.sourceKey !== "faa_drs_pma") ||
+    signal.status !== "qualified"
+  ) {
+    return "noop";
+  }
+  if (signal.companyId === null) return "waiting";
+  await (deps.synthesizeSourceSignal ?? synthesizeQualifiedSourceSignal)(db, signalId);
+  return "materialized";
+}
+
 /** The model proposes; this policy function owns the terminal target decision. */
 export function deterministicSourceSignalDecision(
   classification: SourceSignalClassification,
@@ -3093,6 +3421,9 @@ function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHand
     let needsMoreResearch = 0;
     let noTarget = 0;
     let quarantined = 0;
+    let synthesisMaterialized = 0;
+    let synthesisWaiting = 0;
+    const synthesisErrors: Array<{ signalId: string; error: string }> = [];
     for (const signal of signals) {
       try {
         const result = await qualifySourceSignal({
@@ -3107,6 +3438,18 @@ function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHand
         if (result === "yes_target") yesTarget += 1;
         else if (result === "needs_more_research") needsMoreResearch += 1;
         else noTarget += 1;
+        if (result !== "no_target") {
+          try {
+            const synthesis = await synthesizeQualifiedSignalIfReady(db, signal.id, deps);
+            if (synthesis === "materialized") synthesisMaterialized += 1;
+            else if (synthesis === "waiting") synthesisWaiting += 1;
+          } catch (error) {
+            synthesisErrors.push({
+              signalId: signal.id,
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
       } catch (error) {
         quarantined += 1;
         await recordSourceSignalQualification(db, signal.id, {
@@ -3131,6 +3474,11 @@ function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHand
           yes_target: yesTarget,
           needs_more_research: needsMoreResearch,
           no_target: noTarget,
+        },
+        synthesis: {
+          materialized: synthesisMaterialized,
+          waitingForCompany: synthesisWaiting,
+          errors: synthesisErrors,
         },
       },
       costUsd: judgeCostUsd(runtime.judge) + (defaultClassifier?.costUsd() ?? 0),
@@ -3161,6 +3509,62 @@ export async function selectDomainResolutionBatch(
     .limit(limit);
 }
 
+interface ResolvedLeadSynthesis {
+  readonly leadId: string;
+  readonly attached: number;
+  readonly materialized: number;
+  readonly errors: readonly { signalId: string; error: string }[];
+}
+
+async function synthesizeResolvedLeadSignals(
+  db: Database,
+  leadId: string,
+  companyId: string,
+  deps: Pick<TickHandlerDeps, "synthesizeSourceSignal">,
+): Promise<ResolvedLeadSynthesis> {
+  const attached = await db
+    .update(sourceSignals)
+    .set({ companyId, updatedAt: new Date() })
+    .where(
+      and(
+        eq(sourceSignals.leadId, leadId),
+        eq(sourceSignals.status, "qualified"),
+        inArray(sourceSignals.sourceKey, ["sam_entity", "faa_drs_pma"]),
+        sql`${sourceSignals.companyId} IS NULL`,
+      ),
+    )
+    .returning({ id: sourceSignals.id });
+  const ready = await db
+    .select({ id: sourceSignals.id })
+    .from(sourceSignals)
+    .where(
+      and(
+        eq(sourceSignals.leadId, leadId),
+        eq(sourceSignals.companyId, companyId),
+        eq(sourceSignals.status, "qualified"),
+        inArray(sourceSignals.sourceKey, ["sam_entity", "faa_drs_pma"]),
+      ),
+    );
+  let materialized = 0;
+  const errors: Array<{ signalId: string; error: string }> = [];
+  for (const signal of ready) {
+    try {
+      if (
+        (await synthesizeQualifiedSignalIfReady(db, signal.id, deps)) ===
+        "materialized"
+      ) {
+        materialized += 1;
+      }
+    } catch (error) {
+      errors.push({
+        signalId: signal.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+  return { leadId, attached: attached.length, materialized, errors };
+}
+
 function createResolveDomainHandler(deps: Partial<TickHandlerDeps>): TickHandler {
   return async (): Promise<TickResult> => {
     const runtime = buildDomainResolutionDeps(deps);
@@ -3179,6 +3583,7 @@ function createResolveDomainHandler(deps: Partial<TickHandlerDeps>): TickHandler
 
     const verified: Array<{ leadId: string; domain: string; companyId: string }> = [];
     const errors: Array<{ leadId: string; error: string }> = [];
+    const sourceSynthesis: ResolvedLeadSynthesis[] = [];
     let noDomain = 0;
     let mismatched = 0;
     for (const lead of batch) {
@@ -3194,6 +3599,26 @@ function createResolveDomainHandler(deps: Partial<TickHandlerDeps>): TickHandler
           result.companyId !== undefined
         ) {
           verified.push({ leadId: result.leadId, domain: result.domain, companyId: result.companyId });
+          sourceSynthesis.push(
+            await synthesizeResolvedLeadSignals(
+              db,
+              result.leadId,
+              result.companyId,
+              deps,
+            ),
+          );
+        } else if (
+          result.outcome === "already_resolved" &&
+          result.companyId !== undefined
+        ) {
+          sourceSynthesis.push(
+            await synthesizeResolvedLeadSignals(
+              db,
+              result.leadId,
+              result.companyId,
+              deps,
+            ),
+          );
         } else if (result.outcome === "no_domain_found") {
           noDomain += 1;
         } else if (result.outcome === "identity_mismatch") {
@@ -3214,7 +3639,7 @@ function createResolveDomainHandler(deps: Partial<TickHandlerDeps>): TickHandler
     return {
       outcome,
       actionsExecuted: processed,
-      findings: { verified, noDomain, mismatched, errors },
+      findings: { verified, noDomain, mismatched, errors, sourceSynthesis },
       costUsd: judgeCostUsd(runtime.judge),
     };
   };

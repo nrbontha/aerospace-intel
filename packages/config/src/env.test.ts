@@ -91,6 +91,29 @@ describe("getServerEnv", () => {
     ).not.toHaveProperty("SAM_API_KEY");
   });
 
+  it("keeps FAA DRS browser access server-only and disabled by default", () => {
+    const defaults = getServerEnv({ NODE_ENV: "test" });
+    expect(defaults.FAA_DRS_BROWSER_ENABLED).toBe(false);
+    expect(defaults.FAA_DRS_CHROMIUM_PATH).toBeUndefined();
+    expect(
+      getServerEnv({
+        NODE_ENV: "test",
+        FAA_DRS_BROWSER_ENABLED: "true",
+        FAA_DRS_CHROMIUM_PATH: "  /opt/chromium  ",
+      }),
+    ).toMatchObject({
+      FAA_DRS_BROWSER_ENABLED: true,
+      FAA_DRS_CHROMIUM_PATH: "/opt/chromium",
+    });
+    expect(
+      getPublicEnv({
+        NEXT_PUBLIC_APP_URL: "http://localhost:3000",
+        FAA_DRS_BROWSER_ENABLED: "true",
+        FAA_DRS_CHROMIUM_PATH: "/private/chromium",
+      }),
+    ).not.toHaveProperty("FAA_DRS_BROWSER_ENABLED");
+  });
+
   it.each([
     [{ BOOTSTRAP_ADMIN_EMAIL: "nobody@example.invalid" }],
     [{ BOOTSTRAP_ADMIN_PASSWORD: "x".repeat(12) }],

@@ -96,6 +96,8 @@ const serverEnvSchema = z
     OPENROUTER_API_KEY: optionalTrimmedString(z.string().min(1)),
     EXA_API_KEY: optionalTrimmedString(z.string().min(1)),
     SAM_API_KEY: optionalTrimmedString(z.string().min(1)),
+    FAA_DRS_BROWSER_ENABLED: optionalBoolean.transform((value) => value ?? false),
+    FAA_DRS_CHROMIUM_PATH: optionalTrimmedString(z.string().min(1)),
     OPENROUTER_MODEL_FAST: modelId.default("openai/gpt-5.4-mini"),
     OPENROUTER_MODEL_DEEP: modelId.default("anthropic/claude-sonnet-5"),
     OPENROUTER_MODEL_FALLBACK: modelId.default("google/gemini-3.7-flash"),

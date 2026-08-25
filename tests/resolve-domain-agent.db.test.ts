@@ -18,7 +18,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { eq, inArray } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
   closeDatabase,
@@ -27,6 +27,7 @@ import {
   getDatabase,
   leads,
   researchAgents,
+  sourceSignals,
   resolveLeadDomain,
   type DomainJudge,
   type DomainProber,
@@ -164,6 +165,12 @@ interface ResolveDomainFindings {
   noDomain: number;
   mismatched: number;
   errors: Array<{ leadId: string; error: string }>;
+  sourceSynthesis: Array<{
+    leadId: string;
+    attached: number;
+    materialized: number;
+    errors: Array<{ signalId: string; error: string }>;
+  }>;
   note?: string;
 }
 
@@ -236,36 +243,40 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
     const total = Object.values(split).reduce((sum, share) => sum + share, 0);
     expect(total).toBe(100);
     expect(split).toMatchObject({
-      "discover-usaspending": 10,
-      "discover-sam": 0,
-      "enrich-queue": 20,
+      "discover-usaspending": 8,
+      "discover-sam": 5,
+      "faa-pma-targeted": 7,
+      "enrich-queue": 18,
       "monitor-ownership": 8,
       "refresh-stale": 5,
-      "golden-neighbor": 10,
-      "resolve-domains": 12,
-      "qualify-award-leads": 25,
-      "source-catalog-scout": 10,
+      "golden-neighbor": 8,
+      "resolve-domains": 10,
+      "qualify-award-leads": 23,
+      "source-catalog-scout": 8,
     });
 
     const seededCount = await ensureDefaultAgents(getDatabase());
     expect(seededCount).toBe(DEFAULT_AGENT_SEEDS.length);
     const rows = await getDatabase().select().from(researchAgents);
     const defaultRows = rows.filter((agent) => agent.key in split);
-    expect(defaultRows.filter((agent) => agent.status === "paused").map((agent) => agent.key)).toEqual([
-      "discover-sam",
-    ]);
+    expect(
+      defaultRows
+        .filter((agent) => agent.status === "paused")
+        .map((agent) => agent.key)
+        .sort(),
+    ).toEqual(["discover-sam", "faa-pma-targeted"]);
     const sourceCatalog = rows.find((agent) => agent.key === "source-catalog-scout");
     expect(sourceCatalog).toMatchObject({
       name: "Source Catalog Scout",
       agentType: "discover_source",
       cadenceSeconds: 86400,
-      budgetSharePct: "10.00",
+      budgetSharePct: "8.00",
       status: "running",
     });
     const resolver = rows.find((agent) => agent.key === "resolve-domains");
     expect(resolver).toMatchObject({
       cadenceSeconds: 600,
-      budgetSharePct: "12.00",
+      budgetSharePct: "10.00",
       status: "running",
     });
 
@@ -344,6 +355,67 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
       .from(companyDomains)
       .where(eq(companyDomains.domain, "acmetooling.com"));
     expect(domainRow?.companyId).toBe(verified.companyId);
+  });
+
+  it("attaches and synthesizes a qualified source after later domain resolution", async () => {
+    const leadId = await insertLead({ rawName: "LATER RESOLVED PMA LLC" });
+    const [signal] = await getDatabase()
+      .insert(sourceSignals)
+      .values({
+        sourceKey: "faa_drs_pma",
+        sourceLocator:
+          "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCIDLATER",
+        sourceFingerprint: "resolver-later-synthesis",
+        rawName: "Later Resolved PMA LLC",
+        sourcePayload: {},
+        status: "qualified",
+        leadId,
+        companyId: null,
+      })
+      .returning({ id: sourceSignals.id });
+    const synthesizeSourceSignal: NonNullable<
+      TickHandlerDeps["synthesizeSourceSignal"]
+    > = vi.fn(async () => ({ status: "noop", sourceKey: "faa_drs_pma" }));
+    const run = handlerFor({
+      domainProber: fakeProber({
+        "laterresolvedpma.com":
+          "Later Resolved PMA LLC — aircraft component manufacturing.",
+      }),
+      domainJudge: fakeJudge({
+        proposals: ["laterresolvedpma.com"],
+        judgment: {
+          matches: true,
+          confidence: 0.95,
+          locationMatches: "unknown",
+          identifierMatches: "unknown",
+          relationship: "exact",
+          reason: "official identity verified",
+        },
+      }),
+      synthesizeSourceSignal,
+    });
+
+    const result = await run();
+    expect(result.outcome).toBe("executed");
+    expect(result.findings?.sourceSynthesis).toEqual([
+      {
+        leadId,
+        attached: 1,
+        materialized: 1,
+        errors: [],
+      },
+    ]);
+    expect(synthesizeSourceSignal).toHaveBeenCalledTimes(1);
+    expect(vi.mocked(synthesizeSourceSignal).mock.calls[0]?.[1]).toBe(signal!.id);
+    const [attached] = await getDatabase()
+      .select({ status: sourceSignals.status, companyId: sourceSignals.companyId })
+      .from(sourceSignals)
+      .where(eq(sourceSignals.id, signal!.id));
+    expect(attached).toMatchObject({
+      status: "qualified",
+      companyId: result.findings?.verified[0]?.companyId,
+    });
+    await getDatabase().delete(sourceSignals).where(eq(sourceSignals.id, signal!.id));
   });
 
   it("one failing lead never fails the rest of the batch", async () => {

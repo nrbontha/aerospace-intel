@@ -27,6 +27,7 @@ import {
 } from "./sam.js";
 
 export * from "./faa.js";
+export * from "./read-model.js";
 export * from "./sam.js";
 
 export interface AcceptSynthesisGroupInput {
@@ -45,6 +46,18 @@ export interface AcceptSynthesisGroupResult {
     readonly qualifications: number;
   };
   readonly candidateRescoreRequested: boolean;
+}
+export interface RejectSynthesisGroupInput {
+  readonly companyId: string;
+  readonly sourceDocumentId: string;
+  readonly reviewerId: string;
+  readonly expectedObservationIds: readonly string[];
+  readonly reason?: string;
+}
+
+export interface RejectSynthesisGroupResult {
+  readonly rejectedProposalCount: number;
+  readonly observationIds: readonly string[];
 }
 
 export class SynthesisStaleGroupError extends Error {
@@ -235,6 +248,98 @@ export async function acceptSynthesisGroup(
         qualifications: activatedQualifications.length,
       },
       candidateRescoreRequested: candidate !== undefined,
+    };
+  });
+}
+
+/**
+ * Reject every currently pending proposal from a source document as one
+ * review unit. The document lock and expected-id comparison prevent partial or
+ * stale review.
+ */
+export async function rejectSynthesisGroup(
+  db: Database,
+  input: RejectSynthesisGroupInput,
+): Promise<RejectSynthesisGroupResult> {
+  return db.transaction(async (tx) => {
+    const lockKey = `synthesis-group:${input.companyId}:${input.sourceDocumentId}`;
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${lockKey}, 0))`);
+
+    const [companyLink] = await tx
+      .select({ id: sourceDocumentLinks.id })
+      .from(sourceDocumentLinks)
+      .where(
+        and(
+          eq(sourceDocumentLinks.sourceDocumentId, input.sourceDocumentId),
+          eq(sourceDocumentLinks.companyId, input.companyId),
+        ),
+      )
+      .limit(1);
+    if (companyLink === undefined) {
+      throw new SynthesisPreconditionError(
+        "Source document is not linked to the requested company",
+      );
+    }
+
+    const pending = await tx
+      .select({
+        id: researchProposals.id,
+        observationId: researchProposals.observationId,
+      })
+      .from(researchProposals)
+      .innerJoin(
+        observations,
+        eq(observations.id, researchProposals.observationId),
+      )
+      .innerJoin(evidence, eq(evidence.id, observations.evidenceId))
+      .where(
+        and(
+          eq(evidence.sourceDocumentId, input.sourceDocumentId),
+          eq(researchProposals.status, "pending"),
+        ),
+      )
+      .for("update");
+
+    const expectedIds = [...input.expectedObservationIds].sort();
+    const currentIds = pending.map(({ observationId }) => observationId).sort();
+    if (!sameStringArray(expectedIds, currentIds)) {
+      throw new SynthesisStaleGroupError(expectedIds, currentIds);
+    }
+
+    if (pending.length > 0) {
+      const now = new Date();
+      const proposalIds = pending.map(({ id }) => id);
+      await tx
+        .update(researchProposals)
+        .set({ status: "rejected", updatedAt: now })
+        .where(inArray(researchProposals.id, proposalIds));
+      await tx.insert(proposalReviews).values(
+        pending.map(({ id }) => ({
+          proposalId: id,
+          reviewerUserId: input.reviewerId,
+          decision: "rejected" as const,
+          reason: input.reason?.trim() || "Rejected as an atomic primary-source synthesis group",
+        })),
+      );
+    }
+
+    await tx.insert(auditEvents).values({
+      actorUserId: input.reviewerId,
+      action: "synthesis.group_reject",
+      entityType: "source_document",
+      entityId: input.sourceDocumentId,
+      before: { pendingObservationIds: currentIds },
+      after: { rejectedObservationIds: currentIds },
+      metadata: {
+        companyId: input.companyId,
+        allOrNothing: true,
+        reason: input.reason?.trim() || null,
+      },
+    });
+
+    return {
+      rejectedProposalCount: pending.length,
+      observationIds: currentIds,
     };
   });
 }

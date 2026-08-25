@@ -23,6 +23,11 @@ import {
 } from "@asi/ui";
 import Link from "next/link";
 import { useCallback, useEffect, useState } from "react";
+import { apiJson } from "@/components/csrf-client";
+import {
+  CandidateSynthesisSection,
+  type CompanySynthesisTrail,
+} from "@/components/candidate-profile/synthesis-trail";
 
 import {
   AxisChip,
@@ -384,12 +389,116 @@ function EvidenceSection({ company }: { company: CompanyProfile | null }) {
   );
 }
 
+interface CurrentSession {
+  readonly user: {
+    readonly role: string;
+  };
+}
+
+
+function SynthesisPanel({ companyId }: { companyId: string }) {
+  const [trail, setTrail] = useState<CompanySynthesisTrail | null>(null);
+  const [role, setRole] = useState<"analyst" | "viewer">("viewer");
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [reviewing, setReviewing] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError(null);
+    Promise.all([
+      apiJson<CompanySynthesisTrail>(
+        `/api/v1/companies/${encodeURIComponent(companyId)}/synthesis`,
+        { signal: controller.signal },
+      ),
+      apiJson<CurrentSession>("/api/v1/auth/me", {
+        signal: controller.signal,
+      }),
+    ])
+      .then(([loadedTrail, session]) => {
+        setTrail(loadedTrail);
+        setRole(
+          session.user.role === "analyst" || session.user.role === "admin"
+            ? "analyst"
+            : "viewer",
+        );
+      })
+      .catch((caught: unknown) => {
+        if (!controller.signal.aborted) {
+          setTrail(null);
+          setError(
+            caught instanceof Error
+              ? caught.message
+              : "Failed to load source-backed synthesis.",
+          );
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    return () => controller.abort();
+  }, [companyId, reloadKey]);
+
+  const review = useCallback(
+    async (
+      action: "accept" | "reject",
+      sourceDocumentId: string,
+      expectedObservationIds: readonly string[],
+    ): Promise<void> => {
+      setReviewing(true);
+      setError(null);
+      try {
+        await apiJson(
+          `/api/v1/companies/${encodeURIComponent(companyId)}/synthesis`,
+          {
+            method: "POST",
+            body: JSON.stringify({
+              action,
+              sourceDocumentId,
+              expectedObservationIds,
+            }),
+          },
+        );
+        setReloadKey((key) => key + 1);
+      } catch (caught) {
+        setError(
+          caught instanceof Error
+            ? caught.message
+            : `Failed to ${action} the source record.`,
+        );
+      } finally {
+        setReviewing(false);
+      }
+    },
+    [companyId],
+  );
+
+  return (
+    <CandidateSynthesisSection
+      trail={trail}
+      loading={loading}
+      error={error}
+      role={role}
+      reviewing={reviewing}
+      onAccept={(sourceDocumentId, expectedObservationIds) =>
+        void review("accept", sourceDocumentId, expectedObservationIds)
+      }
+      onReject={(sourceDocumentId, expectedObservationIds) =>
+        void review("reject", sourceDocumentId, expectedObservationIds)
+      }
+    />
+  );
+}
+
 const TAB_ITEMS = [
   ["history", "Score history"],
   ["features", "Feature snapshot"],
   ["feedback", "Feedback history"],
   ["questions", "Research questions"],
   ["evidence", "Evidence"],
+  ["synthesis", "Synthesis trail"],
 ] as const;
 
 type TabKey = (typeof TAB_ITEMS)[number][0];
@@ -569,6 +678,9 @@ export function CandidateProfile({ candidateId }: { candidateId: string }) {
       </TabPanel>
       <TabPanel active={activeTab === "evidence"}>
         <EvidenceSection company={company} />
+      </TabPanel>
+      <TabPanel active={activeTab === "synthesis"}>
+        <SynthesisPanel companyId={candidate.companyId} />
       </TabPanel>
     </section>
   );

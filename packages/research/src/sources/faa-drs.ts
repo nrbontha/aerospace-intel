@@ -106,6 +106,23 @@ export interface FaaDrsBrowserFactory {
     readonly userAgent: string;
   }): Promise<FaaDrsBrowserPage>;
 }
+interface BrowserDomElement {
+  readonly innerText?: string;
+  readonly parentElement: BrowserDomElement | null;
+  readonly textContent: string | null;
+  closest(selector: string): BrowserDomElement | null;
+  getAttribute(name: string): string | null;
+}
+
+interface BrowserDomDocument {
+  readonly body: { readonly innerText: string } | null;
+  querySelectorAll(selector: string): readonly BrowserDomElement[];
+}
+
+interface BrowserDomGlobal {
+  readonly document: BrowserDomDocument;
+}
+
 
 export interface FaaDrsBrowserClientOptions {
   readonly browserFactory?: FaaDrsBrowserFactory;
@@ -116,6 +133,7 @@ export interface FaaDrsBrowserClientOptions {
   readonly maxRetries?: number;
   readonly sleep?: Sleep;
   readonly now?: () => Date;
+  readonly nowMs?: () => number;
 }
 
 export class FaaDrsBrowserClient {
@@ -127,6 +145,7 @@ export class FaaDrsBrowserClient {
   readonly #maxRetries: number;
   readonly #sleep: Sleep;
   readonly #now: () => Date;
+  readonly #nowMs: () => number;
   #lastAttemptStartedAt = 0;
 
   constructor(options: FaaDrsBrowserClientOptions = {}) {
@@ -151,6 +170,7 @@ export class FaaDrsBrowserClient {
     );
     this.#sleep = options.sleep ?? sleep;
     this.#now = options.now ?? (() => new Date());
+    this.#nowMs = options.nowMs ?? Date.now;
   }
 
   async search(queryInput: unknown): Promise<FaaPmaScrapeResult> {
@@ -214,11 +234,11 @@ export class FaaDrsBrowserClient {
   }
 
   async #paceAttempt(): Promise<void> {
-    const now = Date.now();
+    const now = this.#nowMs();
     const remaining =
       this.#lastAttemptStartedAt + this.#queryIntervalMs - now;
     if (remaining > 0) await this.#sleep(remaining);
-    this.#lastAttemptStartedAt = Date.now();
+    this.#lastAttemptStartedAt = this.#nowMs();
   }
 }
 
@@ -253,6 +273,15 @@ class PlaywrightFaaDrsBrowserFactory implements FaaDrsBrowserFactory {
           blockedStatus = status;
         }
       });
+      const readResultSignature = async (): Promise<string> =>
+        await page.evaluate((anchorSelector) => {
+          const browserGlobal = globalThis as unknown as BrowserDomGlobal;
+          return Array.from(
+            browserGlobal.document.querySelectorAll(anchorSelector),
+          )
+            .map((anchor) => anchor.getAttribute("href") ?? "")
+            .join("|");
+        }, RESULT_ANCHOR_SELECTOR);
 
       return {
         async navigate(url, timeoutMs) {
@@ -284,13 +313,7 @@ class PlaywrightFaaDrsBrowserFactory implements FaaDrsBrowserFactory {
             // Ignore expected guest-session probes from initial page bootstrap;
             // only the targeted Apply operation may block this scrape.
             blockedStatus = null;
-            resultSignatureBeforeApply = await page
-              .locator(RESULT_ANCHOR_SELECTOR)
-              .evaluateAll((anchors) =>
-                anchors
-                  .map((anchor) => anchor.getAttribute("href") ?? "")
-                  .join("|"),
-              );
+            resultSignatureBeforeApply = await readResultSignature();
           }
           await page.locator(selector).click();
         },
@@ -298,8 +321,10 @@ class PlaywrightFaaDrsBrowserFactory implements FaaDrsBrowserFactory {
           const deadline = Date.now() + timeoutMs;
           await page.waitForFunction(
             ({ anchorSelector, previousSignature }) => {
+              const browserGlobal = globalThis as unknown as BrowserDomGlobal;
+              const browserDocument = browserGlobal.document;
               const anchors = Array.from(
-                document.querySelectorAll(anchorSelector),
+                browserDocument.querySelectorAll(anchorSelector),
               );
               const currentSignature = anchors
                 .map((anchor) => anchor.getAttribute("href") ?? "")
@@ -310,7 +335,8 @@ class PlaywrightFaaDrsBrowserFactory implements FaaDrsBrowserFactory {
               ) {
                 return true;
               }
-              const body = document.body?.innerText.toLowerCase() ?? "";
+              const body =
+                browserDocument.body?.innerText.toLowerCase() ?? "";
               return (
                 body.includes("no records found") ||
                 body.includes("no results found") ||
@@ -327,23 +353,11 @@ class PlaywrightFaaDrsBrowserFactory implements FaaDrsBrowserFactory {
             },
             { timeout: timeoutMs },
           );
-          let previousSignature = await page
-            .locator(RESULT_ANCHOR_SELECTOR)
-            .evaluateAll((anchors) =>
-              anchors
-                .map((anchor) => anchor.getAttribute("href") ?? "")
-                .join("|"),
-            );
+          let previousSignature = await readResultSignature();
           let stableIntervals = 0;
           while (Date.now() + 250 <= deadline) {
             await page.waitForTimeout(250);
-            const currentSignature = await page
-              .locator(RESULT_ANCHOR_SELECTOR)
-              .evaluateAll((anchors) =>
-                anchors
-                  .map((anchor) => anchor.getAttribute("href") ?? "")
-                  .join("|"),
-              );
+            const currentSignature = await readResultSignature();
             if (currentSignature === previousSignature) {
               stableIntervals += 1;
               if (stableIntervals === 2) return;
@@ -361,31 +375,32 @@ class PlaywrightFaaDrsBrowserFactory implements FaaDrsBrowserFactory {
           return blockedStatus;
         },
         async cards(maxRecords) {
-          const anchors = page.locator(RESULT_ANCHOR_SELECTOR);
-          const count = Math.min(await anchors.count(), maxRecords);
-          const cards: FaaDrsDomCard[] = [];
-          for (let index = 0; index < count; index += 1) {
-            const card = await anchors.nth(index).evaluate((element) => {
-              const container =
-                element.closest(
-                  "mat-card, .card, .result-content, [role='article'], li, tr",
-                ) ??
-                element.parentElement?.parentElement ??
-                element.parentElement ??
-                element;
-              let renderedText = container.textContent ?? "";
-              if ("innerText" in container) {
-                const renderedContainer = container as { innerText: unknown };
-                renderedText = String(renderedContainer.innerText);
-              }
-              return {
-                href: element.getAttribute("href") ?? "",
-                renderedText,
-              };
-            });
-            cards.push(card);
-          }
-          return cards;
+          return await page.evaluate(
+            ({ anchorSelector, limit }) => {
+              const browserGlobal = globalThis as unknown as BrowserDomGlobal;
+              const anchors = Array.from(
+                browserGlobal.document.querySelectorAll(anchorSelector),
+              ).slice(0, limit);
+              return anchors.map((element) => {
+                const container =
+                  element.closest(
+                    "mat-card, .card, .result-content, [role='article'], li, tr",
+                  ) ??
+                  element.parentElement?.parentElement ??
+                  element.parentElement ??
+                  element;
+                const renderedText =
+                  typeof container.innerText === "string"
+                    ? container.innerText
+                    : (container.textContent ?? "");
+                return {
+                  href: element.getAttribute("href") ?? "",
+                  renderedText,
+                };
+              });
+            },
+            { anchorSelector: RESULT_ANCHOR_SELECTOR, limit: maxRecords },
+          );
         },
         async close() {
           await browser.close();

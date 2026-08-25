@@ -4,6 +4,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import {
+  CandidateSynthesisSection,
   SynthesisTrail,
   type CompanySynthesisTrail,
 } from "./synthesis-trail.js";
@@ -175,6 +176,27 @@ assert.match(
 );
 assert.match(viewerMarkup, /Viewer access is read-only/);
 assert.doesNotMatch(viewerMarkup, /sole source/i);
+
+const profileSynthesisMarkup = renderToStaticMarkup(
+  createElement(CandidateSynthesisSection, {
+    trail,
+    loading: false,
+    error: null,
+    role: "viewer",
+    reviewing: false,
+    onAccept: () => undefined,
+    onReject: () => undefined,
+  }),
+);
+assert.match(
+  profileSynthesisMarkup,
+  /data-candidate-section=\"synthesis\"/,
+);
+assert.match(profileSynthesisMarkup, /FAA PMA qualification graph/);
+assert.match(profileSynthesisMarkup, /https:\/\/drs\.faa\.gov\/pma\/PQ1234CE/);
+assert.match(profileSynthesisMarkup, /data-tone="success">active<\/span>/);
+assert.match(profileSynthesisMarkup, /Viewer access is read-only/);
+assert.doesNotMatch(profileSynthesisMarkup, /sole source/i);
 
 const analystMarkup = renderToStaticMarkup(
   createElement(SynthesisTrail, {

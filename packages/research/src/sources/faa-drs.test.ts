@@ -232,6 +232,7 @@ describe("FaaDrsBrowserClient", () => {
   it("never exceeds three retries and backs off at least one second", async () => {
     const sleeps: number[] = [];
     let opens = 0;
+    let nowMs = 10_000;
     const browserFactory: FaaDrsBrowserFactory = {
       async open() {
         opens += 1;
@@ -242,16 +243,17 @@ describe("FaaDrsBrowserClient", () => {
       browserFactory,
       sleep: async (milliseconds) => {
         sleeps.push(milliseconds);
+        nowMs += milliseconds;
       },
       maxRetries: 3,
+      nowMs: () => nowMs,
     });
 
     await expect(
       client.search({ model: "HTF7000", maxRecords: 1 }),
     ).rejects.toMatchObject({ transient: true });
     expect(opens).toBe(4);
-    expect(sleeps).toEqual(expect.arrayContaining([1_000, 2_000, 4_000]));
-    expect(sleeps.every((milliseconds) => milliseconds >= 1_000)).toBe(true);
+    expect(sleeps).toEqual([1_000, 2_000, 4_000]);
   });
 
   it("refuses navigation away from the public PMA page", async () => {

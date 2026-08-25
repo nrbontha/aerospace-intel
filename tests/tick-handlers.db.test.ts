@@ -17,13 +17,14 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { asc, eq, inArray, sql } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   AGENT_QUERY_STALE_CLAIM_MS,
   agentFrontierProgress,
   candidates,
   closeDatabase,
   companies,
+  companyIdentifiers,
   dataSources,
   evidence,
   frontierItems,
@@ -51,6 +52,7 @@ import { closeDatabase as closeSourceDatabase } from "../packages/database/src/c
 import { OpenRouterClient, rescoreCandidateAfterResearch } from "@asi/research";
 import {
   createV1TickHandlerRegistry,
+  synthesizeQualifiedSignalIfReady,
   type SourceSignalClassification,
   type TickHandlerDeps,
 } from "../apps/worker/src/supervisor/handlers.js";
@@ -243,9 +245,13 @@ function sourceSignalClassification(
 type AgentInsert = typeof researchAgents.$inferInsert;
 
 let createdAgentIds: string[] = [];
-let createdCompanyIds: string[] = [];
 let createdGoldenIds: string[] = [];
 let createdCatalogPublishers: string[] = [];
+let runTag = "uninitialized";
+
+beforeEach(() => {
+  runTag = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+});
 
 async function insertAgent(
   overrides: Partial<AgentInsert> = {},
@@ -253,13 +259,13 @@ async function insertAgent(
   const [row] = await getDatabase()
     .insert(researchAgents)
     .values({
-      key: overrides.key ?? `test-${Math.random().toString(36).slice(2)}`,
+      ...overrides,
+      key: overrides.key ?? `test-${runTag}`,
       name: overrides.name ?? "Test agent",
       agentType: overrides.agentType ?? "discover_source",
-      goal: "prove the executor contract",
-      cadenceSeconds: 900,
-      status: "running",
-      ...overrides,
+      goal: overrides.goal ?? "prove the executor contract",
+      cadenceSeconds: overrides.cadenceSeconds ?? 900,
+      status: overrides.status ?? "running",
     })
     .returning();
   createdAgentIds.push(row!.id);
@@ -272,13 +278,12 @@ async function insertCompany(
   const [row] = await getDatabase()
     .insert(companies)
     .values({
-      legalName: overrides.legalName ?? "Acme Components LLC",
-      displayName: overrides.displayName ?? "Acme Components",
+      legalName: overrides.legalName ?? `Acme Components LLC ${runTag}`,
+      displayName: overrides.displayName ?? `Acme Components ${runTag}`,
       websiteUrl: overrides.websiteUrl ?? null,
       headquartersCountryCode: overrides.headquartersCountryCode ?? null,
     })
     .returning({ id: companies.id });
-  createdCompanyIds.push(row!.id);
   return row!.id;
 }
 
@@ -369,6 +374,7 @@ async function insertEvidenceChain(input: {
 
 afterEach(async () => {
   vi.unstubAllGlobals();
+  vi.unstubAllEnvs();
   const db = getDatabase();
   if (createdCatalogPublishers.length > 0) {
     await db
@@ -392,6 +398,8 @@ afterEach(async () => {
     await db.delete(researchAgents).where(inArray(researchAgents.id, createdAgentIds));
     createdAgentIds = [];
   }
+  // Companies and their append-only/cascading research chains intentionally
+  // survive until the dedicated scratch database is torn down after the suite.
 });
 
 describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
@@ -436,6 +444,285 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     for (const type of expected) {
       expect(registry.get(type), type).toBeTypeOf("function");
     }
+  });
+
+  it("discover_source (SAM): applies the strict active-US harvest and writes signals only", async () => {
+    vi.stubEnv("SAM_API_KEY", "test-sam-key");
+    gatewayWithContents([planEnvelope([{ source: "sam" }])]);
+    const agent = await insertAgent({
+      key: "discover-sam-handler-test",
+      agentType: "discover_source",
+    });
+    const searchSamEntities: NonNullable<TickHandlerDeps["searchSamEntities"]> = vi.fn(
+      async (query) => {
+      expect(query).toMatchObject({
+        naicsCodes: ["336411", "336412", "336413", "336419", "334511"],
+        maxResults: 25,
+      });
+      return {
+        totalRecords: 2,
+        entities: [
+          {
+            legalName: "Strict SAM Aerospace LLC",
+            uei: "STRICTSAM001",
+            cageCode: "1SAM1",
+            officialUrl: "https://strict-sam.test/",
+            officialDomain: "strict-sam.test",
+            addressLine1: "1 Flight Way",
+            addressLine2: null,
+            city: "Wichita",
+            state: "KS",
+            zip: "67202",
+            country: "US",
+            registrationStatus: "Active",
+            exclusionStatusFlag: false,
+            primaryNaics: {
+              code: "336413",
+              description: "Aircraft parts",
+              sbaSmallBusiness: true,
+            },
+            naics: [
+              {
+                code: "336413",
+                description: "Aircraft parts",
+                sbaSmallBusiness: true,
+              },
+            ],
+            psc: [],
+            entityTypeHints: [],
+            businessTypeHints: [],
+            ownershipHints: [],
+            parentUei: null,
+            sourceLocator: "sam://entity-information/v4/entities/STRICTSAM001",
+            raw: {
+              entityRegistration: {
+                ueiSAM: "STRICTSAM001",
+                cageCode: "1SAM1",
+                legalBusinessName: "Strict SAM Aerospace LLC",
+                registrationStatus: "Active",
+              },
+              coreData: {
+                physicalAddress: {
+                  city: "Wichita",
+                  stateOrProvinceCode: "KS",
+                  countryCode: "US",
+                },
+              },
+              assertions: {
+                goodsAndServices: {
+                  primaryNaics: "336413",
+                  naicsList: [{ naicsCode: "336413" }],
+                },
+              },
+              publicExtension: { preserved: true },
+            },
+          },
+          {
+            legalName: "Inactive SAM Aerospace LLC",
+            uei: "INACTIVESAM1",
+            cageCode: null,
+            officialUrl: null,
+            officialDomain: null,
+            addressLine1: null,
+            addressLine2: null,
+            city: null,
+            state: null,
+            zip: null,
+            country: "US",
+            registrationStatus: "Inactive",
+            exclusionStatusFlag: false,
+            primaryNaics: null,
+            naics: [],
+            psc: [],
+            entityTypeHints: [],
+            businessTypeHints: [],
+            ownershipHints: [],
+            parentUei: null,
+            sourceLocator: "sam://entity-information/v4/entities/INACTIVESAM1",
+            raw: {
+              entityRegistration: {
+                ueiSAM: "INACTIVESAM1",
+                legalBusinessName: "Inactive SAM Aerospace LLC",
+                registrationStatus: "Inactive",
+              },
+            },
+          },
+        ],
+      };
+      },
+    );
+    const handler = createV1TickHandlerRegistry({
+      ...depsWith({}),
+      searchSamEntities,
+    }).get("discover_source")!;
+
+    const result = await handler({
+      agent,
+      signal: new AbortController().signal,
+    });
+    expect(result).toMatchObject({
+      outcome: "executed",
+      findings: {
+        source: "sam_entity",
+        fetched: 2,
+        harvested: 1,
+        rejected: 1,
+      },
+    });
+    const signals = await getDatabase()
+      .select()
+      .from(sourceSignals)
+      .where(eq(sourceSignals.agentId, agent.id));
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      sourceKey: "sam_entity",
+      rawName: "Strict SAM Aerospace LLC",
+      status: "queued_qualification",
+      sourcePayload: {
+        publicExtension: { preserved: true },
+      },
+    });
+    expect(
+      await getDatabase().select().from(leads).where(eq(leads.campaignId, agent.id)),
+    ).toHaveLength(0);
+  });
+
+  it("discover_source (FAA targeted): stays stuck while browser access is disabled", async () => {
+    vi.stubEnv("FAA_DRS_BROWSER_ENABLED", "false");
+    const agent = await insertAgent({
+      key: "faa-pma-targeted",
+      agentType: "discover_source",
+    });
+    const searchFaaPma: NonNullable<TickHandlerDeps["searchFaaPma"]> = vi.fn(
+      async () => {
+        throw new Error("disabled FAA search must not execute");
+      },
+    );
+    const result = await createV1TickHandlerRegistry({ searchFaaPma })
+      .get("discover_source")!({
+        agent,
+        signal: new AbortController().signal,
+      });
+    expect(result).toMatchObject({
+      outcome: "stuck",
+      findings: {
+        idle: true,
+        idleReason: "faa_drs_browser_disabled",
+      },
+    });
+    expect(searchFaaPma).not.toHaveBeenCalled();
+  });
+
+  it("discover_source (FAA targeted): caches one prioritized holder query and writes records as signals only", async () => {
+    vi.stubEnv("FAA_DRS_BROWSER_ENABLED", "true");
+    gatewayWithContents([planEnvelope([{ source: "faa_pma_targeted" }])]);
+    const excludedCompanyId = await insertCompany({
+      legalName: "Already Identified Aerospace LLC",
+      displayName: "Already Identified Aerospace",
+      headquartersCountryCode: "US",
+    });
+    await insertCandidate(excludedCompanyId, "shortlist");
+    await getDatabase().insert(companyIdentifiers).values({
+      companyId: excludedCompanyId,
+      type: "faa_pma_holder",
+      value: "PQ-EXISTING",
+    });
+    const companyId = await insertCompany({
+      legalName: "Priority PMA Aerospace LLC",
+      displayName: "Priority PMA Aerospace",
+      headquartersCountryCode: "US",
+    });
+    const candidateId = await insertCandidate(companyId, "partner_review");
+    const agent = await insertAgent({
+      key: "faa-pma-targeted",
+      agentType: "discover_source",
+    });
+    const guidUrl =
+      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID123456789";
+    const searchFaaPma: NonNullable<TickHandlerDeps["searchFaaPma"]> = vi.fn(
+      async () => ({
+      query: { holderName: "Priority PMA Aerospace LLC", maxRecords: 25 },
+      records: [
+        {
+          recordId: "PMA0001",
+          guidUrl,
+          status: "Active",
+          subStatus: null,
+          holderName: "Priority PMA Aerospace LLC",
+          holderNumber: "PQ0001CE",
+          fullAddress: "1 Flight Way, Wichita, KS 67202",
+          pmaPartNumber: "PMA-100",
+          partName: "Flight Control Bracket",
+          replacementPartNumber: null,
+          make: "Aircraft Co",
+          models: ["A-1"],
+          supplementNumber: null,
+          supplementDate: null,
+          approvalBasis: "Test and computation",
+          serviceOffice: null,
+          opr: null,
+          cfrReferences: ["14 CFR 21.303"],
+          comments: null,
+          renderedSourceText: "PMA Holder Name Priority PMA Aerospace LLC",
+        },
+      ],
+      source: {
+        publicUrl: "https://drs.faa.gov/browse/PMA/doctypeDetails" as const,
+        scrapedAt: "2026-08-25T12:00:00.000Z",
+        retrievalMethod: "guest_browser_dom" as const,
+      },
+      }),
+    );
+    const handler = createV1TickHandlerRegistry({
+      ...depsWith({}),
+      searchFaaPma,
+    }).get("discover_source")!;
+    const first = await handler({
+      agent,
+      signal: new AbortController().signal,
+    });
+    const second = await handler({
+      agent,
+      signal: new AbortController().signal,
+    });
+    expect(searchFaaPma).toHaveBeenCalledTimes(1);
+    expect(searchFaaPma).toHaveBeenCalledWith({
+      holderName: "Priority PMA Aerospace LLC",
+      maxRecords: 25,
+    });
+    expect(first).toMatchObject({
+      outcome: "executed",
+      findings: {
+        candidateId,
+        companyId,
+        fetched: 1,
+        harvested: 1,
+        cacheHit: false,
+      },
+    });
+    expect(second).toMatchObject({
+      outcome: "executed",
+      findings: { harvested: 0, duplicates: 1, cacheHit: true },
+    });
+    const signals = await getDatabase()
+      .select()
+      .from(sourceSignals)
+      .where(eq(sourceSignals.agentId, agent.id));
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      sourceKey: "faa_drs_pma",
+      sourceLocator: guidUrl,
+      rawName: "Priority PMA Aerospace LLC",
+      companyId: null,
+      status: "queued_qualification",
+      sourcePayload: {
+        record: { recordId: "PMA0001", guidUrl },
+        knownCompanyHint: { candidateId, companyId },
+      },
+    });
+    expect(
+      await getDatabase().select().from(leads).where(eq(leads.campaignId, agent.id)),
+    ).toHaveLength(0);
   });
 
   it("discover_source (usaspending): quarantines strict source observations and dedupes reruns", async () => {
@@ -908,7 +1195,8 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     ];
     await getDatabase().insert(sourceSignals).values(
       rawSignals.map((rawName, index) => ({
-        sourceKey: index === 0 ? "exa_web_catalog" : "usaspending",
+        sourceKey:
+          index === 0 ? "sam_entity" : index === 2 ? "faa_drs_pma" : "usaspending",
         sourceLocator:
           index === 0
             ? "exa://web-catalog/atlas-precision"
@@ -926,8 +1214,15 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       })),
     );
     gatewayWithContents([planEnvelope([])]);
+    const synthesizeSourceSignal: NonNullable<
+      TickHandlerDeps["synthesizeSourceSignal"]
+    > = vi.fn(async (_db, signalId) => ({
+      status: "noop",
+      sourceKey: signalId,
+    }));
     const handler = createV1TickHandlerRegistry({
       ...depsWith({}),
+      synthesizeSourceSignal,
       searchOfficialDomains: async (identity) => {
         const domain = `${identity.legalName.split(/\s+/u)[0]!.toLowerCase()}.test`;
         return [
@@ -1030,6 +1325,10 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
         }),
       ]),
     );
+    expect(synthesizeSourceSignal).toHaveBeenCalledTimes(2);
+    expect(
+      vi.mocked(synthesizeSourceSignal).mock.calls.map((call) => call[1]).sort(),
+    ).toEqual(qualified.map((signal) => signal.id).sort());
     const atlas = qualified.find((signal) => signal.rawName.startsWith("Atlas"))!;
     const york = qualified.find((signal) => signal.rawName.startsWith("York"))!;
     expect((atlas.qualification as Record<string, unknown>)["evidence"]).toMatchObject({
@@ -1087,6 +1386,41 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
         expect.stringContaining("Size fit"),
       ]),
     );
+  });
+
+  it("leaves a qualified supported source waiting until a company is resolved", async () => {
+    const qualifier = await insertAgent({
+      key: "qualify-source-synthesis-wait-test",
+      agentType: "qualify_award_lead",
+    });
+    const [signal] = await getDatabase()
+      .insert(sourceSignals)
+      .values({
+        sourceKey: "sam_entity",
+        sourceLocator: "sam://entity-information/v4/entities/WAITINGSAM01",
+        sourceFingerprint: "qualification-synthesis-waiting",
+        agentId: qualifier.id,
+        rawName: "Waiting SAM Aerospace LLC",
+        sourcePayload: {},
+        status: "qualified",
+        companyId: null,
+      })
+      .returning({ id: sourceSignals.id });
+    const synthesizeSourceSignal: NonNullable<
+      TickHandlerDeps["synthesizeSourceSignal"]
+    > = vi.fn(async () => ({ status: "noop", sourceKey: "sam_entity" }));
+
+    await expect(
+      synthesizeQualifiedSignalIfReady(getDatabase(), signal!.id, {
+        synthesizeSourceSignal,
+      }),
+    ).resolves.toBe("waiting");
+    expect(synthesizeSourceSignal).not.toHaveBeenCalled();
+    const [waiting] = await getDatabase()
+      .select({ status: sourceSignals.status, companyId: sourceSignals.companyId })
+      .from(sourceSignals)
+      .where(eq(sourceSignals.id, signal!.id));
+    expect(waiting).toEqual({ status: "qualified", companyId: null });
   });
   it("qualify_award_lead corroborates identity across two first-party pages only", async () => {
     const qualifier = await insertAgent({
