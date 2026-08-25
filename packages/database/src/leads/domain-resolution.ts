@@ -115,16 +115,20 @@ export type ResolutionOutcome =
   | "no_domain_found"
   | "identity_mismatch";
 
+export type DomainCandidateSource = "qualified_signal" | "llm" | "fallback";
+
 /** One journaled probe against one candidate domain. */
 export interface DomainAttempt {
   readonly domain: string;
-  readonly source: "llm" | "fallback";
+  readonly source: DomainCandidateSource;
   readonly outcome: "verified" | "unreachable" | "identity_mismatch" | "low_confidence";
   readonly method?: "model-judge";
   readonly confidence?: number;
   readonly locationMatches?: boolean | "unknown";
   readonly identifierMatches?: boolean | "unknown";
   readonly relationship?: DomainRelationship;
+  /** Qualification evidence carried from a source-supplied possible domain. */
+  readonly qualificationEvidence?: unknown;
   readonly detail?: string;
 }
 
@@ -283,6 +287,7 @@ function identityHintsFor(lead: typeof leads.$inferSelect): LeadIdentityHints {
   return { location: lead.possibleLocation, uei, cage };
 }
 
+
 // ---------------------------------------------------------------------------
 // resolveLeadDomain.
 // ---------------------------------------------------------------------------
@@ -321,35 +326,70 @@ export async function resolveLeadDomain(
   } else if (lead.status !== "unresolved_lead" && lead.status !== "resolving") {
     throw new LeadNotResolvableError(leadId, lead.status);
   }
+  const log = (
+    level: "debug" | "warn" | "info",
+    message: string,
+    meta?: Record<string, unknown>,
+  ) => deps.logger?.[level](message, meta);
+  // --- A domain emitted by the qualified source is evidence, not a verified
+  // attachment. Probe it first and preserve its qualification trail; only
+  // after it fails identity verification do we spend on model proposals.
+  type Candidate = {
+    readonly domain: string;
+    readonly source: DomainCandidateSource;
+    readonly qualificationEvidence?: unknown;
+  };
+  const qualifiedDomain =
+    lead.possibleDomain === null ? null : normalizeCandidateDomain(lead.possibleDomain);
+  const qualificationEvidence =
+    lead.context["sourceQualification"] ?? lead.context["sourceSignal"] ?? null;
+  const candidates: Candidate[] =
+    qualifiedDomain === null
+      ? []
+      : [
+          {
+            domain: qualifiedDomain,
+            source: "qualified_signal",
+            ...(qualificationEvidence === null ? {} : { qualificationEvidence }),
+          },
+        ];
+  let proposerAttempted = false;
+  let nextCandidate = 0;
 
-  const log = (level: "debug" | "warn" | "info", message: string, meta?: Record<string, unknown>) =>
-    deps.logger?.[level](message, meta);
-
-  // --- Candidate list: LLM-proposed, deterministic fallbacks only when the
-  // model path is unusable.
-  let candidates: { readonly domain: string; readonly source: "llm" | "fallback" }[] = [];
-  try {
-    const proposed = await deps.judge.proposeDomains(lead.rawName, lead.possibleLocation);
-    candidates = dedupeDomains(proposed)
-      .slice(0, maxCandidates)
-      .map((domain) => ({ domain, source: "llm" as const }));
-    if (candidates.length === 0) log("warn", "proposeDomains returned no usable domains");
-  } catch (error) {
-    log("warn", "proposeDomains failed; using deterministic fallbacks", {
-      error: error instanceof Error ? error.message : String(error),
-    });
-  }
-  if (candidates.length === 0) {
-    candidates = fallbackDomainsFor(lead.rawName)
-      .slice(0, maxCandidates)
-      .map((domain) => ({ domain, source: "fallback" as const }));
-  }
-
-  // --- Probe + identity-check each candidate.
+  // --- Probe + identity-check candidates. Proposals/fallbacks are appended
+  // lazily so a verified qualified signal never invokes proposeDomains.
   const attempts: DomainAttempt[] = [];
   let sawReachablePage = false;
 
-  for (const candidate of candidates) {
+  while (true) {
+    if (nextCandidate >= candidates.length) {
+      if (proposerAttempted || candidates.length >= maxCandidates) break;
+      proposerAttempted = true;
+      const knownDomains = new Set(candidates.map((candidate) => candidate.domain));
+      try {
+        const proposed = await deps.judge.proposeDomains(lead.rawName, lead.possibleLocation);
+        for (const domain of dedupeDomains(proposed)) {
+          if (knownDomains.has(domain) || candidates.length >= maxCandidates) continue;
+          knownDomains.add(domain);
+          candidates.push({ domain, source: "llm" });
+        }
+        if (candidates.length === 0) log("warn", "proposeDomains returned no usable domains");
+      } catch (error) {
+        log("warn", "proposeDomains failed; using deterministic fallbacks", {
+          error: error instanceof Error ? error.message : String(error),
+        });
+      }
+      if (nextCandidate >= candidates.length) {
+        for (const domain of fallbackDomainsFor(lead.rawName)) {
+          if (knownDomains.has(domain) || candidates.length >= maxCandidates) continue;
+          knownDomains.add(domain);
+          candidates.push({ domain, source: "fallback" });
+        }
+      }
+      if (nextCandidate >= candidates.length) break;
+    }
+    const candidate = candidates[nextCandidate]!;
+    nextCandidate += 1;
     const url = `https://${candidate.domain}`;
     let probe: DomainProbeResult;
     try {
@@ -365,6 +405,9 @@ export async function resolveLeadDomain(
       attempts.push({
         domain: candidate.domain,
         source: candidate.source,
+        ...(candidate.qualificationEvidence === undefined
+          ? {}
+          : { qualificationEvidence: candidate.qualificationEvidence }),
         outcome: "unreachable",
         detail: probe.error,
       });
@@ -413,6 +456,9 @@ export async function resolveLeadDomain(
       attempts.push({
         domain: candidate.domain,
         source: candidate.source,
+        ...(candidate.qualificationEvidence === undefined
+          ? {}
+          : { qualificationEvidence: candidate.qualificationEvidence }),
         outcome: "verified",
         method,
         confidence,
@@ -444,6 +490,9 @@ export async function resolveLeadDomain(
     attempts.push({
       domain: candidate.domain,
       source: candidate.source,
+      ...(candidate.qualificationEvidence === undefined
+        ? {}
+        : { qualificationEvidence: candidate.qualificationEvidence }),
       outcome: judgmentOutcome(confidence, reason),
       method,
       confidence,

@@ -100,7 +100,12 @@ const noopLogger = {
 async function seedLead(
   db: Database,
   rawName: string,
-  identity: { location?: string; identifiers?: unknown[] } = {},
+  identity: {
+    location?: string;
+    identifiers?: unknown[];
+    domain?: string;
+    qualification?: unknown;
+  } = {},
 ): Promise<string> {
   const [row] = await db
     .insert(leads)
@@ -108,11 +113,15 @@ async function seedLead(
       campaignId: campaignId,
       rawName,
       status: "unresolved_lead",
+      possibleDomain: identity.domain ?? null,
       possibleLocation: identity.location ?? null,
       possibleIdentifiers: identity.identifiers ?? [],
       context: {
         sourceLocator: `usaspending://spending_by_award?recipient_name=${encodeURIComponent(rawName)}`,
         awardCount: 3,
+        ...(identity.qualification === undefined
+          ? {}
+          : { sourceQualification: identity.qualification }),
       },
     })
     .returning({ id: leads.id });
@@ -230,6 +239,80 @@ describe.skipIf(!DB_TESTS_ENABLED)("lead domain resolution (DB)", () => {
     const again = await resolveLeadDomain(db, leadId, deps);
     expect(again.outcome).toBe("already_resolved");
     expect(again.companyId).toBe(company.id);
+  });
+
+  it("verifies a qualified zitecusa.com signal before any domain proposal", async () => {
+    const qualification = { queryVersion: "strict-v2", awardCount: 4, verified: true };
+    const leadId = await seedLead(db, "ZITEC, INC", {
+      domain: "zitecusa.com",
+      location: "Niceville, FL",
+      identifiers: [{ type: "cage", value: "1R9V9" }],
+      qualification,
+    });
+    expect(
+      (await db.select().from(leads).where(eq(leads.id, leadId)).limit(1))[0]?.possibleDomain,
+    ).toBe("zitecusa.com");
+    let proposalCalls = 0;
+    const result = await resolveLeadDomain(db, leadId, {
+      prober: fakeProber({
+        "zitecusa.com": "ZITEC, INC Niceville, FL defense manufacturing CAGE 1R9V9.",
+      }),
+      judge: {
+        async proposeDomains() {
+          proposalCalls += 1;
+          return ["zitecinc.com"];
+        },
+        async judgeIdentity() {
+          return {
+            matches: true,
+            confidence: 0.99,
+            locationMatches: true,
+            identifierMatches: true,
+            relationship: "exact",
+            reason: "CAGE and Niceville location match",
+          };
+        },
+      },
+      logger: noopLogger,
+    });
+    expect(result.attempts[0]?.domain).toBe("zitecusa.com");
+    expect(result).toMatchObject({ outcome: "domain_verified", domain: "zitecusa.com" });
+    expect(proposalCalls).toBe(0);
+    expect(result.attempts[0]).toMatchObject({
+      source: "qualified_signal",
+      qualificationEvidence: qualification,
+    });
+    companyIds.push(result.companyId!);
+  });
+
+  it("uses the proposer when no qualified possible_domain exists", async () => {
+    const leadId = await seedLead(db, "Proposer Gearworks LLC");
+    let proposalCalls = 0;
+    const result = await resolveLeadDomain(db, leadId, {
+      prober: fakeProber({
+        "proposergearworks.com": "Proposer Gearworks LLC precision gears.",
+      }),
+      judge: {
+        async proposeDomains() {
+          proposalCalls += 1;
+          return ["proposergearworks.com"];
+        },
+        async judgeIdentity() {
+          return {
+            matches: true,
+            confidence: 0.9,
+            locationMatches: "unknown",
+            identifierMatches: "unknown",
+            relationship: "exact",
+            reason: "name matches",
+          };
+        },
+      },
+      logger: noopLogger,
+    });
+    expect(result.outcome).toBe("domain_verified");
+    expect(proposalCalls).toBe(1);
+    companyIds.push(result.companyId!);
   });
 
   it("re-verifies an already-resolved lead only under force", async () => {
