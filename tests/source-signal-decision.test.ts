@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   deterministicSourceSignalDecision,
   evaluateOfficialSiteAuthenticity,
+  type AuthoritativeSourceEvidence,
   type IdentityPage,
   type SourceSignalClassification,
   type SourceSignalTargetDecision,
@@ -120,6 +121,32 @@ describe("deterministic generic source-signal target policy", () => {
         "manufacturer_evidence_not_page_grounded",
         "aerospace_defense_evidence_not_page_grounded",
       ],
+    });
+  });
+
+  it("does not accept SAM registration as physical-manufacturing proof", () => {
+    const samUrl = "sam://entity-information/v4/entities/ACTIVE000001?naics=336413";
+    const samText =
+      '"legalName": "SAM Registered Aerospace LLC", "matchedNaicsCodes": ["336413"]';
+    const samEvidence: AuthoritativeSourceEvidence = {
+      sourceKey: "sam_entity",
+      url: samUrl,
+      text: samText,
+      allowedClaims: ["aerospace", "headquarters"],
+      metadata: { country: "United States", uei: "ACTIVE000001" },
+    };
+    const decision = deterministicSourceSignalDecision(
+      verifiedManufacturer({
+        manufacturerEvidence: { excerpt: samText, url: samUrl },
+        aerospaceDefenseEvidence: { excerpt: samText, url: samUrl },
+      }),
+      PAGE_TEXT,
+      [PAGE_URL],
+      [samEvidence],
+    );
+    expect(decision).toMatchObject({
+      targetDecision: "no_target",
+      reasons: ["manufacturer_evidence_not_page_grounded"],
     });
   });
 });

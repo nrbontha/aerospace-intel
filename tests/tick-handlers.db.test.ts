@@ -1440,18 +1440,24 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     const rawSignals = [
       "Atlas Precision Components LLC",
       "Orbit Consulting LLC",
-      "York Precision Systems",
+      "RAM Aerospace Inc",
       "Aircraft Parts Distributor LLC",
       "Identity Mismatch Manufacturing LLC",
     ];
     await getDatabase().insert(sourceSignals).values(
       rawSignals.map((rawName, index) => ({
         sourceKey:
-          index === 0 ? "sam_entity" : index === 2 ? "faa_drs_pma" : "usaspending",
+          index === 0
+            ? "sam_entity"
+            : index === 2 || index === 4
+              ? "faa_drs_pma"
+              : "usaspending",
         sourceLocator:
           index === 0
-            ? "exa://web-catalog/atlas-precision"
-            : `usaspending://qualification/${index}`,
+            ? "sam://entity-information/v4/entities/QUALIFY0?naics=336413"
+            : index === 2 || index === 4
+              ? `https://drs.faa.gov/browse/PMA/doctypeDetails/${index === 2 ? "RAM-PQ00076WB" : "MISMATCH-PQ99999"}`
+              : `usaspending://qualification/${index}`,
         sourceFingerprint: `qualification-test-${index}`,
         agentId: qualifier.id,
         rawName,
@@ -1461,7 +1467,31 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
         awardCount: 1,
         awardValue: "1000.00",
         freshestAward: new Date("2026-01-01T00:00:00.000Z"),
-        sourcePayload: { award: index },
+        sourcePayload:
+          index === 2 || index === 4
+            ? {
+                record: {
+                  status: "Current",
+                  holderName: rawName,
+                  holderNumber: index === 2 ? "PQ00076WB" : "PQ99999ZZ",
+                  fullAddress: `${rawName}, Huntsville, AL 35801`,
+                  pmaPartNumber: index === 2 ? "RAM-305-17" : "MISMATCH-1",
+                  partName: "Engine actuator bracket",
+                  make: "Pratt & Whitney Canada",
+                  models: ["PW305A", "PW305B"],
+                  approvalBasis: "Test and computation",
+                  renderedSourceText:
+                    index === 2
+                      ? "Status: Current. Holder: RAM Aerospace Inc. Holder number: PQ00076WB. PMA part RAM-305-17, Engine actuator bracket. Make: Pratt & Whitney Canada. Models: PW305A, PW305B. Approval basis: Test and computation."
+                      : "Status: Current. Holder: Identity Mismatch Manufacturing LLC. Holder number: PQ99999ZZ. PMA part MISMATCH-1. Make: Pratt & Whitney Canada. Model: PW305A.",
+                },
+              }
+            : index === 0
+              ? {
+                  matchedNaicsCodes: ["336413"],
+                  rawEntity: { ueiSAM: "QUALIFY0", registrationStatus: "Active" },
+                }
+              : { award: index },
       })),
     );
     gatewayWithContents([planEnvelope([])]);
@@ -1510,11 +1540,9 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
         }),
       },
       classifySourceSignal: async ({ legalName, pageUrl }) => {
-        const manufacturer =
-          legalName.includes("Atlas") || legalName.includes("York");
-        const aerospaceDefenseRelevance =
-          legalName.includes("Atlas") || legalName.includes("York");
-        const needsMoreResearch = legalName.includes("York");
+        const manufacturer = legalName.includes("Atlas");
+        const aerospaceDefenseRelevance = legalName.includes("Atlas");
+        const needsMoreResearch = legalName.includes("RAM");
         return sourceSignalClassification(pageUrl, {
           manufacturer,
           aerospaceDefenseRelevance,
@@ -1570,7 +1598,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
           companyId: expect.any(String),
         }),
         expect.objectContaining({
-          rawName: "York Precision Systems",
+          rawName: "RAM Aerospace Inc",
           leadId: expect.any(String),
           companyId: expect.any(String),
         }),
@@ -1581,7 +1609,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       vi.mocked(synthesizeSourceSignal).mock.calls.map((call) => call[1]).sort(),
     ).toEqual(qualified.map((signal) => signal.id).sort());
     const atlas = qualified.find((signal) => signal.rawName.startsWith("Atlas"))!;
-    const york = qualified.find((signal) => signal.rawName.startsWith("York"))!;
+    const ram = qualified.find((signal) => signal.rawName.startsWith("RAM"))!;
     expect((atlas.qualification as Record<string, unknown>)["evidence"]).toMatchObject({
       modelProposal: {
         manufacturerEvidence: {
@@ -1591,10 +1619,64 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       },
       deterministicDecision: { targetDecision: "yes_target" },
     });
-    expect((york.qualification as Record<string, unknown>)["evidence"]).toMatchObject({
+    expect((ram.qualification as Record<string, unknown>)["evidence"]).toMatchObject({
+      policyClassification: {
+        manufacturer: true,
+        aerospaceDefenseRelevance: true,
+        ownershipType: "unknown",
+        sizeFit: "unknown",
+        proprietarySignals: expect.arrayContaining([
+          "FAA PMA",
+          "FAA PMA holder PQ00076WB",
+          "FAA PMA part RAM-305-17",
+        ]),
+        manufacturerEvidence: {
+          url: "https://drs.faa.gov/browse/PMA/doctypeDetails/RAM-PQ00076WB",
+          excerpt: expect.stringContaining("PMA part RAM-305-17"),
+        },
+      },
       deterministicDecision: {
         targetDecision: "needs_more_research",
         reasons: ["ownership_requires_research", "size_requires_research"],
+      },
+      sourceContributions: {
+        authoritativeOverride: {
+          sourceKey: "faa_drs_pma",
+          holderNumber: "PQ00076WB",
+          ownershipProven: false,
+          sizeProven: false,
+        },
+      },
+    });
+    expect(ram.qualification).toMatchObject({
+      modelProposal: {
+        manufacturer: false,
+        aerospaceDefenseRelevance: false,
+      },
+      deterministicDecision: {
+        targetDecision: "needs_more_research",
+      },
+      sourceContributions: {
+        officialIdentity: { passed: true },
+        authoritativeOverride: {
+          sourceKey: "faa_drs_pma",
+          url: "https://drs.faa.gov/browse/PMA/doctypeDetails/RAM-PQ00076WB",
+        },
+      },
+    });
+    const identityMismatch = signals.find((signal) =>
+      signal.rawName.startsWith("Identity Mismatch"),
+    )!;
+    expect(identityMismatch).toMatchObject({
+      sourceKey: "faa_drs_pma",
+      status: "rejected",
+      leadId: null,
+    });
+    expect(identityMismatch.qualification).toMatchObject({
+      modelProposal: null,
+      deterministicDecision: {
+        targetDecision: "no_target",
+        reasons: ["official_identity_not_verified"],
       },
     });
     expect(signals.filter((signal) => signal.status === "rejected")).toHaveLength(3);
@@ -1628,10 +1710,10 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
         }),
       ]),
     );
-    const yorkCandidate = routedCandidates.find(
-      (candidate) => candidate.companyId === york.companyId,
+    const ramCandidate = routedCandidates.find(
+      (candidate) => candidate.companyId === ram.companyId,
     )!;
-    expect(yorkCandidate.rationale.unknowns).toEqual(
+    expect(ramCandidate.rationale.unknowns).toEqual(
       expect.arrayContaining([
         expect.stringContaining("Ownership"),
         expect.stringContaining("Size fit"),

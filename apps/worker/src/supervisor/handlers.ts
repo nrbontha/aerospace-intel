@@ -138,6 +138,16 @@ export interface PageGroundedClaim {
   readonly url: string;
 }
 
+export type GroundedTargetClaim = "manufacturer" | "aerospace" | "headquarters";
+
+export interface AuthoritativeSourceEvidence {
+  readonly sourceKey: string;
+  readonly url: string;
+  readonly text: string;
+  readonly allowedClaims: readonly GroundedTargetClaim[];
+  readonly metadata: Record<string, unknown>;
+}
+
 export interface SourceSignalClassification {
   readonly manufacturer: boolean;
   readonly aerospaceDefenseRelevance: boolean;
@@ -163,6 +173,7 @@ export interface SourceSignalClassifierInput {
   readonly legalName: string;
   readonly pageText: string;
   readonly pageUrl: string;
+  readonly authoritativeEvidence: readonly AuthoritativeSourceEvidence[];
 }
 
 export type SourceSignalClassifier = (
@@ -2757,6 +2768,115 @@ const MAX_SOURCE_SIGNALS_PER_TICK = 5;
 const MAX_EXA_PROPOSALS_PER_SIGNAL = 5;
 const MAX_CLASSIFICATION_TEXT_CHARS = 12_000;
 
+function objectRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function nullableTextField(
+  record: Record<string, unknown>,
+  key: string,
+): string | null {
+  const value = record[key];
+  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
+}
+
+function stringArrayField(
+  record: Record<string, unknown>,
+  key: string,
+): string[] {
+  const value = record[key];
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === "string" && item.trim() !== "")
+    : [];
+}
+
+function keyFreeSourceLocator(locator: string): string {
+  try {
+    const url = new URL(locator);
+    for (const key of [...url.searchParams.keys()]) {
+      if (/(?:api[-_]?key|token|secret|credential)/iu.test(key)) {
+        url.searchParams.delete(key);
+      }
+    }
+    return url.toString();
+  } catch {
+    return locator.replace(
+      /([?&](?:api[-_]?key|token|secret|credential)=)[^&]*/giu,
+      "$1[redacted]",
+    );
+  }
+}
+
+export function buildAuthoritativeSourceEvidence(
+  signal: SourceSignal,
+): AuthoritativeSourceEvidence[] {
+  if (signal.sourceKey === "faa_drs_pma") {
+    const record = objectRecord(signal.sourcePayload["record"]);
+    if (record === null) return [];
+    const renderedSourceText = nullableTextField(record, "renderedSourceText");
+    if (renderedSourceText === null) return [];
+    return [
+      {
+        sourceKey: signal.sourceKey,
+        url: keyFreeSourceLocator(signal.sourceLocator),
+        text: renderedSourceText,
+        allowedClaims: ["manufacturer", "aerospace", "headquarters"],
+        metadata: {
+          status: nullableTextField(record, "status"),
+          holderName: nullableTextField(record, "holderName"),
+          holderNumber: nullableTextField(record, "holderNumber"),
+          fullAddress: nullableTextField(record, "fullAddress"),
+          pmaPartNumber: nullableTextField(record, "pmaPartNumber"),
+          partName: nullableTextField(record, "partName"),
+          make: nullableTextField(record, "make"),
+          models: stringArrayField(record, "models"),
+          approvalBasis: nullableTextField(record, "approvalBasis"),
+        },
+      },
+    ];
+  }
+  if (signal.sourceKey === "sam_entity") {
+    const locator = keyFreeSourceLocator(signal.sourceLocator);
+    const sourceText = JSON.stringify(
+      {
+        matchedNaicsCodes: signal.sourcePayload["matchedNaicsCodes"] ?? [],
+        rawEntity: signal.sourcePayload["rawEntity"] ?? {},
+        identity: {
+          legalName: signal.rawName,
+          uei: signal.uei,
+          cage: signal.cage,
+          city: signal.city,
+          state: signal.state,
+          country: signal.country,
+        },
+      },
+      null,
+      2,
+    );
+    return [
+      {
+        sourceKey: signal.sourceKey,
+        url: locator,
+        text: sourceText,
+        // SAM registration corroborates identity, US location, and industry
+        // classification. It never proves physical manufacturing or size.
+        allowedClaims: ["aerospace", "headquarters"],
+        metadata: {
+          matchedNaicsCodes: signal.sourcePayload["matchedNaicsCodes"] ?? [],
+          uei: signal.uei,
+          cage: signal.cage,
+          city: signal.city,
+          state: signal.state,
+          country: signal.country,
+        },
+      },
+    ];
+  }
+  return [];
+}
+
 const pageGroundedClaimSchema = z.strictObject({
   excerpt: z.string().trim().min(1).max(2_000),
   url: z.string().url().max(2_000),
@@ -2788,32 +2908,35 @@ const sourceSignalClassificationSchema = z
       context.addIssue({
         code: "custom",
         path: ["manufacturerEvidence"],
-        message: "manufacturer=true requires page-grounded evidence",
+        message: "manufacturer=true requires grounded evidence",
       });
     }
     if (value.aerospaceDefenseRelevance && value.aerospaceDefenseEvidence === null) {
       context.addIssue({
         code: "custom",
         path: ["aerospaceDefenseEvidence"],
-        message: "aerospaceDefenseRelevance=true requires page-grounded evidence",
+        message: "aerospaceDefenseRelevance=true requires grounded evidence",
       });
     }
   });
 
 const SOURCE_SIGNAL_CLASSIFIER_PROMPT =
   "You classify a company after Exa discovery and verified first-party website identity. " +
-  "The original discovery source is only a weak signal; use only the supplied official-site pages. " +
-  "manufacturer=true only when a page says the company makes, manufactures, machines, fabricates, " +
-  "assembles, or builds physical products. aerospaceDefenseRelevance=true only for explicit aerospace, " +
-  "aviation, space, defense, military, or named-program evidence. For each true claim, copy an exact " +
-  "excerpt and its [Source URL]; otherwise return null evidence. Determine headquartersCountry, " +
-  "ownershipType (independent|founder_family|pe_owned|strategic_parent|public|unknown), sizeFit " +
-  "(likely_under_50m|likely_over_50m|unknown), and proprietarySignals. Unknown ownership or size " +
-  "is uncertainty, never positive evidence. Propose targetDecision yes_target only for a verified US " +
-  "aerospace/defense physical-product manufacturer that is not a distributor/service business, has no " +
-  "known PE/strategic/public owner, and is not clearly over $50m. Use needs_more_research only when the " +
-  "company is a real US aerospace/defense manufacturer but ownership or size remains unknown; all " +
-  "other failures are no_target. Reply with exactly one raw JSON object and no markdown.";
+  "Use the separately delimited official-site pages and authoritative government-source evidence. " +
+  "USAspending is only a weak discovery signal. FAA PMA records may prove current physical-part " +
+  "manufacturing and aerospace relevance. SAM may corroborate identity, US location, and NAICS/PSC " +
+  "classification, but SAM alone never proves physical manufacturing, ownership, or size. " +
+  "manufacturer=true only when an allowed source says the company makes, manufactures, machines, " +
+  "fabricates, assembles, or holds a current FAA PMA for a physical part. aerospaceDefenseRelevance=true " +
+  "requires explicit aerospace/aviation/space/defense evidence or an FAA PMA make/model record. For each " +
+  "true claim, copy an exact excerpt and its [Source URL]; otherwise return null evidence. Determine " +
+  "headquartersCountry, ownershipType (independent|founder_family|pe_owned|strategic_parent|public|unknown), " +
+  "sizeFit (likely_under_50m|likely_over_50m|unknown), and proprietarySignals. FAA PMA does not prove " +
+  "independence, ownership, size, revenue, or sole-source status. Unknown ownership or size is uncertainty, " +
+  "never positive evidence. Propose yes_target only for a verified US aerospace/defense physical-product " +
+  "manufacturer that is not distributor/service, has no known PE/strategic/public owner, and is not clearly " +
+  "over $50m. Use needs_more_research when manufacturer+aerospace+US pass but ownership or size is unknown; " +
+  "all other failures are no_target. Reply with exactly one raw JSON object and no markdown.";
 
 function createSourceSignalClassifier(model: ResolvedModelDeps): {
   readonly classify: SourceSignalClassifier;
@@ -2822,16 +2945,25 @@ function createSourceSignalClassifier(model: ResolvedModelDeps): {
   let costUsd = 0;
   return {
     classify: async (input) => {
+      const authoritativeText = input.authoritativeEvidence
+        .map(
+          (source) =>
+            `[Source key: ${source.sourceKey}]\n[Source URL: ${source.url}]\n` +
+            `[Allowed claims: ${source.allowedClaims.join(", ")}]\n${source.text}`,
+        )
+        .join("\n\n")
+        .slice(0, MAX_CLASSIFICATION_TEXT_CHARS);
       const result = await model.client.generateStructured({
         route: "fast",
         models: model.models,
-        schemaName: "source_signal_target_classification_v2",
+        schemaName: "source_signal_target_classification_v3",
         schema: sourceSignalClassificationSchema,
         systemPrompt: SOURCE_SIGNAL_CLASSIFIER_PROMPT,
         prompt:
           `Company legal name: ${input.legalName}` +
           `\nPrimary verified page URL: ${input.pageUrl}` +
-          `\n\nVerified official-site pages:\n"""\n${input.pageText.slice(0, MAX_CLASSIFICATION_TEXT_CHARS)}\n"""`,
+          `\n\nVerified official-site pages:\n<official_pages>\n${input.pageText.slice(0, MAX_CLASSIFICATION_TEXT_CHARS)}\n</official_pages>` +
+          `\n\nAuthoritative source evidence:\n<authoritative_sources>\n${authoritativeText}\n</authoritative_sources>`,
         temperature: 0,
         maxOutputTokens: 1_024,
         maxAttempts: 1,
@@ -2973,17 +3105,146 @@ function identityJudgmentAccepts(judgment: IdentityJudgment): boolean {
     (judgment.relationship === "exact" || judgment.relationship === "parent_brand")
   );
 }
-
 function isPageGroundedClaim(
   claim: PageGroundedClaim | null,
+  claimType: GroundedTargetClaim,
   pageText: string,
   fetchedUrls: readonly string[],
+  authoritativeEvidence: readonly AuthoritativeSourceEvidence[] = [],
+  officialPages: readonly Pick<IdentityPage, "finalUrl" | "text">[] = [],
 ): boolean {
-  return (
-    claim !== null &&
-    normalizedContains(pageText, claim.excerpt) &&
-    fetchedUrls.includes(claim.url)
+  if (claim === null) return false;
+  const officialPage = officialPages.find((page) => page.finalUrl === claim.url);
+  if (officialPage !== undefined) return normalizedContains(officialPage.text, claim.excerpt);
+  if (
+    officialPages.length === 0 &&
+    fetchedUrls.includes(claim.url) &&
+    normalizedContains(pageText, claim.excerpt)
+  ) {
+    return true;
+  }
+  const authority = authoritativeEvidence.find(
+    (source) =>
+      source.url === claim.url &&
+      source.allowedClaims.includes(claimType),
   );
+  return authority !== undefined && normalizedContains(authority.text, claim.excerpt);
+}
+
+function officialAddressConsistent(fullAddress: string, pageText: string): boolean {
+  const zip = /\b\d{5}(?:-\d{4})?\b/u.exec(fullAddress)?.[0];
+  if (zip !== undefined && pageText.includes(zip)) return true;
+  const cityState =
+    /(?:^|,)\s*([A-Za-z][A-Za-z .'-]{1,60}),\s*([A-Z]{2})\s+\d{5}(?:-\d{4})?\b/u.exec(
+      fullAddress,
+    );
+  if (cityState?.[1] === undefined || cityState[2] === undefined) return false;
+  const normalizedPage = normalizeText(pageText);
+  return (
+    normalizedPage.includes(normalizeText(cityState[1])) &&
+    new RegExp(`\\b${cityState[2]}\\b`, "u").test(pageText)
+  );
+}
+
+function excerptAround(text: string, term: string): string {
+  const index = text.toLocaleLowerCase("en-US").indexOf(term.toLocaleLowerCase("en-US"));
+  if (index < 0) return text.slice(0, 2_000).trim();
+  return text
+    .slice(Math.max(0, index - 500), Math.min(text.length, index + term.length + 1_500))
+    .trim();
+}
+
+interface AuthoritativeClassificationSynthesis {
+  readonly classification: SourceSignalClassification;
+  readonly contributions: Record<string, unknown>;
+}
+
+export function synthesizeAuthoritativeClassification(
+  signal: SourceSignal,
+  modelProposal: SourceSignalClassification,
+  authoritativeEvidence: readonly AuthoritativeSourceEvidence[],
+  officialPageText: string,
+): AuthoritativeClassificationSynthesis {
+  const baseContributions = {
+    officialWebsite: {
+      manufacturer: modelProposal.manufacturer,
+      aerospaceDefenseRelevance: modelProposal.aerospaceDefenseRelevance,
+      headquartersCountry: modelProposal.headquartersCountry,
+      ownershipType: modelProposal.ownershipType,
+      sizeFit: modelProposal.sizeFit,
+    },
+    authoritativeSources: authoritativeEvidence.map((source) => ({
+      sourceKey: source.sourceKey,
+      url: source.url,
+      allowedClaims: source.allowedClaims,
+      metadata: source.metadata,
+    })),
+  };
+  if (signal.sourceKey !== "faa_drs_pma" || authoritativeEvidence.length === 0) {
+    return { classification: modelProposal, contributions: baseContributions };
+  }
+
+  const faa = authoritativeEvidence[0]!;
+  const status = nullableTextField(faa.metadata, "status");
+  const holderNumber = nullableTextField(faa.metadata, "holderNumber");
+  const part =
+    nullableTextField(faa.metadata, "pmaPartNumber") ??
+    nullableTextField(faa.metadata, "partName");
+  const make = nullableTextField(faa.metadata, "make");
+  const models = stringArrayField(faa.metadata, "models");
+  const isCurrent =
+    status !== null &&
+    /\b(?:current|active)\b/iu.test(status) &&
+    !/\b(?:inactive|expired|cancelled|superseded)\b/iu.test(status);
+  if (!isCurrent || holderNumber === null || part === null || make === null || models.length === 0) {
+    return { classification: modelProposal, contributions: baseContributions };
+  }
+
+  const excerpt = excerptAround(faa.text, part);
+  const fullAddress = nullableTextField(faa.metadata, "fullAddress");
+  const usAddressConsistent =
+    fullAddress !== null && officialAddressConsistent(fullAddress, officialPageText);
+  const proprietarySignals = [
+    ...new Set([
+      ...modelProposal.proprietarySignals,
+      "FAA PMA",
+      `FAA PMA holder ${holderNumber}`,
+      `FAA PMA part ${part}`,
+    ]),
+  ];
+  const classification: SourceSignalClassification = {
+    ...modelProposal,
+    manufacturer: true,
+    aerospaceDefenseRelevance: true,
+    businessModel:
+      modelProposal.businessModel === "unknown"
+        ? "manufacturer"
+        : modelProposal.businessModel,
+    ...(usAddressConsistent ? { headquartersCountry: "United States" } : {}),
+    proprietarySignals,
+    manufacturerEvidence: { excerpt, url: faa.url },
+    aerospaceDefenseEvidence: { excerpt, url: faa.url },
+  };
+  return {
+    classification,
+    contributions: {
+      ...baseContributions,
+      authoritativeOverride: {
+        sourceKey: faa.sourceKey,
+        url: faa.url,
+        applied: ["manufacturer", "aerospace", "proprietarySignals"],
+        ...(usAddressConsistent ? { headquartersCountry: "United States" } : {}),
+        excerpt,
+        holderNumber,
+        part,
+        make,
+        models,
+        ownershipProven: false,
+        sizeProven: false,
+        soleSourceProven: false,
+      },
+    },
+  };
 }
 
 export interface DeterministicSourceSignalDecision {
@@ -3022,6 +3283,9 @@ async function recordTargetDecision(
       qualification: sql`${sourceSignals.qualification} || ${JSON.stringify({
         modelProposal: input.modelProposal,
         deterministicDecision: input.deterministicDecision,
+        ...(input.evidence["sourceContributions"] === undefined
+          ? {}
+          : { sourceContributions: input.evidence["sourceContributions"] }),
       })}::jsonb`,
       updatedAt: new Date(),
     })
@@ -3061,16 +3325,34 @@ export function deterministicSourceSignalDecision(
   classification: SourceSignalClassification,
   pageText: string,
   fetchedUrls: readonly string[],
+  authoritativeEvidence: readonly AuthoritativeSourceEvidence[] = [],
+  officialPages: readonly Pick<IdentityPage, "finalUrl" | "text">[] = [],
 ): DeterministicSourceSignalDecision {
   const noTargetReasons: string[] = [];
   if (!classification.manufacturer) noTargetReasons.push("manufacturer_not_verified");
-  else if (!isPageGroundedClaim(classification.manufacturerEvidence, pageText, fetchedUrls)) {
+  else if (
+    !isPageGroundedClaim(
+      classification.manufacturerEvidence,
+      "manufacturer",
+      pageText,
+      fetchedUrls,
+      authoritativeEvidence,
+      officialPages,
+    )
+  ) {
     noTargetReasons.push("manufacturer_evidence_not_page_grounded");
   }
   if (!classification.aerospaceDefenseRelevance) {
     noTargetReasons.push("aerospace_defense_not_verified");
   } else if (
-    !isPageGroundedClaim(classification.aerospaceDefenseEvidence, pageText, fetchedUrls)
+    !isPageGroundedClaim(
+      classification.aerospaceDefenseEvidence,
+      "aerospace",
+      pageText,
+      fetchedUrls,
+      authoritativeEvidence,
+      officialPages,
+    )
   ) {
     noTargetReasons.push("aerospace_defense_evidence_not_page_grounded");
   }
@@ -3347,16 +3629,36 @@ async function qualifySourceSignal(input: {
     }
 
     const corroborationUrl = officiality.corroborationUrl;
+    const authoritativeEvidence = buildAuthoritativeSourceEvidence(input.signal);
     const modelProposal = await input.classifier({
       legalName: input.signal.rawName,
       pageText,
       pageUrl: corroborationUrl ?? homepage.finalUrl,
+      authoritativeEvidence,
     });
-    const deterministicDecision = deterministicSourceSignalDecision(
+    const authoritativeSynthesis = synthesizeAuthoritativeClassification(
+      input.signal,
       modelProposal,
+      authoritativeEvidence,
+      pageText,
+    );
+    const policyClassification = authoritativeSynthesis.classification;
+    const deterministicDecision = deterministicSourceSignalDecision(
+      policyClassification,
       pageText,
       identityUrls,
+      authoritativeEvidence,
+      pages,
     );
+    const sourceContributions = {
+      ...authoritativeSynthesis.contributions,
+      officialIdentity: {
+        passed: true,
+        judgment,
+        officiality,
+        urls: identityUrls,
+      },
+    };
     const evidence = {
       proposal: {
         domain: proposal.domain,
@@ -3368,6 +3670,14 @@ async function qualifySourceSignal(input: {
       identity: judgment,
       identityUrls,
       corroborationUrl,
+      authoritativeEvidence: authoritativeEvidence.map((source) => ({
+        sourceKey: source.sourceKey,
+        url: source.url,
+        allowedClaims: source.allowedClaims,
+        metadata: source.metadata,
+      })),
+      policyClassification,
+      sourceContributions,
       attempts,
     };
     if (deterministicDecision.targetDecision === "no_target") {
