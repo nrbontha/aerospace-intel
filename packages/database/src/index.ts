@@ -17,4 +17,5 @@ export * from "./candidates/index.js";
 export * from "./leads/index.js";
 export * from "./golden/index.js";
 export * from "./agents/index.js";
+export * from "./source-signals/index.js";
 export * from "./experiments/index.js";

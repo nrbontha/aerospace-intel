@@ -1,6 +1,6 @@
 "use client";
-
 import { Metric } from "@asi/ui";
+import Link from "next/link";
 
 import type { AgentsOverview } from "@/lib/agents-api";
 
@@ -114,6 +114,31 @@ export function LiveStrip({ loading, overview, error }: LiveStripProps) {
             overview.lastFind === null
               ? "No agent has produced a find yet."
               : `by ${overview.lastFind.agentName} (${overview.lastFind.agentKey})`
+          }
+        />
+        <Metric
+          label="Source signals"
+          value={`${overview.sourceSignals.queuedQualification} queued · ${overview.sourceSignals.qualifying} qualifying`}
+          detail={
+            <>
+              <span>
+                Qualified today: <Link href="/feed">{overview.sourceSignals.qualifiedToday}</Link>
+              </span>
+              <span> · Rejected today: {overview.sourceSignals.rejectedToday}</span>
+              <span> · Quarantined legacy: {overview.sourceSignals.quarantined}</span>
+              <span>
+                {" "}
+                · Weak signals are not Targets until official-site qualification
+                passes.
+              </span>
+              {overview.sourceSignals.latestQualification === null ? null : (
+                <span>
+                  {" "}
+                  · Latest qualification{" "}
+                  {formatRelativeTime(overview.sourceSignals.latestQualification)}
+                </span>
+              )}
+            </>
           }
         />
       </div>

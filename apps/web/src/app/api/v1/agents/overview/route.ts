@@ -1,4 +1,6 @@
 import { listAgents } from "@asi/database";
+import { getDatabase } from "@asi/database/client";
+import { sql } from "drizzle-orm";
 import type { NextRequest } from "next/server";
 
 import { jsonSuccess } from "@/lib/api";
@@ -11,7 +13,72 @@ import {
   getLastFind,
   getOpenProposalCount,
   handleAgentRouteError,
+  iso,
 } from "@/app/api/v1/agents/shared";
+
+type SourceSignalOverviewRow = Readonly<{
+  queued_qualification: string | number | null;
+  qualifying: string | number | null;
+  qualified_today: string | number | null;
+  rejected_today: string | number | null;
+  quarantined: string | number | null;
+  latest_qualification: Date | string | null;
+}>;
+
+export type SourceSignalOverview = Readonly<{
+  queuedQualification: number;
+  qualifying: number;
+  qualifiedToday: number;
+  rejectedToday: number;
+  quarantined: number;
+  latestQualification: string | null;
+}>;
+
+/**
+ * Source observations remain quarantined until qualification creates a lead.
+ * This single aggregate is deliberately zero-safe for a newly migrated table.
+ */
+export async function getSourceSignalOverview(
+  now = new Date(),
+): Promise<SourceSignalOverview> {
+  const result = await getDatabase().execute<SourceSignalOverviewRow>(sql`
+    SELECT
+      COUNT(*) FILTER (WHERE status = 'queued_qualification')::int AS queued_qualification,
+      COUNT(*) FILTER (WHERE status = 'qualifying')::int AS qualifying,
+      COUNT(*) FILTER (
+        WHERE status = 'qualified'
+          AND qualified_at >= (
+            date_trunc('day', ${now.toISOString()}::timestamptz AT TIME ZONE 'UTC')
+            AT TIME ZONE 'UTC'
+          )
+      )::int AS qualified_today,
+      COUNT(*) FILTER (
+        WHERE status = 'rejected'
+          AND rejected_at >= (
+            date_trunc('day', ${now.toISOString()}::timestamptz AT TIME ZONE 'UTC')
+            AT TIME ZONE 'UTC'
+          )
+      )::int AS rejected_today,
+      COUNT(*) FILTER (WHERE status = 'quarantined')::int AS quarantined,
+      MAX(GREATEST(qualified_at, rejected_at)) AS latest_qualification
+    FROM source_signals
+  `);
+  const row = result.rows[0];
+
+  return {
+    queuedQualification: count(row?.queued_qualification),
+    qualifying: count(row?.qualifying),
+    qualifiedToday: count(row?.qualified_today),
+    rejectedToday: count(row?.rejected_today),
+    quarantined: count(row?.quarantined),
+    latestQualification: row === undefined ? null : iso(row.latest_qualification),
+  };
+}
+
+function count(value: string | number | null | undefined): number {
+  const parsed = Number(value ?? 0);
+  return Number.isFinite(parsed) && parsed >= 0 ? Math.trunc(parsed) : 0;
+}
 
 // GET /api/v1/agents/overview — all roles; the Research-tab live strip in one
 // call: status counts, $ today vs global cap, open proposals, last find.
@@ -19,13 +86,14 @@ export async function GET(_request: NextRequest): Promise<Response> {
   try {
     await requireUser();
 
-    const [rows, spendTodayUsd, openProposals, lastFind, findsToday] =
+    const [rows, spendTodayUsd, openProposals, lastFind, findsToday, sourceSignals] =
       await Promise.all([
         listAgents(),
         getGlobalSpendTodayUsd(),
         getOpenProposalCount(),
         getLastFind(),
         getFindsTodayByAgentId(),
+        getSourceSignalOverview(),
       ]);
 
     const counts = { total: rows.length, running: 0, idle: 0, paused: 0, failed: 0 };
@@ -42,6 +110,7 @@ export async function GET(_request: NextRequest): Promise<Response> {
       dailyCapUsd: dailyBudgetCapUsd(),
       openProposals,
       lastFind,
+      sourceSignals,
     });
   } catch (error) {
     return handleAgentRouteError(error);

@@ -293,7 +293,17 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
       domainProber: fakeProber({
         "acmetooling.com": "ACME Tooling LLC — precision aerospace tooling, Ohio.",
       }),
-      domainJudge: fakeJudge({ proposals: ["acmetooling.com"] }),
+      domainJudge: fakeJudge({
+        proposals: ["acmetooling.com"],
+        judgment: {
+          matches: true,
+          confidence: 0.95,
+          locationMatches: "unknown",
+          identifierMatches: "unknown",
+          relationship: "exact",
+          reason: "name overlap corroborates the official site",
+        },
+      }),
     });
 
     await insertLead({ rawName: "ACME TOOLING LLC" });

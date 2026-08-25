@@ -1,6 +1,6 @@
 /**
- * Idempotent registry seeding for the six v1 agents (REDESIGN_PLAN §1.3).
- * Called during supervisor startup; rows that already exist are untouched.
+ * Idempotent registry seeding for the qualification pipeline.
+ * Called during supervisor startup; defaults are reconciled by stable key.
  */
 import { researchAgents, type Database } from "@asi/database";
 
@@ -13,7 +13,8 @@ export interface DefaultAgentSeed {
     | "monitor_ownership"
     | "refresh_stale"
     | "golden_neighbor"
-    | "resolve_domain";
+    | "resolve_domain"
+    | "qualify_award_lead";
   goal: string;
   cadenceSeconds: number;
   budgetSharePct: string;
@@ -25,10 +26,10 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     key: "discover-usaspending",
     name: "USAspending Discoverer",
     agentType: "discover_source",
-    goal: "Continuously expand the candidate universe from federal aerospace award recipients; ingest and resolve new leads.",
+    goal: "Harvest strict federal aerospace award observations into quarantined source signals; never create leads directly.",
     cadenceSeconds: 3600,
-    budgetSharePct: "25.00",
-    status: "running",
+    budgetSharePct: "10.00",
+    status: "paused",
   },
   {
     key: "discover-sam",
@@ -36,7 +37,7 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     agentType: "discover_source",
     goal: "Surface registered aerospace entities via SAM.gov entity search (requires SAM_API_KEY; idles without one).",
     cadenceSeconds: 7200,
-    budgetSharePct: "10.00",
+    budgetSharePct: "5.00",
     status: "paused",
   },
   {
@@ -45,7 +46,7 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     agentType: "enrich_candidate",
     goal: "Deep-research queued candidates oldest-first until evidence supports a routing decision.",
     cadenceSeconds: 300,
-    budgetSharePct: "30.00",
+    budgetSharePct: "25.00",
     status: "running",
   },
   {
@@ -84,6 +85,15 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     budgetSharePct: "15.00",
     status: "running",
   },
+  {
+    key: "qualify-award-leads",
+    name: "Award Lead Qualifier",
+    agentType: "qualify_award_lead",
+    goal: "Verify source signals through Exa, official-site identity, manufacturing evidence, and actionability before creating leads.",
+    cadenceSeconds: 600,
+    budgetSharePct: "25.00",
+    status: "paused",
+  },
 ] as const;
 
 export async function ensureDefaultAgents(db: Database): Promise<number> {
@@ -100,7 +110,17 @@ export async function ensureDefaultAgents(db: Database): Promise<number> {
         budgetSharePct: seed.budgetSharePct,
         status: seed.status,
       })
-      .onConflictDoNothing({ target: researchAgents.key })
+      .onConflictDoUpdate({
+        target: researchAgents.key,
+        set: {
+          name: seed.name,
+          agentType: seed.agentType,
+          goal: seed.goal,
+          cadenceSeconds: seed.cadenceSeconds,
+          budgetSharePct: seed.budgetSharePct,
+          status: seed.status,
+        },
+      })
       .returning({ id: researchAgents.id });
     if (result.length > 0) seeded += 1;
   }

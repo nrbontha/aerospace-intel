@@ -16,7 +16,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { promisify } from "node:util";
 
-import { eq, inArray, sql } from "drizzle-orm";
+import { asc, eq, inArray, sql } from "drizzle-orm";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import {
   candidates,
@@ -35,6 +35,7 @@ import {
   researchRuns,
   sourceDocumentLinks,
   sourceDocuments,
+  sourceSignals,
   updateCandidateStatus,
   type AgentType,
  } from "@asi/database";
@@ -335,6 +336,9 @@ afterEach(async () => {
     createdGoldenIds = [];
   }
   if (createdAgentIds.length > 0) {
+    await db.delete(sourceSignals).where(inArray(sourceSignals.agentId, createdAgentIds));
+  }
+  if (createdAgentIds.length > 0) {
     // Agent-owned frontier rows have no other owner; drop them first or the
     // ON DELETE SET NULL would violate frontier_owner_check.
     await db
@@ -381,13 +385,15 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       "monitor_ownership",
       "refresh_stale",
       "golden_neighbor",
+      "resolve_domain",
+      "qualify_award_lead",
     ];
     for (const type of expected) {
       expect(registry.get(type), type).toBeTypeOf("function");
     }
   });
 
-  it("discover_source (usaspending): expands one bounded query, ingests leads, dedupes reruns", async () => {
+  it("discover_source (usaspending): quarantines strict source observations and dedupes reruns", async () => {
     const recipients = [
       {
         rawName: "Alpha Machining LLC",
@@ -409,7 +415,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       },
     ];
     let searchCalls = 0;
-    const gateway = gatewayWithContents([planEnvelope([{ source: "usaspending" }])]);
+    gatewayWithContents([planEnvelope([{ source: "usaspending" }])]);
     const agent = await insertAgent({
       key: "discover-usaspending-test",
       agentType: "discover_source",
@@ -419,7 +425,6 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       searchRecipients: async (query) => {
         searchCalls += 1;
         expect(query.naicsCodes).toContain("336411");
-        expect(query.timePeriod.startDate).toMatch(/^\d{4}-\d{2}-\d{2}$/u);
         return recipients;
       },
     });
@@ -429,44 +434,31 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       signal: new AbortController().signal,
     });
     expect(first.outcome).toBe("executed");
-    expect(first.actionsExecuted).toBe(1);
-    expect(first.findings).toMatchObject({ newLeads: 2, resolvedExact: 2 });
-    expect(searchCalls).toBe(1); // ONE page-set per tick
-
+    expect(first.findings).toMatchObject({ harvested: 2, duplicate: 0 });
+    expect(searchCalls).toBe(1);
+    const signals = await getDatabase()
+      .select()
+      .from(sourceSignals)
+      .where(eq(sourceSignals.agentId, agent.id));
+    expect(signals).toHaveLength(2);
+    expect(signals.map((signal) => signal.status)).toEqual([
+      "queued_qualification",
+      "queued_qualification",
+    ]);
     const leadRows = await getDatabase()
       .select()
       .from(leads)
       .where(eq(leads.campaignId, agent.id));
-    expect(leadRows).toHaveLength(2);
-    for (const lead of leadRows) {
-      expect((lead.context as Record<string, unknown>)["discoveryOrigin"]).toBe("usaspending");
-      expect((lead.context as Record<string, unknown>)["sourceQualification"]).toMatchObject({
-        returnedNaics: expect.any(Array),
-        queryLocator: expect.stringContaining("api.usaspending.gov"),
-      });
-    }
+    expect(leadRows).toHaveLength(0);
 
-    const frontierRows = await getDatabase()
-      .select()
-      .from(frontierItems)
-      .where(eq(frontierItems.agentId, agent.id));
-    expect(frontierRows.filter((row) => row.itemType === "company")).toHaveLength(2);
-
-    // Rerun: page-set still bounded, but everything dedupes.
     const second = await handler.get("discover_source")!({
       agent,
       signal: new AbortController().signal,
     });
-    expect(searchCalls).toBe(2);
-    expect(second.findings).toMatchObject({ newLeads: 0, duplicateSkipped: 2 });
-
-    // Planner contract: first gateway call used the agent_plan_v1 schema.
-    expect(gateway.requestBodies()[0]?.response_format?.json_schema?.name).toBe(
-      "agent_plan_v1",
-    );
+    expect(second.findings).toMatchObject({ harvested: 0, duplicate: 2 });
   });
 
-  it("discover_source caps a qualified tick at 25 leads and reports the drop", async () => {
+  it("discover_source caps harvested source signals at 25 and reports the remainder", async () => {
     const recipients = Array.from({ length: 30 }, (_, index) => ({
       rawName: `Capped Aerospace Manufacturer ${index}`,
       uei: `CAP${String(index).padStart(9, "0")}`,
@@ -476,7 +468,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       sourceLocator: `usaspending://test/cap-${index}`,
       sourceQualification: qualifiedSourceQualification(),
     }));
-    const gateway = gatewayWithContents([planEnvelope([{ source: "usaspending" }])]);
+    gatewayWithContents([planEnvelope([{ source: "usaspending" }])]);
     const agent = await insertAgent({
       key: "discover-usaspending-cap-test",
       agentType: "discover_source",
@@ -489,17 +481,121 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       signal: new AbortController().signal,
     });
     expect(result.findings).toMatchObject({
-      qualifiedBeforeCap: 30,
-      droppedLeads: { total: 5, reasons: { outputCap: 5 } },
-      newLeads: 25,
+      harvested: 25,
+      rejected: { outputCap: 5 },
     });
+    const signals = await getDatabase()
+      .select()
+      .from(sourceSignals)
+      .where(eq(sourceSignals.agentId, agent.id));
+    expect(signals).toHaveLength(25);
+  });
+
+  it("qualify_award_lead creates only evidence-backed aerospace manufacturers", async () => {
+    const qualifier = await insertAgent({
+      key: "qualify-award-leads-test",
+      agentType: "qualify_award_lead",
+    });
+    const rawSignals = [
+      "Atlas Precision Components LLC",
+      "Orbit Consulting LLC",
+      "Health Device Manufacturing LLC",
+      "Aircraft Parts Distributor LLC",
+      "Identity Mismatch Manufacturing LLC",
+    ];
+    await getDatabase().insert(sourceSignals).values(
+      rawSignals.map((rawName, index) => ({
+        sourceKey: "usaspending",
+        sourceLocator: `usaspending://qualification/${index}`,
+        sourceFingerprint: `qualification-test-${index}`,
+        agentId: qualifier.id,
+        rawName,
+        city: "Huntsville",
+        state: "AL",
+        uei: `QUALIFY${index}`,
+        awardCount: 1,
+        awardValue: "1000.00",
+        freshestAward: new Date("2026-01-01T00:00:00.000Z"),
+        sourcePayload: { award: index },
+      })),
+    );
+    gatewayWithContents([planEnvelope([])]);
+    const handler = createV1TickHandlerRegistry({
+      ...depsWith({}),
+      searchOfficialDomains: async (identity) => [
+        {
+          domain: `${identity.legalName.includes("Atlas") ? "atlas" : "other"}.test`,
+          url: `https://${identity.legalName.includes("Atlas") ? "atlas" : "other"}.test/`,
+          title: identity.legalName,
+          textSnippet: "Official company website",
+          score: 0.9,
+        },
+      ],
+      domainProber: {
+        fetchText: async (url) => ({
+          ok: true,
+          finalUrl: url,
+          text: "Atlas Precision manufactures flight-control components for aerospace and defense programs.",
+        }),
+      },
+      domainJudge: {
+        proposeDomains: async () => [],
+        judgeIdentity: async (legalName) => ({
+          matches: !legalName.includes("Identity Mismatch"),
+          confidence: 0.98,
+          locationMatches: true,
+          identifierMatches: "unknown",
+          relationship: legalName.includes("Identity Mismatch") ? "mismatch" : "exact",
+          reason: "location corroborated",
+        }),
+      },
+      classifyAwardLead: async ({ legalName, pageUrl }) => ({
+        manufacturer: legalName.includes("Atlas") || legalName.includes("Health"),
+        aerospaceDefenseRelevance: legalName.includes("Atlas"),
+        businessModel: legalName.includes("Distributor") ? "distributor" : "manufacturer",
+        evidenceExcerpt:
+          "manufactures flight-control components for aerospace and defense programs",
+        evidenceUrl: pageUrl,
+        confidence: 0.92,
+      }),
+    });
+    const result = await handler.get("qualify_award_lead")!({
+      agent: qualifier,
+      signal: new AbortController().signal,
+    });
+    expect(result.findings).toMatchObject({
+      selected: 5,
+      statusTransitions: {
+        "qualifying->qualified": 1,
+        "qualifying->rejected": 4,
+        "qualifying->quarantined": 0,
+      },
+    });
+    const signals = await getDatabase()
+      .select()
+      .from(sourceSignals)
+      .where(eq(sourceSignals.agentId, qualifier.id))
+      .orderBy(asc(sourceSignals.rawName));
+    const qualified = signals.filter((signal) => signal.status === "qualified");
+    expect(qualified).toHaveLength(1);
+    expect(qualified[0]).toMatchObject({
+      rawName: "Atlas Precision Components LLC",
+      leadId: expect.any(String),
+      companyId: expect.any(String),
+    });
+    expect((qualified[0]!.qualification as Record<string, unknown>)["evidence"]).toMatchObject({
+      classification: {
+        evidenceExcerpt:
+          "manufactures flight-control components for aerospace and defense programs",
+      },
+    });
+    expect(signals.filter((signal) => signal.status === "rejected")).toHaveLength(4);
     const leadRows = await getDatabase()
       .select()
       .from(leads)
-      .where(eq(leads.campaignId, agent.id));
-    expect(leadRows).toHaveLength(25);
+      .where(eq(leads.campaignId, qualifier.id));
+    expect(leadRows).toHaveLength(1);
   });
-
   it("discover_source (sam variant) idles honestly without SAM_API_KEY", async () => {
     const previous = process.env.SAM_API_KEY;
     delete process.env.SAM_API_KEY;
@@ -864,7 +960,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     expect(result.findings).toMatchObject({ droppedQuotes: 1, refreshedDocuments: 0 });
   });
 
-  it("golden_neighbor: mines archetype seeds from reviewed-positive examples and tags leads", async () => {
+  it("golden_neighbor: mines archetype seeds into quarantined source signals, never leads", async () => {
     const [golden] = await getDatabase()
       .insert(goldenExamples)
       .values({
@@ -905,21 +1001,28 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     });
     expect(result.outcome).toBe("executed");
     expect(result.findings).toMatchObject({
+      source: "golden_neighbor_usaspending",
       examplesConsidered: 1,
-      newLeads: 1,
-      discoveryOrigin: "golden-neighbor",
+      harvested: 1,
     });
-    // Archetype NAICS seed reached the USAspending query.
     expect(seenQueries[0]?.naicsCodes).toContain("336413");
-
-    const [leadRow] = await getDatabase()
+    const signals = await getDatabase()
+      .select()
+      .from(sourceSignals)
+      .where(eq(sourceSignals.agentId, agent.id));
+    expect(signals).toHaveLength(1);
+    expect(signals[0]).toMatchObject({
+      sourceKey: "golden_neighbor_usaspending",
+      status: "queued_qualification",
+    });
+    expect((signals[0]!.sourcePayload as Record<string, unknown>)["goldenNeighborOrigin"]).toBe(
+      true,
+    );
+    const leadRows = await getDatabase()
       .select()
       .from(leads)
       .where(eq(leads.campaignId, agent.id));
-    expect(leadRow).toBeDefined();
-    expect((leadRow!.context as Record<string, unknown>)["discoveryOrigin"]).toBe(
-      "golden-neighbor",
-    );
+    expect(leadRows).toHaveLength(0);
   });
 
   it("golden_neighbor idles when no reviewed-positive examples exist", async () => {

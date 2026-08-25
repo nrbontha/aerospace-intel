@@ -53,6 +53,14 @@ export type AgentsOverview = Readonly<{
   spendTodayUsd: number;
   dailyCapUsd: number;
   openProposals: number;
+  sourceSignals: Readonly<{
+    queuedQualification: number;
+    qualifying: number;
+    qualifiedToday: number;
+    rejectedToday: number;
+    quarantined: number;
+    latestQualification: string | null;
+  }>;
   lastFind: Readonly<{
     at: string;
     agentId: string;

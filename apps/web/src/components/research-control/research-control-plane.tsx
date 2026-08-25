@@ -16,6 +16,7 @@ import { AgentTickDrawer } from "./agent-tick-drawer";
 import { AgentsTable } from "./agents-table";
 import { CampaignsStrip } from "./campaigns-strip";
 import { LiveStrip } from "./live-strip";
+import { QualificationLadder } from "./qualification-ladder";
 import type { AgentActivity } from "./types";
 
 const POLL_INTERVAL_MS = 10_000;
@@ -146,6 +147,8 @@ export function ResearchControlPlane({ role }: Readonly<{ role: Role }>) {
   return (
     <div data-testid="research-control-plane">
       <LiveStrip loading={loading} overview={state.overview} error={loadError} />
+
+      <QualificationLadder agents={state.agents} />
 
       <section aria-labelledby="research-agents-heading" style={{ marginTop: "1.5rem" }}>
         <div className="admin-panel__header">
