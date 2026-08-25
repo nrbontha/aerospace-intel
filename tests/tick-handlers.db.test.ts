@@ -24,6 +24,7 @@ import {
   candidates,
   closeDatabase,
   companies,
+  companyDomains,
   companyIdentifiers,
   dataSources,
   evidence,
@@ -34,6 +35,7 @@ import {
   ensureAgentMonthlyQueries,
   failAgentQuery,
   leads,
+  identityMatchCandidates,
   observations,
   ownershipObservations,
   recordCompanyResearchArtifacts,
@@ -1895,6 +1897,165 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
         .map((signal) => signal.id)
         .sort(),
     );
+  });
+
+  it("reuses one resolved lead and identity match across SAM and repeated FAA records", async () => {
+    const qualifier = await insertAgent({
+      key: "qualify-idempotent-identifier-reuse-test",
+      agentType: "qualify_award_lead",
+    });
+    const companyId = await insertCompany({
+      legalName: "RAM Aerospace Inc",
+      displayName: "RAM Aerospace",
+    });
+    await getDatabase().insert(companyIdentifiers).values([
+      { companyId, type: "uei", value: "RAMSAMUEI01" },
+      { companyId, type: "cage", value: "3RAM3" },
+      { companyId, type: "faa_pma_holder", value: "PQ00999XY" },
+    ]);
+    await getDatabase().insert(companyDomains).values({
+      companyId,
+      domain: "ramaerospace.com",
+      isPrimary: true,
+      verifiedAt: new Date(),
+    });
+    const [staleLead] = await getDatabase()
+      .insert(leads)
+      .values({
+        campaignId: qualifier.id,
+        rawName: "RAM Aerospace",
+        possibleDomain: "ram.space",
+        status: "resolved",
+        resolvedCompanyId: companyId,
+        context: {},
+      })
+      .returning({ id: leads.id });
+    await getDatabase().insert(identityMatchCandidates).values({
+      leadId: staleLead!.id,
+      companyId,
+      signalType: "domain",
+      features: { matchedValue: "ram.space" },
+      confidence: "1.000",
+      explanation: "Existing exact match",
+      decision: "merged",
+      decidedAt: new Date(),
+    });
+    const startedAt = Date.now() - 10_000;
+    const insertedSignals = await getDatabase()
+      .insert(sourceSignals)
+      .values([
+        {
+          sourceKey: "sam_entity",
+          sourceLocator:
+            "sam://entity-information/v4/entities/RAMSAMUEI01?naics=336413",
+          sourceFingerprint: "qualify-reuse-sam-first",
+          agentId: qualifier.id,
+          rawName: "RAM Aerospace Inc",
+          uei: "RAMSAMUEI01",
+          cage: "3RAM3",
+          sourcePayload: {},
+          createdAt: new Date(startedAt),
+        },
+        {
+          sourceKey: "faa_drs_pma",
+          sourceLocator:
+            "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCIDRAMONE",
+          sourceFingerprint: "qualify-reuse-faa-one",
+          agentId: qualifier.id,
+          rawName: "RAM Aerospace",
+          sourcePayload: { record: { holderNumber: "PQ00999XY" } },
+          createdAt: new Date(startedAt + 1_000),
+        },
+        {
+          sourceKey: "faa_drs_pma",
+          sourceLocator:
+            "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCIDRAMTWO",
+          sourceFingerprint: "qualify-reuse-faa-two",
+          agentId: qualifier.id,
+          rawName: "RAM Aerospace, Inc.",
+          sourcePayload: { record: { holderNumber: "PQ00999XY" } },
+          createdAt: new Date(startedAt + 2_000),
+        },
+      ])
+      .returning({ id: sourceSignals.id });
+    const searchOfficialDomains = vi.fn(async () => []);
+    const synthesizeSourceSignal: NonNullable<
+      TickHandlerDeps["synthesizeSourceSignal"]
+    > = vi.fn(async (_db, signalId) => ({
+      status: "noop",
+      sourceKey: signalId,
+    }));
+    gatewayWithContents([planEnvelope([])]);
+    const result = await createV1TickHandlerRegistry({
+      ...depsWith({}),
+      searchOfficialDomains,
+      domainProber: {
+        fetchText: async () => ({
+          ok: false as const,
+          error: "must_not_probe",
+        }),
+      },
+      domainJudge: {
+        proposeDomains: async () => [],
+        judgeIdentity: async () => ({
+          matches: false,
+          confidence: 0,
+          locationMatches: "unknown",
+          identifierMatches: "unknown",
+          relationship: "mismatch",
+          reason: "must not judge",
+        }),
+      },
+      classifySourceSignal: async ({ pageUrl }) =>
+        sourceSignalClassification(pageUrl),
+      synthesizeSourceSignal,
+    }).get("qualify_award_lead")!({
+      agent: qualifier,
+      signal: new AbortController().signal,
+    });
+
+    expect(result.findings).toMatchObject({
+      statusTransitions: {
+        "qualifying->qualified": 3,
+        "qualifying->quarantined": 0,
+      },
+      identifierResolution: { attached: 3, conflicts: 0 },
+      synthesis: { materialized: 3, errors: [] },
+    });
+    expect(searchOfficialDomains).not.toHaveBeenCalled();
+    const signals = await getDatabase()
+      .select()
+      .from(sourceSignals)
+      .where(eq(sourceSignals.agentId, qualifier.id));
+    expect(signals).toHaveLength(3);
+    expect(
+      signals.every(
+        (signal) =>
+          signal.status === "qualified" &&
+          signal.companyId === companyId &&
+          signal.leadId === staleLead!.id,
+      ),
+    ).toBe(true);
+    expect(synthesizeSourceSignal).toHaveBeenCalledTimes(3);
+    expect(
+      vi.mocked(synthesizeSourceSignal).mock.calls.map((call) => call[1]).sort(),
+    ).toEqual(insertedSignals.map((signal) => signal.id).sort());
+    const matches = await getDatabase()
+      .select()
+      .from(identityMatchCandidates)
+      .where(eq(identityMatchCandidates.leadId, staleLead!.id));
+    expect(matches).toHaveLength(1);
+    const [correctedLead] = await getDatabase()
+      .select()
+      .from(leads)
+      .where(eq(leads.id, staleLead!.id));
+    expect(correctedLead).toMatchObject({
+      status: "resolved",
+      resolvedCompanyId: companyId,
+      possibleDomain: "ramaerospace.com",
+      url: "https://ramaerospace.com",
+    });
+    await getDatabase().delete(leads).where(eq(leads.id, staleLead!.id));
   });
 
   it("leaves a qualified supported source waiting until a company is resolved", async () => {

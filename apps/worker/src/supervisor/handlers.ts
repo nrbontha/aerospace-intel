@@ -15,6 +15,7 @@ import {
   claimQueuedSourceSignals,
   companies,
   companySourceLinks,
+  companyDomains,
   companyIdentifiers,
   dataSources,
   evidence,
@@ -3581,6 +3582,18 @@ async function attachQualifiedSignalByIdentifier(
     );
   }
   const companyId = matchedCompanyIds[0]!;
+  const [primaryDomain] = await db
+    .select({ domain: companyDomains.domain })
+    .from(companyDomains)
+    .where(
+      and(
+        eq(companyDomains.companyId, companyId),
+        eq(companyDomains.isPrimary, true),
+        sql`${companyDomains.verifiedAt} IS NOT NULL`,
+      ),
+    )
+    .orderBy(desc(companyDomains.verifiedAt))
+    .limit(1);
   const currentLead =
     signal.leadId === null
       ? undefined
@@ -3616,7 +3629,6 @@ async function attachQualifiedSignalByIdentifier(
         .where(
           and(
             eq(leads.campaignId, qualifierAgent.id),
-            eq(leads.rawName, signal.rawName),
             eq(leads.resolvedCompanyId, companyId),
           ),
         )
@@ -3643,6 +3655,12 @@ async function attachQualifiedSignalByIdentifier(
           [signal.city, signal.state]
             .filter((value): value is string => value !== null)
             .join(", ") || null,
+        ...(primaryDomain === undefined
+          ? {}
+          : {
+              possibleDomain: primaryDomain.domain,
+              url: `https://${primaryDomain.domain}`,
+            }),
         possibleIdentifiers: identifiers,
         status: "resolved",
         resolvedCompanyId: companyId,
@@ -3660,6 +3678,12 @@ async function attachQualifiedSignalByIdentifier(
         status: "resolved",
         resolvedCompanyId: companyId,
         possibleIdentifiers: identifiers,
+        ...(primaryDomain === undefined
+          ? {}
+          : {
+              possibleDomain: primaryDomain.domain,
+              url: `https://${primaryDomain.domain}`,
+            }),
         context: sql`${leads.context} || ${JSON.stringify(identityContext)}::jsonb`,
         updatedAt: new Date(),
       })
@@ -3675,16 +3699,19 @@ async function attachQualifiedSignalByIdentifier(
           (candidate) => candidate.type === "uei" || candidate.type === "cage",
         )),
   )!;
-  await db.insert(identityMatchCandidates).values({
-    leadId,
-    companyId,
-    signalType: strongestMatch.type,
-    features: { matchedValue: strongestMatch.value, matches },
-    confidence: "1.000",
-    explanation: `Automatic exact ${strongestMatch.type} match during source-signal qualification.`,
-    decision: "merged",
-    decidedAt: new Date(),
-  });
+  await db
+    .insert(identityMatchCandidates)
+    .values({
+      leadId,
+      companyId,
+      signalType: strongestMatch.type,
+      features: { matchedValue: strongestMatch.value, matches },
+      confidence: "1.000",
+      explanation: `Automatic exact ${strongestMatch.type} match during source-signal qualification.`,
+      decision: "merged",
+      decidedAt: new Date(),
+    })
+    .onConflictDoNothing();
   await recordSourceSignalQualification(db, signal.id, {
     decision: "qualified",
     reason: "exact_company_identifier",
