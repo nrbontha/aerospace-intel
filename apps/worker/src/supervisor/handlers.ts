@@ -41,6 +41,7 @@ import {
   AEROSPACE_NAICS,
   CANDIDATE_RESEARCH_PROMPT_VERSION,
   collectCandidatePageLinks,
+  ExaCompanyListHarvester,
   ExaSearchClient,
   OpenRouterClient,
   planTick,
@@ -55,12 +56,13 @@ import {
   type FrontierItemView,
   type FrontierProposal,
   type OfficialDomainCandidate,
+  type ExaSearchResult,
   type OpenRouterAttemptTelemetry,
   type OpenRouterModelRouting,
   type RecentTickSummary,
   type SafeFetchResult,
   type EnrichCandidateAction,
-  type GoldenNeighborAction,
+  type SourceSignalProposal,
   type MonitorOwnershipAction,
   type RefreshStaleAction,
   type UsaspendingSearchClient,
@@ -184,6 +186,8 @@ export interface TickHandlerDeps {
   /** Generic official-site source-signal classifier override (tests). */
   readonly classifySourceSignal?: SourceSignalClassifier;
   readonly searchRecipients?: UsaspendingSearchClient["searchRecipients"];
+  /** Generic Exa query override for company-list and source-catalog discovery (tests). */
+  readonly searchExa?: (query: string) => Promise<readonly ExaSearchResult[]>;
   /** Document fetcher override (tests); default is safe-fetch. */
   readonly fetchDocument?: (
     url: string,
@@ -459,22 +463,30 @@ function codeList(value: unknown): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// discover_source (+ golden_neighbor shared USAspending expansion).
+// discover_source.
 // ---------------------------------------------------------------------------
 
-const DISCOVER_SOURCE_KEY_HINTS = ["usaspending", "sam"] as const;
+function canonicalDiscoverSource(value: string): string {
+  const normalized = value.trim().toLowerCase().replace(/-/gu, "_");
+  return normalized === "source_catalog_scout" || normalized === "catalog_scout"
+    ? "source_catalog"
+    : normalized;
+}
 
 function discoverSourceKey(agent: ResearchAgent): string {
+  const configuredMode = agent.config?.["mode"];
+  if (typeof configuredMode === "string" && configuredMode.trim() !== "") {
+    return canonicalDiscoverSource(configuredMode);
+  }
   const seeded = (agent.seedScope?.["sources"] as unknown) ?? undefined;
   if (Array.isArray(seeded)) {
     const first = seeded.find(
       (item): item is string => typeof item === "string" && item.trim() !== "",
     );
-    if (first !== undefined) return first.trim().toLowerCase();
+    if (first !== undefined) return canonicalDiscoverSource(first);
   }
-  for (const hint of DISCOVER_SOURCE_KEY_HINTS) {
-    if (agent.key.toLowerCase().includes(hint)) return hint;
-  }
+  if (agent.key.toLowerCase().includes("source-catalog")) return "source_catalog";
+  if (agent.key.toLowerCase().includes("sam")) return "sam";
   return "usaspending";
 }
 
@@ -582,7 +594,6 @@ async function harvestUsaspendingSourceSignals(
   db: Database,
   agent: ResearchAgent,
   proposals: readonly FrontierProposal[],
-  sourceKey: "usaspending" | "golden_neighbor_usaspending" = "usaspending",
 ): Promise<{ readonly harvested: number; readonly duplicate: number; readonly rejected: number }> {
   let harvested = 0;
   let duplicate = 0;
@@ -600,7 +611,7 @@ async function harvestUsaspendingSourceSignals(
     const awardValue =
       typeof payload.totalAwardValueUsd === "number" ? payload.totalAwardValueUsd : 0;
     const result = await upsertHarvestedSourceSignal(db, {
-      sourceKey,
+      sourceKey: "usaspending",
       sourceLocator,
       agentId: agent.id,
       rawName,
@@ -620,6 +631,117 @@ async function harvestUsaspendingSourceSignals(
     else harvested += 1;
   }
   return { harvested, duplicate, rejected };
+}
+
+interface SourceCatalogQuery {
+  readonly query: string;
+  readonly sourceType: string;
+  readonly jurisdiction: string;
+}
+
+const SOURCE_CATALOG_QUERIES: readonly SourceCatalogQuery[] = [
+  {
+    query: "official FAA PMA holder directory parts manufacturer approval",
+    sourceType: "regulatory_approval_directory",
+    jurisdiction: "United States",
+  },
+  {
+    query: "official AS9100 certified supplier directory OASIS aerospace",
+    sourceType: "certification_directory",
+    jurisdiction: "International",
+  },
+  {
+    query: "official Nadcap accredited special process supplier list",
+    sourceType: "accreditation_directory",
+    jurisdiction: "International",
+  },
+  {
+    query: "official DLA qualified products manufacturers list QPL QML",
+    sourceType: "government_qualified_list",
+    jurisdiction: "United States",
+  },
+  {
+    query: "official aerospace OEM approved supplier processor list",
+    sourceType: "oem_approved_supplier_list",
+    jurisdiction: "International",
+  },
+  {
+    query: "official aerospace association member supplier directory",
+    sourceType: "association_member_directory",
+    jurisdiction: "International",
+  },
+] as const;
+
+function exaSearchClient(
+  deps: Partial<TickHandlerDeps>,
+): Pick<ExaSearchClient, "search"> {
+  return deps.searchExa === undefined
+    ? new ExaSearchClient({ apiKey: process.env.EXA_API_KEY })
+    : { search: deps.searchExa };
+}
+
+async function scoutSourceCatalog(
+  db: Database,
+  searchClient: Pick<ExaSearchClient, "search">,
+  signal: AbortSignal,
+): Promise<{ readonly cataloged: number; readonly duplicates: number; readonly rejected: number }> {
+  let cataloged = 0;
+  let duplicates = 0;
+  let rejected = 0;
+  for (const catalogQuery of SOURCE_CATALOG_QUERIES) {
+    signal.throwIfAborted();
+    const results = (await searchClient.search(catalogQuery.query)).slice(0, 5);
+    for (const result of results) {
+      let url: URL;
+      try {
+        url = new URL(result.url);
+      } catch {
+        rejected += 1;
+        continue;
+      }
+      if (
+        (url.protocol !== "http:" && url.protocol !== "https:") ||
+        url.username !== "" ||
+        url.password !== ""
+      ) {
+        rejected += 1;
+        continue;
+      }
+      const publisher = url.hostname.replace(/^www\./u, "").toLowerCase();
+      const name = result.title.trim();
+      if (name === "") {
+        rejected += 1;
+        continue;
+      }
+      const rows = await db
+        .insert(dataSources)
+        .values({
+          name,
+          sourceType: catalogQuery.sourceType,
+          baseUrl: url.href,
+          access: "restricted_metadata_only",
+          ingestion: "manual",
+          publisher,
+          jurisdiction: catalogQuery.jurisdiction,
+          notes: JSON.stringify({
+            catalogScout: true,
+            query: catalogQuery.query,
+            snippet: result.text,
+            score: result.score,
+            policy: {
+              access: "unknown",
+              ingestion: "manual_review_only",
+              modelUse: "unknown_not_authorized",
+            },
+          }),
+        })
+        .onConflictDoNothing()
+        .returning({ id: dataSources.id });
+      if (rows.length === 0) duplicates += 1;
+      else cataloged += 1;
+    }
+  }
+  return { cataloged, duplicates, rejected };
 }
 
 function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandler {
@@ -644,18 +766,40 @@ function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandle
     const { plan } = planned;
     const planJson = { ...plan };
 
+    const db = getDatabase();
+    if (sourceKey === "source_catalog") {
+      if (deps.searchExa === undefined && !process.env.EXA_API_KEY?.trim()) {
+        return {
+          outcome: "stuck",
+          plan: planJson,
+          findings: { idle: true, idleReason: "missing_exa_api_key", source: sourceKey },
+        };
+      }
+      const catalog = await scoutSourceCatalog(db, exaSearchClient(deps), context.signal);
+      return {
+        outcome: "executed",
+        plan: planJson,
+        actionsExecuted: SOURCE_CATALOG_QUERIES.length,
+        findings: {
+          source: "source_catalog",
+          queries: SOURCE_CATALOG_QUERIES.length,
+          cataloged: catalog.cataloged,
+          duplicates: catalog.duplicates,
+          rejected: catalog.rejected,
+        },
+      };
+    }
+
     if (sourceKey !== "usaspending") {
       return {
         outcome: "stuck",
         plan: planJson,
         findings: {
           idleReason: `unsupported_source:${sourceKey}`,
-          supportedSources: ["usaspending"],
+          supportedSources: ["usaspending", "source_catalog"],
         },
       };
     }
-
-    const db = getDatabase();
     const expansion = await runUsaspendingExpansion(agent, deps, {
       naics: [...AEROSPACE_NAICS],
     });
@@ -1545,38 +1689,29 @@ function createRefreshStaleHandler(deps: Partial<TickHandlerDeps>): TickHandler 
 // golden_neighbor.
 // ---------------------------------------------------------------------------
 
-/** Pull NAICS/PSC-ish codes out of arbitrary JSON blobs. */
-function collectNaicsPscSeeds(records: unknown[]): {
-  naics: string[];
-  psc: string[];
-} {
-  const naics = new Set<string>();
-  const psc = new Set<string>();
-  const visit = (value: unknown, keyHint: string): void => {
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item, keyHint);
-      return;
-    }
-    if (typeof value === "object" && value !== null) {
-      for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
-        visit(entry, `${keyHint} ${key.toLowerCase()}`);
-      }
-      return;
-    }
-    for (const token of codeList(value)) {
-      if (/^\d{4,6}$/u.test(token)) naics.add(token);
-      else if (/^[a-z]{2}\d{2}$/iu.test(token) || /^[0-9]{4}$/u.test(token)) psc.add(token.toUpperCase());
-    }
-  };
-  for (const record of records) visit(record, "");
-  return { naics: [...naics], psc: [...psc] };
+interface GoldenNeighborExample {
+  readonly descriptionRaw: string | null;
+  readonly grataPayload: Record<string, unknown>;
 }
+
+const GOLDEN_NAICS_CATEGORIES: Readonly<Record<string, string>> = {
+  "332710": "precision machine shop aerospace components",
+  "336411": "aircraft manufacturing",
+  "336412": "aircraft engine and engine parts manufacturing",
+  "336413": "aircraft parts and auxiliary equipment manufacturing",
+  "336414": "guided missile and space vehicle manufacturing",
+  "336415": "guided missile and space vehicle propulsion manufacturing",
+  "336419": "space and guided missile components manufacturing",
+};
 
 async function selectPositiveGoldenExamples(
   db: Database,
-): Promise<Array<{ grataPayload: Record<string, unknown> }>> {
+): Promise<GoldenNeighborExample[]> {
   const rows = await db
-    .select({ grataPayload: goldenExamples.grataPayload })
+    .select({
+      descriptionRaw: goldenExamples.descriptionRaw,
+      grataPayload: goldenExamples.grataPayload,
+    })
     .from(goldenExamples)
     .leftJoin(candidates, eq(goldenExamples.companyId, candidates.companyId))
     .where(
@@ -1594,28 +1729,112 @@ async function selectPositiveGoldenExamples(
       ),
     )
     .limit(50);
-  return rows.map((row) => ({ grataPayload: row.grataPayload ?? {} }));
+  return rows.map((row) => ({
+    descriptionRaw: row.descriptionRaw,
+    grataPayload: row.grataPayload ?? {},
+  }));
 }
 
-function archetypeFiltersFromExamples(
-  examples: Array<{ grataPayload: Record<string, unknown> }>,
-): Record<string, string> {
-  const seeds = collectNaicsPscSeeds(examples.map((example) => example.grataPayload));
-  const filters: Record<string, string> = {};
-  if (seeds.naics.length > 0) filters["naics"] = seeds.naics.join(",");
-  if (seeds.psc.length > 0) filters["psc"] = seeds.psc.join(",");
-  return filters;
+function goldenNeighborQueryTemplates(
+  examples: readonly GoldenNeighborExample[],
+): string[] {
+  const keywords = new Map<string, string>();
+  const addKeyword = (raw: string): void => {
+    for (const fragment of raw.split(/[,;|•\n]/u)) {
+      const keyword = fragment.replace(/\s+/gu, " ").trim();
+      const key = keyword.toLowerCase();
+      if (
+        keyword.length >= 3 &&
+        keyword.length <= 60 &&
+        !/^https?:/iu.test(keyword) &&
+        !/^\d+$/u.test(keyword) &&
+        !keywords.has(key)
+      ) {
+        keywords.set(key, keyword);
+      }
+    }
+  };
+  const visit = (value: unknown, path: string): void => {
+    if (Array.isArray(value)) {
+      for (const item of value) visit(item, path);
+      return;
+    }
+    if (typeof value === "object" && value !== null) {
+      for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+        visit(entry, `${path} ${key.toLowerCase()}`);
+      }
+      return;
+    }
+    if (typeof value !== "string" && typeof value !== "number") return;
+    if (/naics/u.test(path)) {
+      for (const code of codeList(value)) {
+        const category = GOLDEN_NAICS_CATEGORIES[code];
+        if (category !== undefined) addKeyword(category);
+      }
+    }
+    if (
+      typeof value === "string" &&
+      /(product|capabil|categor|industry|specialt|process|platform|part|component|certif|description)/iu.test(
+        path,
+      )
+    ) {
+      addKeyword(value);
+    }
+  };
+
+  for (const example of examples) {
+    if (example.descriptionRaw !== null) visit(example.descriptionRaw, "description");
+    visit(example.grataPayload, "payload");
+  }
+  if (keywords.size === 0) {
+    addKeyword("qualified aerospace component manufacturer");
+    addKeyword("precision aerospace manufacturing capability");
+    addKeyword("proprietary aircraft parts supplier");
+  }
+  return [...keywords.values()]
+    .slice(0, 3)
+    .map((keyword) => `"${keyword}" supplier manufacturer`.slice(0, 80));
+}
+
+async function persistGoldenNeighborSignals(
+  db: Database,
+  agent: ResearchAgent,
+  proposals: readonly SourceSignalProposal[],
+): Promise<{ readonly harvested: number; readonly duplicate: number }> {
+  let harvested = 0;
+  let duplicate = 0;
+  for (const proposal of proposals.slice(0, MAX_SOURCE_SIGNALS_PER_HARVEST_TICK)) {
+    const result = await upsertHarvestedSourceSignal(db, {
+      sourceKey: "exa_golden_neighbor",
+      sourceLocator: proposal.sourceLocator,
+      agentId: agent.id,
+      rawName: proposal.rawName,
+      ...(proposal.rawDomain === undefined ? {} : { rawDomain: proposal.rawDomain }),
+      ...(proposal.country === undefined ? {} : { country: proposal.country }),
+      awardCount: 0,
+      awardValue: 0,
+      sourcePayload: {
+        ...proposal.sourcePayload,
+        goldenNeighborOrigin: true,
+      },
+    });
+    if (result.duplicate) duplicate += 1;
+    else harvested += 1;
+  }
+  return { harvested, duplicate };
 }
 
 function createGoldenNeighborHandler(deps: Partial<TickHandlerDeps>): TickHandler {
   return async (context): Promise<TickResult> => {
     const planned = await planAgentTick(deps, context, async (db) => {
       const examples = await selectPositiveGoldenExamples(db);
-      return { archetypeFilters: archetypeFiltersFromExamples(examples) };
+      return {
+        examplesConsidered: examples.length,
+        queryTemplates: goldenNeighborQueryTemplates(examples),
+      };
     });
     if ("shortCircuit" in planned) return planned.shortCircuit;
-    const { plan } = planned;
-    const planJson = { ...plan };
+    const planJson = { ...planned.plan };
 
     const db = getDatabase();
     const examples = await selectPositiveGoldenExamples(db);
@@ -1626,50 +1845,36 @@ function createGoldenNeighborHandler(deps: Partial<TickHandlerDeps>): TickHandle
         findings: { idleReason: "no_positive_golden_examples" },
       };
     }
-    const neighborActions = plan.actions.slice(0, 1) as GoldenNeighborAction[];
-    const exampleSeeds = collectNaicsPscSeeds(
-      examples.map((example) => example.grataPayload),
-    );
-    const actionSeeds = collectNaicsPscSeeds(
-      neighborActions.map((action) => action.archetypeFilters),
-    );
-    const naics = [
-      ...new Set([...AEROSPACE_NAICS, ...actionSeeds.naics, ...exampleSeeds.naics]),
-    ].slice(0, 8);
-    const psc = [...new Set([...actionSeeds.psc, ...exampleSeeds.psc])].slice(0, 10);
-    const expansion = await runUsaspendingExpansion(context.agent, deps, {
-      naics,
-      ...(psc.length > 0 ? { psc } : {}),
-    });
-    if (!expansion.queryRan) {
-      return { outcome: "stuck", plan: planJson, findings: { idleReason: "no_query_expansion" } };
+    if (deps.searchExa === undefined && !process.env.EXA_API_KEY?.trim()) {
+      return {
+        outcome: "stuck",
+        plan: planJson,
+        findings: { idle: true, idleReason: "missing_exa_api_key" },
+      };
     }
-    const harvest = await harvestUsaspendingSourceSignals(
+
+    const queryTemplates = goldenNeighborQueryTemplates(examples).slice(0, 3);
+    const harvest = await new ExaCompanyListHarvester(exaSearchClient(deps)).harvest(
+      { queryTemplates },
+      { limit: MAX_SOURCE_SIGNALS_PER_HARVEST_TICK, signal: context.signal },
+    );
+    const persistence = await persistGoldenNeighborSignals(
       db,
       context.agent,
-      expansion.proposals.map((proposal) => ({
-        ...proposal,
-        payload: { ...(proposal.payload ?? {}), goldenNeighborOrigin: true },
-      })),
-      "golden_neighbor_usaspending",
+      harvest.signals,
     );
     return {
       outcome: "executed",
       plan: planJson,
-      actionsExecuted: 1,
+      actionsExecuted: queryTemplates.length,
       findings: {
-        source: "golden_neighbor_usaspending",
+        source: "exa_golden_neighbor",
         examplesConsidered: examples.length,
-        archetypeNaics: naics,
-        archetypePsc: psc,
-        query: expansion.queryValue,
-        harvested: harvest.harvested,
-        duplicate: harvest.duplicate,
-        rejected: {
-          invalidSignal: harvest.rejected,
-          strictSourceGate: expansion.qualificationRejected,
-          outputCap: expansion.qualifiedBeforeCap - expansion.proposals.length,
-        },
+        queries: queryTemplates,
+        harvested: persistence.harvested,
+        duplicate: persistence.duplicate + harvest.metrics.duplicateCandidates,
+        rejected: harvest.metrics.rejected,
+        fetched: harvest.metrics.fetched,
       },
     };
   };

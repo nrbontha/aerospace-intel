@@ -229,28 +229,57 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
     expect(registry.get("resolve_domain")).toBeTypeOf("function");
   });
 
-  it("seeder plants resolve-domains and keeps total budget share ≤ 100%", async () => {
-    const total = DEFAULT_AGENT_SEEDS.reduce(
-      (sum, seed) => sum + Number.parseFloat(seed.budgetSharePct),
-      0,
+  it("seeder plants the active portfolio, totals budget shares at 100%, and preserves pauses", async () => {
+    const split = Object.fromEntries(
+      DEFAULT_AGENT_SEEDS.map((seed) => [seed.key, Number.parseFloat(seed.budgetSharePct)]),
     );
-    expect(total).toBeLessThanOrEqual(100);
+    const total = Object.values(split).reduce((sum, share) => sum + share, 0);
+    expect(total).toBe(100);
+    expect(split).toMatchObject({
+      "discover-usaspending": 10,
+      "discover-sam": 0,
+      "enrich-queue": 20,
+      "monitor-ownership": 8,
+      "refresh-stale": 5,
+      "golden-neighbor": 10,
+      "resolve-domains": 12,
+      "qualify-award-leads": 25,
+      "source-catalog-scout": 10,
+    });
 
     const seededCount = await ensureDefaultAgents(getDatabase());
-    expect(seededCount).toBeGreaterThanOrEqual(1);
+    expect(seededCount).toBe(DEFAULT_AGENT_SEEDS.length);
+    const rows = await getDatabase().select().from(researchAgents);
+    const defaultRows = rows.filter((agent) => agent.key in split);
+    expect(defaultRows.filter((agent) => agent.status === "paused").map((agent) => agent.key)).toEqual([
+      "discover-sam",
+    ]);
+    const sourceCatalog = rows.find((agent) => agent.key === "source-catalog-scout");
+    expect(sourceCatalog).toMatchObject({
+      name: "Source Catalog Scout",
+      agentType: "discover_source",
+      cadenceSeconds: 86400,
+      budgetSharePct: "10.00",
+      status: "running",
+    });
+    const resolver = rows.find((agent) => agent.key === "resolve-domains");
+    expect(resolver).toMatchObject({
+      cadenceSeconds: 600,
+      budgetSharePct: "12.00",
+      status: "running",
+    });
 
-    const [row] = await getDatabase()
-      .select()
+    await getDatabase()
+      .update(researchAgents)
+      .set({ status: "paused" })
+      .where(eq(researchAgents.key, "resolve-domains"));
+    await ensureDefaultAgents(getDatabase());
+    const [pausedResolver] = await getDatabase()
+      .select({ status: researchAgents.status })
       .from(researchAgents)
       .where(eq(researchAgents.key, "resolve-domains"))
       .limit(1);
-    expect(row).toMatchObject({
-      name: "Domain Resolver",
-      agentType: "resolve_domain",
-      cadenceSeconds: 600,
-      budgetSharePct: "15.00",
-      status: "paused",
-    });
+    expect(pausedResolver?.status).toBe("paused");
   });
 
   it("selects a newer qualified possible_domain before older unresolved legacy leads", async () => {

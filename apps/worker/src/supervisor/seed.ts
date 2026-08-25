@@ -26,10 +26,10 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     key: "discover-usaspending",
     name: "USAspending Discoverer",
     agentType: "discover_source",
-    goal: "Harvest strict federal aerospace award observations into quarantined source signals; never create leads directly.",
+    goal: "Harvest bounded federal aerospace award observations into quarantined source signals; never create leads directly.",
     cadenceSeconds: 3600,
     budgetSharePct: "10.00",
-    status: "paused",
+    status: "running",
   },
   {
     key: "discover-sam",
@@ -37,7 +37,7 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     agentType: "discover_source",
     goal: "Surface registered aerospace entities via SAM.gov entity search (requires SAM_API_KEY; idles without one).",
     cadenceSeconds: 7200,
-    budgetSharePct: "5.00",
+    budgetSharePct: "0.00",
     status: "paused",
   },
   {
@@ -46,7 +46,7 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     agentType: "enrich_candidate",
     goal: "Deep-research queued candidates oldest-first until evidence supports a routing decision.",
     cadenceSeconds: 300,
-    budgetSharePct: "25.00",
+    budgetSharePct: "20.00",
     status: "running",
   },
   {
@@ -55,7 +55,7 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     agentType: "monitor_ownership",
     goal: "Re-verify ownership on high-interest, evaluate, shortlist, and watchlist candidates whose ownership observations are stale.",
     cadenceSeconds: 21600,
-    budgetSharePct: "10.00",
+    budgetSharePct: "8.00",
     status: "running",
   },
   {
@@ -71,10 +71,10 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     key: "golden-neighbor",
     name: "Golden Neighbor Scout",
     agentType: "golden_neighbor",
-    goal: "For positive or high-interest golden examples (reviewed or proposed), mine bounded same-platform and same-qualification source signals without creating leads.",
+    goal: "Use positive or high-interest golden examples to find bounded Exa company-list source signals without creating leads.",
     cadenceSeconds: 86400,
-    budgetSharePct: "5.00",
-    status: "paused",
+    budgetSharePct: "10.00",
+    status: "running",
   },
   {
     key: "resolve-domains",
@@ -82,8 +82,8 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     agentType: "resolve_domain",
     goal: "Find and verify official websites for discovered leads lacking domains, then attach and promote them.",
     cadenceSeconds: 600,
-    budgetSharePct: "15.00",
-    status: "paused",
+    budgetSharePct: "12.00",
+    status: "running",
   },
   {
     key: "qualify-award-leads",
@@ -92,7 +92,16 @@ export const DEFAULT_AGENT_SEEDS: readonly DefaultAgentSeed[] = [
     goal: "Verify source-agnostic signals through Exa, first-party identity, manufacturing/aerospace evidence, ownership, size, and deterministic tri-state policy before creating leads.",
     cadenceSeconds: 600,
     budgetSharePct: "25.00",
-    status: "paused",
+    status: "running",
+  },
+  {
+    key: "source-catalog-scout",
+    name: "Source Catalog Scout",
+    agentType: "discover_source",
+    goal: "Catalog authoritative aerospace supplier datasets and directories for manual policy review; never mine them into source signals or leads.",
+    cadenceSeconds: 86400,
+    budgetSharePct: "10.00",
+    status: "running",
   },
 ] as const;
 
@@ -118,7 +127,6 @@ export async function ensureDefaultAgents(db: Database): Promise<number> {
           goal: seed.goal,
           cadenceSeconds: seed.cadenceSeconds,
           budgetSharePct: seed.budgetSharePct,
-          status: seed.status,
         },
       })
       .returning({ id: researchAgents.id });

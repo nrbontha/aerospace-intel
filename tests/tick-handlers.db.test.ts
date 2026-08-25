@@ -170,6 +170,7 @@ type FetchDoc = NonNullable<TickHandlerDeps["fetchDocument"]>;
 function depsWith(options: {
   fetchDocument?: FetchDoc;
   searchRecipients?: TickHandlerDeps["searchRecipients"];
+  searchExa?: TickHandlerDeps["searchExa"];
 }): Partial<TickHandlerDeps> {
   // Client comes from the stubbed global fetch (fake gateway); the key is
   // syntactically valid but never leaves the process.
@@ -180,6 +181,7 @@ function depsWith(options: {
     ...(options.searchRecipients === undefined
       ? {}
       : { searchRecipients: options.searchRecipients }),
+    ...(options.searchExa === undefined ? {} : { searchExa: options.searchExa }),
   };
 }
 
@@ -358,6 +360,7 @@ async function insertEvidenceChain(input: {
 afterEach(async () => {
   vi.unstubAllGlobals();
   const db = getDatabase();
+  await db.delete(dataSources).where(eq(dataSources.publisher, "catalog.test"));
   if (createdGoldenIds.length > 0) {
     await db.delete(goldenExamples).where(inArray(goldenExamples.id, createdGoldenIds));
     createdGoldenIds = [];
@@ -1206,37 +1209,41 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     expect(result.findings).toMatchObject({ droppedQuotes: 1, refreshedDocuments: 0 });
   });
 
-  it("golden_neighbor: mines archetype seeds into quarantined source signals, never leads", async () => {
+  it("golden_neighbor: harvests bounded Exa company-list signals with provenance, never leads", async () => {
+    gatewayWithContents([planEnvelope([{ archetypeFilters: {} }])]);
     const [golden] = await getDatabase()
       .insert(goldenExamples)
       .values({
         name: "Golden Drill Corp",
         reviewStatus: "proposed",
         archetypeFit: "positive",
-        grataPayload: { industryNaics: ["336413"], certifications: ["1560"] },
+        descriptionRaw: "Precision machining and landing gear component manufacturing",
+        grataPayload: {
+          industryNaics: ["336413"],
+          products: ["landing gear components"],
+          capabilities: ["five-axis machining"],
+          category: "aircraft parts",
+        },
       })
       .returning({ id: goldenExamples.id });
     createdGoldenIds.push(golden!.id);
 
-    const seenQueries: Array<{
-      naicsCodes?: readonly string[];
-      pscCodes?: readonly string[];
-    }> = [];
+    const seenQueries: string[] = [];
     const agent = await insertAgent({ key: "golden-neighbor-test", agentType: "golden_neighbor" });
     const handler = createV1TickHandlerRegistry(
       depsWith({
-        searchRecipients: async (query) => {
+        searchExa: async (query) => {
+          const queryIndex = seenQueries.length;
           seenQueries.push(query);
-          return [
-            {
-              rawName: "Neighbor Fasteners Co",
-              domain: "neighborfasteners.test",
-              awardCount: 3,
-              totalAwardValueUsd: 900_000,
-              sourceLocator: "usaspending://test/neighbor",
-              sourceQualification: qualifiedSourceQualification(),
-            },
-          ];
+          return Array.from({ length: 10 }, (_, resultIndex) => {
+            const index = queryIndex * 10 + resultIndex;
+            return {
+              title: `Neighbor Fasteners Co ${index}`,
+              url: `https://neighbor-${index}.test/aerospace`,
+              text: `Precision fasteners for aircraft landing gear result ${index}`,
+              score: 0.91,
+            };
+          });
         },
       }),
     );
@@ -1247,23 +1254,29 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     });
     expect(result.outcome).toBe("executed");
     expect(result.findings).toMatchObject({
-      source: "golden_neighbor_usaspending",
+      source: "exa_golden_neighbor",
       examplesConsidered: 1,
-      harvested: 1,
+      harvested: 25,
+      fetched: 25,
     });
-    expect(seenQueries[0]?.naicsCodes).toContain("336413");
+    expect(seenQueries).toHaveLength(3);
+    expect(seenQueries.join(" ")).toContain("landing gear");
     const signals = await getDatabase()
       .select()
       .from(sourceSignals)
       .where(eq(sourceSignals.agentId, agent.id));
-    expect(signals).toHaveLength(1);
+    expect(signals).toHaveLength(25);
     expect(signals[0]).toMatchObject({
-      sourceKey: "golden_neighbor_usaspending",
+      sourceKey: "exa_golden_neighbor",
+      rawDomain: "neighbor-0.test",
       status: "queued_qualification",
     });
-    expect((signals[0]!.sourcePayload as Record<string, unknown>)["goldenNeighborOrigin"]).toBe(
-      true,
-    );
+    expect(signals[0]!.sourcePayload).toMatchObject({
+      goldenNeighborOrigin: true,
+      query: expect.stringContaining("landing gear"),
+      snippet: "Precision fasteners for aircraft landing gear result 0",
+      score: 0.91,
+    });
     const leadRows = await getDatabase()
       .select()
       .from(leads)
@@ -1272,12 +1285,9 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
   });
 
   it("golden_neighbor idles when no positive proposed or reviewed examples exist", async () => {
+    gatewayWithContents([planEnvelope([{ archetypeFilters: {} }])]);
     const agent = await insertAgent({ key: "golden-neighbor-empty", agentType: "golden_neighbor" });
-    const handler = createV1TickHandlerRegistry(
-      depsWith({
-        searchRecipients: async () => [],
-      }),
-    );
+    const handler = createV1TickHandlerRegistry(depsWith({ searchExa: async () => [] }));
     const result = await handler.get("golden_neighbor")!({
       agent,
       signal: new AbortController().signal,
@@ -1286,6 +1296,77 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     expect(result.findings).toMatchObject({
       idleReason: "no_positive_golden_examples",
     });
+  });
+
+  it("source catalog scout stores authoritative Exa results only in data_sources", async () => {
+    gatewayWithContents([planEnvelope([{ source: "source_catalog" }])]);
+    let searchCalls = 0;
+    const agent = await insertAgent({
+      key: "source-catalog-scout-test",
+      agentType: "discover_source",
+    });
+    const handler = createV1TickHandlerRegistry(
+      depsWith({
+        searchExa: async (query) => {
+          const index = searchCalls % 6;
+          searchCalls += 1;
+          return [
+            {
+              title: `Authoritative Aerospace Directory ${index}`,
+              url: `https://catalog.test/directory/${index}`,
+              text: `Official directory result for ${query}`,
+              score: 0.8 + index / 100,
+            },
+          ];
+        },
+      }),
+    );
+
+    const first = await handler.get("discover_source")!({
+      agent,
+      signal: new AbortController().signal,
+    });
+    expect(first.outcome).toBe("executed");
+    expect(first.findings).toMatchObject({
+      source: "source_catalog",
+      queries: 6,
+      cataloged: 6,
+      duplicates: 0,
+    });
+    const catalogRows = await getDatabase()
+      .select()
+      .from(dataSources)
+      .where(eq(dataSources.publisher, "catalog.test"))
+      .orderBy(asc(dataSources.name));
+    expect(catalogRows).toHaveLength(6);
+    expect(catalogRows[0]).toMatchObject({
+      access: "restricted_metadata_only",
+      ingestion: "manual",
+      publisher: "catalog.test",
+    });
+    expect(JSON.parse(catalogRows[0]!.notes!)).toMatchObject({
+      catalogScout: true,
+      policy: {
+        access: "unknown",
+        ingestion: "manual_review_only",
+        modelUse: "unknown_not_authorized",
+      },
+    });
+    expect(
+      await getDatabase()
+        .select()
+        .from(sourceSignals)
+        .where(eq(sourceSignals.agentId, agent.id)),
+    ).toHaveLength(0);
+    expect(
+      await getDatabase().select().from(leads).where(eq(leads.campaignId, agent.id)),
+    ).toHaveLength(0);
+
+    const second = await handler.get("discover_source")!({
+      agent,
+      signal: new AbortController().signal,
+    });
+    expect(second.findings).toMatchObject({ cataloged: 0, duplicates: 6 });
   });
 });
 
