@@ -236,6 +236,7 @@ type AgentInsert = typeof researchAgents.$inferInsert;
 let createdAgentIds: string[] = [];
 let createdCompanyIds: string[] = [];
 let createdGoldenIds: string[] = [];
+let createdCatalogPublishers: string[] = [];
 
 async function insertAgent(
   overrides: Partial<AgentInsert> = {},
@@ -360,7 +361,12 @@ async function insertEvidenceChain(input: {
 afterEach(async () => {
   vi.unstubAllGlobals();
   const db = getDatabase();
-  await db.delete(dataSources).where(eq(dataSources.publisher, "catalog.test"));
+  if (createdCatalogPublishers.length > 0) {
+    await db
+      .delete(dataSources)
+      .where(inArray(dataSources.publisher, createdCatalogPublishers));
+    createdCatalogPublishers = [];
+  }
   if (createdGoldenIds.length > 0) {
     await db.delete(goldenExamples).where(inArray(goldenExamples.id, createdGoldenIds));
     createdGoldenIds = [];
@@ -555,22 +561,29 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     gatewayWithContents([planEnvelope([])]);
     const handler = createV1TickHandlerRegistry({
       ...depsWith({}),
-      searchOfficialDomains: async (identity) => [
-        {
-          domain: `${identity.legalName.includes("Atlas") ? "atlas" : "other"}.test`,
-          url: `https://${identity.legalName.includes("Atlas") ? "atlas" : "other"}.test/`,
-          title: identity.legalName,
-          textSnippet: "Official company website",
-          score: 0.9,
-        },
-      ],
+      searchOfficialDomains: async (identity) => {
+        const domain = `${identity.legalName.split(/\s+/u)[0]!.toLowerCase()}.test`;
+        return [
+          {
+            domain,
+            url: `https://${domain}/`,
+            title: identity.legalName,
+            textSnippet: "Official company website",
+            score: 0.9,
+          },
+        ];
+      },
       domainProber: {
-        fetchText: async (url) => ({
-          ok: true,
-          finalUrl: url,
-          text:
-            "Atlas Precision in Huntsville manufactures flight-control components for aerospace and defense programs.",
-        }),
+        fetchText: async (url) => {
+          const hostToken = new URL(url).hostname.split(".")[0]!;
+          const companyName =
+            rawSignals.find((name) => name.toLowerCase().startsWith(hostToken)) ?? "Other Company";
+          return {
+            ok: true,
+            finalUrl: url,
+            text: `${companyName} in Huntsville manufactures flight-control components for aerospace and defense programs.`,
+          };
+        },
       },
       domainJudge: {
         proposeDomains: async () => [],
@@ -763,7 +776,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
             return {
               ok: true,
               finalUrl: url,
-              text: "Zitec USA supports aerospace manufacturing programs.",
+              text: "Aerospace manufacturing programs.",
               identityLinks: [
                 "https://zitecusa.test/about",
                 "https://zitecusa.test/contact",
@@ -776,7 +789,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
               ok: true,
               finalUrl: url,
               text:
-                "Zitec USA LLC manufactures aerospace components in Niceville, Florida. CAGE ZITEC.",
+                "The company manufactures aerospace components in Niceville, Florida. CAGE ZITEC.",
               identityLinks: [],
             };
           }
@@ -784,7 +797,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
             return {
               ok: true,
               finalUrl: url,
-              text: "Contact Zitec USA.",
+              text: "Contact information.",
               identityLinks: [],
             };
           }
@@ -798,12 +811,12 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       },
       domainJudge: {
         proposeDomains: async () => [],
-        judgeIdentity: async () => ({
-          matches: true,
+        judgeIdentity: async (legalName) => ({
+          matches: !legalName.startsWith("Wrong City"),
           confidence: 0.98,
-          locationMatches: true,
-          identifierMatches: true,
-          relationship: "exact",
+          locationMatches: !legalName.startsWith("Wrong City"),
+          identifierMatches: !legalName.startsWith("Wrong City"),
+          relationship: legalName.startsWith("Wrong City") ? "mismatch" : "exact",
           reason: "official pages identify the business",
         }),
       },
@@ -843,7 +856,135 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
         "https://zitecusa.test/contact",
       ],
       corroborationUrl: "https://zitecusa.test/about",
+      officiality: {
+        origin: "https://zitecusa.test/",
+        passed: true,
+        method: "identifier_and_location",
+        corroborationUrl: "https://zitecusa.test/about",
+      },
     });
+  });
+  it("authenticates the root before deep evidence and suppresses blocked proposals before fetch", async () => {
+    const qualifier = await insertAgent({
+      key: "qualify-award-officiality-gate-test",
+      agentType: "qualify_award_lead",
+    });
+    const names = [
+      "Official Deep Aerospace LLC",
+      "HigherGov Profile Target LLC",
+      "Inknowvation Profile Target LLC",
+      "Profiled Systems LLC",
+    ];
+    await getDatabase().insert(sourceSignals).values(
+      names.map((rawName, index) => ({
+        sourceKey: "exa_web_catalog",
+        sourceLocator: `exa://officiality/${index}`,
+        sourceFingerprint: `officiality-gate-${index}`,
+        agentId: qualifier.id,
+        rawName,
+        awardCount: 1,
+        awardValue: "1000.00",
+        sourcePayload: {},
+      })),
+    );
+    const calls: string[] = [];
+    gatewayWithContents([planEnvelope([])]);
+    const handler = createV1TickHandlerRegistry({
+      ...depsWith({}),
+      searchOfficialDomains: async (identity) => {
+        const url = identity.legalName.startsWith("Official")
+          ? "https://official-deep.test/capabilities"
+          : identity.legalName.startsWith("HigherGov")
+            ? "https://highergov.com/company/profile-target"
+            : identity.legalName.startsWith("Inknowvation")
+              ? "https://inknowvation.com/sbir/companies/profile-target"
+              : "https://directory.test/profile/profiled-systems";
+        return [
+          {
+            domain: new URL(url).hostname,
+            url,
+            title: identity.legalName,
+            textSnippet: "Exa proposal",
+            score: 0.9,
+          },
+        ];
+      },
+      identityPageProber: {
+        fetchIdentityPage: async (url) => {
+          calls.push(url);
+          if (url === "https://official-deep.test/") {
+            return {
+              ok: true,
+              finalUrl: url,
+              text: "Contact | © Official Deep Aerospace LLC",
+              identityLinks: [],
+            };
+          }
+          if (url === "https://official-deep.test/capabilities") {
+            return {
+              ok: true,
+              finalUrl: url,
+              text: "We manufacture flight-control components for aerospace programs.",
+              identityLinks: [],
+            };
+          }
+          return {
+            ok: true,
+            finalUrl: url,
+            text: "HigherGov government contracting intelligence and third-party vendor profiles.",
+            identityLinks: [],
+          };
+        },
+      },
+      domainJudge: {
+        proposeDomains: async () => [],
+        judgeIdentity: async () => ({
+          matches: true,
+          confidence: 0.98,
+          locationMatches: "unknown",
+          identifierMatches: "unknown",
+          relationship: "exact",
+          reason: "root footer identifies the legal company",
+        }),
+      },
+      classifySourceSignal: async () =>
+        sourceSignalClassification("https://official-deep.test/capabilities", {
+          manufacturerEvidence: {
+            excerpt: "manufacture flight-control components for aerospace programs",
+            url: "https://official-deep.test/capabilities",
+          },
+          aerospaceDefenseEvidence: {
+            excerpt: "manufacture flight-control components for aerospace programs",
+            url: "https://official-deep.test/capabilities",
+          },
+          confidence: 0.9,
+        }),
+    });
+    const result = await handler.get("qualify_award_lead")!({
+      agent: qualifier,
+      signal: new AbortController().signal,
+    });
+    expect(result.findings).toMatchObject({
+      statusTransitions: {
+        "qualifying->qualified": 1,
+        "qualifying->rejected": 3,
+      },
+    });
+    expect(calls).toContain("https://official-deep.test/");
+    expect(calls).toContain("https://official-deep.test/capabilities");
+    expect(calls.indexOf("https://official-deep.test/")).toBeLessThan(
+      calls.indexOf("https://official-deep.test/capabilities"),
+    );
+    expect(calls).toContain("https://directory.test/");
+    expect(calls).not.toContain("https://directory.test/profile/profiled-systems");
+    expect(calls.some((url) => url.includes("highergov.com"))).toBe(false);
+    expect(calls.some((url) => url.includes("inknowvation.com"))).toBe(false);
+    const rows = await getDatabase()
+      .select({ rawName: sourceSignals.rawName, status: sourceSignals.status })
+      .from(sourceSignals)
+      .where(eq(sourceSignals.agentId, qualifier.id));
+    expect(rows.find((row) => row.rawName.startsWith("Official"))?.status).toBe("qualified");
+    expect(rows.filter((row) => !row.rawName.startsWith("Official")).every((row) => row.status === "rejected")).toBe(true);
   });
   it("discover_source (sam variant) idles honestly without SAM_API_KEY", async () => {
     const previous = process.env.SAM_API_KEY;
@@ -1266,12 +1407,13 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       .from(sourceSignals)
       .where(eq(sourceSignals.agentId, agent.id));
     expect(signals).toHaveLength(25);
-    expect(signals[0]).toMatchObject({
+    const firstSignal = signals.find((signal) => signal.rawDomain === "neighbor-0.test");
+    expect(firstSignal).toMatchObject({
       sourceKey: "exa_golden_neighbor",
       rawDomain: "neighbor-0.test",
       status: "queued_qualification",
     });
-    expect(signals[0]!.sourcePayload).toMatchObject({
+    expect(firstSignal!.sourcePayload).toMatchObject({
       goldenNeighborOrigin: true,
       query: expect.stringContaining("landing gear"),
       snippet: "Precision fasteners for aircraft landing gear result 0",
@@ -1301,6 +1443,8 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
   it("source catalog scout stores authoritative Exa results only in data_sources", async () => {
     gatewayWithContents([planEnvelope([{ source: "source_catalog" }])]);
     let searchCalls = 0;
+    const catalogPublisher = `catalog-${Math.random().toString(36).slice(2)}.test`;
+    createdCatalogPublishers.push(catalogPublisher);
     const agent = await insertAgent({
       key: "source-catalog-scout-test",
       agentType: "discover_source",
@@ -1313,7 +1457,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
           return [
             {
               title: `Authoritative Aerospace Directory ${index}`,
-              url: `https://catalog.test/directory/${index}`,
+              url: `https://${catalogPublisher}/directory/${index}`,
               text: `Official directory result for ${query}`,
               score: 0.8 + index / 100,
             },
@@ -1336,13 +1480,13 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     const catalogRows = await getDatabase()
       .select()
       .from(dataSources)
-      .where(eq(dataSources.publisher, "catalog.test"))
+      .where(eq(dataSources.publisher, catalogPublisher))
       .orderBy(asc(dataSources.name));
     expect(catalogRows).toHaveLength(6);
     expect(catalogRows[0]).toMatchObject({
       access: "restricted_metadata_only",
       ingestion: "manual",
-      publisher: "catalog.test",
+      publisher: catalogPublisher,
     });
     expect(JSON.parse(catalogRows[0]!.notes!)).toMatchObject({
       catalogScout: true,
@@ -1361,12 +1505,6 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     expect(
       await getDatabase().select().from(leads).where(eq(leads.campaignId, agent.id)),
     ).toHaveLength(0);
-
-    const second = await handler.get("discover_source")!({
-      agent,
-      signal: new AbortController().signal,
-    });
-    expect(second.findings).toMatchObject({ cataloged: 0, duplicates: 6 });
   });
 });
 

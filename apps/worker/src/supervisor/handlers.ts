@@ -11,7 +11,7 @@ import {
   evidence,
   getDatabase,
   goldenExamples,
-  identityOverlapRatio,
+  leadNameTokens,
   ingestLeadCandidates,
   mapResearchRunInput,
   observations,
@@ -23,7 +23,6 @@ import {
   upsertHarvestedSourceSignal,
   leads,
   resolveLeadDomain,
-  MIN_IDENTITY_OVERLAP,
   MIN_JUDGE_CONFIDENCE,
   type AgentType,
   type Database,
@@ -48,6 +47,7 @@ import {
   rescoreCandidateAfterResearch,
   safeFetchUrl,
   SafeFetchError,
+  isSuppressedDirectoryDomain,
   searchOfficialDomainCandidates,
   UsaspendingDiscoveryStrategy,
   wrapUntrustedSourceJson,
@@ -1968,6 +1968,7 @@ function identityPageText(html: string): string {
       /<meta[^>]+name\s*=\s*["']description["'][^>]*content\s*=\s*["']([^"']*)["']/giu,
     ),
     ...matchAll(html, /<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/giu),
+    ...matchAll(html, /<footer[^>]*>([\s\S]*?)<\/footer>/giu),
   ];
   return collapse(`${headings.join(" ")} ${stripTags(html)}`).slice(
     0,
@@ -1984,7 +1985,7 @@ function identityLinksFrom(html: string, baseUrl: string): string[] {
     if (href === undefined) continue;
     const label = collapse(stripTags(match[2] ?? ""));
     const relevance = `${href} ${label}`.toLocaleLowerCase("en-US");
-    if (!/(about|contact|company|profile|who[\s_-]*we[\s_-]*are)/u.test(relevance)) continue;
+    if (!/(about|contact|who[\s_-]*we[\s_-]*are)/u.test(relevance)) continue;
     let resolved: URL;
     try {
       resolved = new URL(decodeEntities(href), baseUrl);
@@ -1998,11 +1999,7 @@ function identityLinksFrom(html: string, baseUrl: string): string[] {
       continue;
     }
     resolved.hash = "";
-    const priority = /about|who[\s_-]*we[\s_-]*are/u.test(relevance)
-      ? 0
-      : /company|profile/u.test(relevance)
-        ? 1
-        : 2;
+    const priority = /about|who[\s_-]*we[\s_-]*are/u.test(relevance) ? 0 : 1;
     candidates.push({ url: resolved.toString(), priority });
   }
   candidates.sort((left, right) => left.priority - right.priority);
@@ -2343,49 +2340,115 @@ function sourceSignalIdentityHints(signal: {
   };
 }
 
-function identityCorroborationUrl(
-  signal: SourceSignal,
-  pages: readonly IdentityPage[],
-): string | null {
-  const identifiers = [signal.uei, signal.cage].filter(
-    (value): value is string => value !== null,
-  );
-  const locations = [
-    ...(signal.city === null ? [] : [signal.city]),
-    ...(signal.city === null || signal.state === null ? [] : [`${signal.city}, ${signal.state}`]),
-  ];
-  for (const page of pages) {
-    const normalized = normalizeText(page.text);
-    if (locations.some((location) => normalized.includes(normalizeText(location)))) {
-      return page.finalUrl;
-    }
-  }
-  for (const page of pages) {
-    const normalized = normalizeText(page.text);
-    if (identifiers.some((identifier) => normalized.includes(normalizeText(identifier)))) {
-      return page.finalUrl;
-    }
-  }
-  return null;
+export const OFFICIAL_SITE_NAME_OVERLAP_THRESHOLD = 0.6;
+
+export interface OfficialSiteAuthenticity {
+  readonly origin: string;
+  readonly passed: boolean;
+  readonly method:
+    | "legal_name_token_overlap"
+    | "identifier_and_location"
+    | "none"
+    | "blocked_domain"
+    | "invalid_url"
+    | "unreachable";
+  readonly corroborationUrl: string | null;
 }
-function identityCorroborates(
-  legalName: string,
-  pageText: string,
-  judgment: IdentityJudgment,
-  corroborationUrl: string | null,
-  hasIdentityHints: boolean,
-): boolean {
-  const modelAccepts =
+
+interface OfficialSiteIdentity {
+  readonly legalName: string;
+  readonly city: string | null;
+  readonly state: string | null;
+  readonly uei: string | null;
+  readonly cage: string | null;
+}
+
+function containsExactIdentityValue(text: string, value: string): boolean {
+  const haystack = text.normalize("NFKC").toLocaleLowerCase("en-US");
+  const needle = value.normalize("NFKC").trim().toLocaleLowerCase("en-US");
+  if (needle.length === 0) return false;
+  let from = 0;
+  while (from <= haystack.length - needle.length) {
+    const index = haystack.indexOf(needle, from);
+    if (index < 0) return false;
+    const before = index === 0 ? "" : haystack[index - 1] ?? "";
+    const afterIndex = index + needle.length;
+    const after = afterIndex === haystack.length ? "" : haystack[afterIndex] ?? "";
+    if (!/[a-z0-9]/u.test(before) && !/[a-z0-9]/u.test(after)) return true;
+    from = index + 1;
+  }
+  return false;
+}
+
+function pageMatchesLocation(identity: OfficialSiteIdentity, text: string): boolean {
+  if (identity.city !== null) return containsExactIdentityValue(text, identity.city);
+  return identity.state !== null && containsExactIdentityValue(text, identity.state);
+}
+
+function legalNameTokenOverlapRatio(legalName: string, pageText: string): number {
+  const legalTokens = leadNameTokens(legalName);
+  if (legalTokens.length === 0) return 0;
+  const pageTokens = new Set(
+    pageText
+      .normalize("NFKC")
+      .toLocaleLowerCase("en-US")
+      .split(/[^a-z0-9]+/u)
+      .filter((token) => token.length > 0),
+  );
+  let matched = 0;
+  for (const token of legalTokens) {
+    if (pageTokens.has(token)) matched += 1;
+  }
+  return matched / legalTokens.length;
+}
+
+export function evaluateOfficialSiteAuthenticity(
+  identity: OfficialSiteIdentity,
+  origin: string,
+  pages: readonly IdentityPage[],
+): OfficialSiteAuthenticity {
+  for (const page of pages) {
+    if (
+      legalNameTokenOverlapRatio(identity.legalName, page.text) >=
+      OFFICIAL_SITE_NAME_OVERLAP_THRESHOLD
+    ) {
+      return {
+        origin,
+        passed: true,
+        method: "legal_name_token_overlap",
+        corroborationUrl: page.finalUrl,
+      };
+    }
+  }
+
+  const identifierPage = pages.find((page) =>
+    [identity.uei, identity.cage].some(
+      (identifier) =>
+        identifier !== null && containsExactIdentityValue(page.text, identifier),
+    ),
+  );
+  const locationPage = pages.find((page) => pageMatchesLocation(identity, page.text));
+  if (identifierPage !== undefined && locationPage !== undefined) {
+    return {
+      origin,
+      passed: true,
+      method: "identifier_and_location",
+      corroborationUrl: identifierPage.finalUrl,
+    };
+  }
+  return {
+    origin,
+    passed: false,
+    method: "none",
+    corroborationUrl: null,
+  };
+}
+
+function identityJudgmentAccepts(judgment: IdentityJudgment): boolean {
+  return (
     judgment.matches &&
     judgment.confidence >= MIN_JUDGE_CONFIDENCE &&
-    (judgment.relationship === "exact" || judgment.relationship === "parent_brand");
-  if (!modelAccepts) return false;
-  if (corroborationUrl !== null) return true;
-  return (
-    !hasIdentityHints &&
-    judgment.locationMatches === "unknown" &&
-    judgment.identifierMatches === "unknown" &&
-    identityOverlapRatio(legalName, pageText) >= MIN_IDENTITY_OVERLAP
+    (judgment.relationship === "exact" || judgment.relationship === "parent_brand")
   );
 }
 
@@ -2592,48 +2655,148 @@ async function qualifySourceSignal(input: {
   });
   const attempts: Array<Record<string, unknown>> = [];
   for (const proposal of proposals.slice(0, MAX_EXA_PROPOSALS_PER_SIGNAL)) {
-    const homepage = await input.pageProber.fetchIdentityPage(proposal.url);
-    if (!homepage.ok) {
-      attempts.push({ domain: proposal.domain, outcome: "unreachable", reason: homepage.error });
+    let candidateUrl: URL;
+    try {
+      candidateUrl = new URL(proposal.url);
+    } catch {
+      attempts.push({
+        domain: proposal.domain,
+        outcome: "invalid_url",
+        officiality: {
+          origin: proposal.url,
+          passed: false,
+          method: "invalid_url",
+          corroborationUrl: null,
+        } satisfies OfficialSiteAuthenticity,
+      });
       continue;
     }
-    const pages: IdentityPage[] = [homepage];
+    const origin = `${candidateUrl.origin}/`;
+    if (
+      !["http:", "https:"].includes(candidateUrl.protocol) ||
+      candidateUrl.username !== "" ||
+      candidateUrl.password !== ""
+    ) {
+      attempts.push({
+        domain: proposal.domain,
+        outcome: "invalid_url",
+        officiality: {
+          origin,
+          passed: false,
+          method: "invalid_url",
+          corroborationUrl: null,
+        } satisfies OfficialSiteAuthenticity,
+      });
+      continue;
+    }
+    if (isSuppressedDirectoryDomain(candidateUrl.hostname)) {
+      attempts.push({
+        domain: proposal.domain,
+        outcome: "blocked_domain",
+        officiality: {
+          origin,
+          passed: false,
+          method: "blocked_domain",
+          corroborationUrl: null,
+        } satisfies OfficialSiteAuthenticity,
+      });
+      continue;
+    }
+
+    // Exa result paths are weak third-party proposals. Always authenticate the
+    // root origin before fetching or using the proposed deep page.
+    const homepage = await input.pageProber.fetchIdentityPage(origin);
+    if (!homepage.ok) {
+      attempts.push({
+        domain: proposal.domain,
+        outcome: "unreachable",
+        reason: homepage.error,
+        officiality: {
+          origin,
+          passed: false,
+          method: "unreachable",
+          corroborationUrl: null,
+        } satisfies OfficialSiteAuthenticity,
+      });
+      continue;
+    }
     const homepageHost = hostOf(homepage.finalUrl);
-    for (const link of homepage.identityLinks.slice(0, 2)) {
-      if (homepageHost === null || hostOf(link) !== homepageHost) continue;
+    if (
+      homepageHost === null ||
+      isSuppressedDirectoryDomain(new URL(homepage.finalUrl).hostname)
+    ) {
+      attempts.push({
+        domain: proposal.domain,
+        outcome: "blocked_domain_redirect",
+        officiality: {
+          origin,
+          passed: false,
+          method: "blocked_domain",
+          corroborationUrl: null,
+        } satisfies OfficialSiteAuthenticity,
+      });
+      continue;
+    }
+    const authenticityPages: IdentityPage[] = [homepage];
+    const identityLinks = homepage.identityLinks
+      .filter((link) => hostOf(link) === homepageHost)
+      .slice(0, 2);
+    for (const link of identityLinks) {
       const page = await input.pageProber.fetchIdentityPage(link);
-      if (page.ok) pages.push(page);
+      if (page.ok && hostOf(page.finalUrl) === homepageHost) authenticityPages.push(page);
+    }
+    const officiality = evaluateOfficialSiteAuthenticity(
+      {
+        legalName: input.signal.rawName,
+        city: input.signal.city,
+        state: input.signal.state,
+        uei: input.signal.uei,
+        cage: input.signal.cage,
+      },
+      origin,
+      authenticityPages,
+    );
+    if (!officiality.passed) {
+      attempts.push({
+        domain: proposal.domain,
+        urls: authenticityPages.map((page) => page.finalUrl),
+        outcome: "officiality_failed",
+        officiality,
+      });
+      continue;
+    }
+
+    const pages = [...authenticityPages];
+    candidateUrl.hash = "";
+    if (
+      candidateUrl.href !== origin &&
+      hostOf(candidateUrl.href) === homepageHost &&
+      !pages.some((page) => page.finalUrl === candidateUrl.href)
+    ) {
+      const deepPage = await input.pageProber.fetchIdentityPage(candidateUrl.href);
+      if (deepPage.ok && hostOf(deepPage.finalUrl) === homepageHost) pages.push(deepPage);
     }
     const pageText = pages
       .map((page) => `[Source URL: ${page.finalUrl}]\n${page.text}`)
       .join("\n\n");
     const identityUrls = pages.map((page) => page.finalUrl);
-    const corroborationUrl = identityCorroborationUrl(input.signal, pages);
-    const hasIdentityHints =
-      input.signal.city !== null || input.signal.uei !== null || input.signal.cage !== null;
     const judgment = await input.judge.judgeIdentity(
       input.signal.rawName,
       pageText,
       sourceSignalIdentityHints(input.signal),
     );
-    if (
-      !identityCorroborates(
-        input.signal.rawName,
-        pageText,
-        judgment,
-        corroborationUrl,
-        hasIdentityHints,
-      )
-    ) {
+    if (!identityJudgmentAccepts(judgment)) {
       attempts.push({
         domain: proposal.domain,
         urls: identityUrls,
         outcome: "identity_mismatch",
+        officiality,
         identity: judgment,
       });
       continue;
     }
 
+    const corroborationUrl = officiality.corroborationUrl;
     const modelProposal = await input.classifier({
       legalName: input.signal.rawName,
       pageText,
@@ -2651,6 +2814,7 @@ async function qualifySourceSignal(input: {
         title: proposal.title,
         snippet: proposal.textSnippet,
       },
+      officiality,
       identity: judgment,
       identityUrls,
       corroborationUrl,

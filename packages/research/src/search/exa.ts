@@ -24,33 +24,41 @@ const officialDomainIdentitySchema = z.object({
   cage: z.string().trim().min(1).max(32).optional(),
 });
 
-const blockedDomainSuffixes = [
+export const OFFICIAL_CANDIDATE_BLOCKED_DOMAIN_SUFFIXES: ReadonlySet<string> = new Set([
+  "highergov.com",
+  "govtribe.com",
+  "cage.report",
+  "sam.gov",
+  "usaspending.gov",
+  "dnb.com",
+  "dunandbradstreet.com",
+  "zoominfo.com",
+  "rocketreach.co",
+  "opencorporates.com",
   "linkedin.com",
   "crunchbase.com",
-  "usaspending.gov",
-  "govtribe.com",
+  "bloomberg.com",
+  "pitchbook.com",
+  "manta.com",
+  "bbb.org",
+  "chamberofcommerce.com",
+  "mapquest.com",
+  "lead411.com",
+  "signalhire.com",
+  "inknowvation.com",
   "facebook.com",
   "instagram.com",
   "twitter.com",
   "x.com",
   "youtube.com",
   "tiktok.com",
-  "zoominfo.com",
-  "dnb.com",
-  "dunandbradstreet.com",
   "yellowpages.com",
   "yelp.com",
-  "manta.com",
   "bizapedia.com",
-  "opencorporates.com",
-  "chamberofcommerce.com",
-  "rocketreach.co",
-  "pitchbook.com",
-  "bloomberg.com",
   "glassdoor.com",
   "indeed.com",
   "wikipedia.org",
-] as const;
+]);
 
 export type ExaSearchErrorCode =
   | "invalid_request"
@@ -290,8 +298,11 @@ function normalizeDomain(hostname: string): string | null {
   return domain.length === 0 ? null : domain;
 }
 
-function isSuppressedDirectoryDomain(domain: string): boolean {
-  return blockedDomainSuffixes.some(
-    (blocked) => domain === blocked || domain.endsWith(`.${blocked}`),
-  );
+export function isSuppressedDirectoryDomain(domain: string): boolean {
+  const normalized = normalizeDomain(domain);
+  if (normalized === null) return false;
+  for (const blocked of OFFICIAL_CANDIDATE_BLOCKED_DOMAIN_SUFFIXES) {
+    if (normalized === blocked || normalized.endsWith(`.${blocked}`)) return true;
+  }
+  return false;
 }

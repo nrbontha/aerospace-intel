@@ -2,6 +2,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   deterministicSourceSignalDecision,
+  evaluateOfficialSiteAuthenticity,
+  type IdentityPage,
   type SourceSignalClassification,
   type SourceSignalTargetDecision,
 } from "../apps/worker/src/supervisor/handlers.js";
@@ -118,6 +120,88 @@ describe("deterministic generic source-signal target policy", () => {
         "manufacturer_evidence_not_page_grounded",
         "aerospace_defense_evidence_not_page_grounded",
       ],
+    });
+  });
+});
+
+describe("deterministic official-site authenticity", () => {
+  const page = (finalUrl: string, text: string): IdentityPage => ({
+    finalUrl,
+    text,
+    identityLinks: [],
+  });
+
+  it("rejects a target profile when the root identifies only HigherGov", () => {
+    expect(
+      evaluateOfficialSiteAuthenticity(
+        {
+          legalName: "A F B SYSTEMS, INC.",
+          city: "Huntsville",
+          state: "AL",
+          uei: null,
+          cage: null,
+        },
+        "https://directory.test/",
+        [
+          page(
+            "https://directory.test/",
+            "HigherGov government contracting intelligence, vendor profiles, and opportunity search.",
+          ),
+        ],
+      ),
+    ).toEqual({
+      origin: "https://directory.test/",
+      passed: false,
+      method: "none",
+      corroborationUrl: null,
+    });
+  });
+
+  it("accepts an official origin when its root/footer identifies the legal company", () => {
+    expect(
+      evaluateOfficialSiteAuthenticity(
+        {
+          legalName: "A F B SYSTEMS, INC.",
+          city: null,
+          state: null,
+          uei: null,
+          cage: null,
+        },
+        "https://afbsystems.test/",
+        [
+          page(
+            "https://afbsystems.test/",
+            "Capabilities Contact © A F B Systems, Inc. All rights reserved.",
+          ),
+        ],
+      ),
+    ).toMatchObject({
+      passed: true,
+      method: "legal_name_token_overlap",
+      corroborationUrl: "https://afbsystems.test/",
+    });
+  });
+
+  it("accepts exact CAGE plus matching location across root and About evidence", () => {
+    expect(
+      evaluateOfficialSiteAuthenticity(
+        {
+          legalName: "Unrelated Legal Identity LLC",
+          city: "Franklin",
+          state: "OH",
+          uei: null,
+          cage: "1A004",
+        },
+        "https://manufacturer.test/",
+        [
+          page("https://manufacturer.test/", "Precision foundry located in Franklin, Ohio."),
+          page("https://manufacturer.test/about", "Government supplier CAGE 1A004."),
+        ],
+      ),
+    ).toMatchObject({
+      passed: true,
+      method: "identifier_and_location",
+      corroborationUrl: "https://manufacturer.test/about",
     });
   });
 });

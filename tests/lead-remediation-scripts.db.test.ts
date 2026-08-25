@@ -21,6 +21,9 @@ import {
   quarantineLegacyUnqualifiedLeads,
 } from "../scripts/quarantine-legacy-leads.mts";
 import { correctZitecIdentity } from "../scripts/correct-zitec-identity.mts";
+import {
+  correctThirdPartyDomainLinks,
+} from "../scripts/correct-third-party-domain-links.mts";
 
 const DB_TESTS_ENABLED = process.env.ASI_DB_TESTS === "1";
 const campaignId = randomUUID();
@@ -40,6 +43,7 @@ function loadDatabaseUrl(): void {
 describe.skipIf(!DB_TESTS_ENABLED)("legacy lead remediation scripts (DB)", () => {
   let db: Database;
   let wrongCompanyId = "";
+  const thirdPartyCompanyIds: string[] = [];
 
   beforeAll(async () => {
     loadDatabaseUrl();
@@ -50,6 +54,9 @@ describe.skipIf(!DB_TESTS_ENABLED)("legacy lead remediation scripts (DB)", () =>
   afterAll(async () => {
     await db.delete(leads).where(eq(leads.campaignId, campaignId));
     if (wrongCompanyId) await db.delete(companies).where(eq(companies.id, wrongCompanyId));
+    for (const companyId of thirdPartyCompanyIds) {
+      await db.delete(companies).where(eq(companies.id, companyId));
+    }
     await closeDatabase();
   });
 
@@ -173,5 +180,162 @@ describe.skipIf(!DB_TESTS_ENABLED)("legacy lead remediation scripts (DB)", () =>
         .where(and(eq(identityMatchCandidates.leadId, lead!.id), eq(identityMatchCandidates.companyId, wrongCompanyId)))
     )[0]!;
     expect(identity.decision).toBe("rejected_merge");
+  });
+
+  it("corrects third-party domain attachments idempotently without touching out-of-scope rows or audit history", async () => {
+    const token = randomUUID();
+    const [company, outOfScopeCompany] = await db
+      .insert(companies)
+      .values([
+        {
+          legalName: "Third Party Attachment Target",
+          displayName: "Third Party Attachment Target",
+          websiteUrl: `https://profile-${token}.inknowvation.com/company`,
+        },
+        {
+          legalName: "Out of Scope Third Party Attachment",
+          displayName: "Out of Scope Third Party Attachment",
+        },
+      ])
+      .returning({ id: companies.id });
+    thirdPartyCompanyIds.push(company!.id, outOfScopeCompany!.id);
+    const blockedRelation = `vendor-${token}.highergov.com`;
+    const retainedRelation = `official-${token}.example.com`;
+    const outOfScopeRelation = `outside-${token}.highergov.com`;
+    await db.insert(companyDomains).values([
+      { companyId: company!.id, domain: blockedRelation, isPrimary: true },
+      { companyId: company!.id, domain: retainedRelation, isPrimary: false },
+      { companyId: outOfScopeCompany!.id, domain: outOfScopeRelation, isPrimary: true },
+    ]);
+    const [candidate] = await db
+      .insert(candidates)
+      .values({
+        companyId: company!.id,
+        rationale: { whyInteresting: [], risks: [], unknowns: [] },
+        currentScores: {},
+      })
+      .returning({ id: candidates.id });
+    const [lead] = await db
+      .insert(leads)
+      .values({
+        campaignId,
+        rawName: "Third Party Attachment Target",
+        status: "resolved",
+        possibleDomain: `https://${blockedRelation}/profile`,
+        resolvedCompanyId: company!.id,
+        context: { preserved: true },
+      })
+      .returning({ id: leads.id });
+    const [identity] = await db
+      .insert(identityMatchCandidates)
+      .values({
+        leadId: lead!.id,
+        companyId: company!.id,
+        signalType: "domain",
+        confidence: "1.000",
+        decision: "merged",
+      })
+      .returning({ id: identityMatchCandidates.id });
+    const preservedAuditAction = `test.audit.preserved.${token}`;
+    await db.insert(auditEvents).values({
+      action: preservedAuditAction,
+      entityType: "lead",
+      entityId: lead!.id,
+      metadata: { evidence: "must remain" },
+    });
+
+    const scope = { leadIds: [lead!.id], companyIds: [company!.id] };
+    const dryRun = await correctThirdPartyDomainLinks(db, { apply: false, ...scope });
+    expect(dryRun).toMatchObject({
+      leads: [expect.objectContaining({ id: lead!.id })],
+      companies: [expect.objectContaining({ id: company!.id })],
+      candidates: [expect.objectContaining({ id: candidate!.id })],
+      domainRelations: [
+        expect.objectContaining({ companyId: company!.id, blockedDomain: "highergov.com" }),
+      ],
+    });
+    expect(dryRun.companies[0]!.blockedDomains).toEqual([
+      "highergov.com",
+      "inknowvation.com",
+    ]);
+    expect(
+      (await db.select().from(leads).where(eq(leads.id, lead!.id)).limit(1))[0]!.status,
+    ).toBe("resolved");
+
+    await correctThirdPartyDomainLinks(db, {
+      apply: true,
+      ...scope,
+      at: new Date("2026-08-24T12:00:00Z"),
+    });
+    const correctedLead = (
+      await db.select().from(leads).where(eq(leads.id, lead!.id)).limit(1)
+    )[0]!;
+    expect(correctedLead).toMatchObject({
+      status: "unresolved_lead",
+      possibleDomain: null,
+      resolvedCompanyId: null,
+      context: {
+        preserved: true,
+        thirdPartyDomainCorrection: {
+          blockedDomains: ["highergov.com", "inknowvation.com"],
+        },
+      },
+    });
+    expect(
+      (await db.select().from(companies).where(eq(companies.id, company!.id)).limit(1))[0]!
+        .websiteUrl,
+    ).toBeNull();
+    expect(
+      (await db.select().from(candidates).where(eq(candidates.id, candidate!.id)).limit(1))[0]!,
+    ).toMatchObject({
+      status: "rejected",
+      rationale: {
+        risks: [
+          "identity mismatch: third-party directory domain (highergov.com, inknowvation.com)",
+        ],
+      },
+    });
+    expect(
+      (
+        await db
+          .select()
+          .from(identityMatchCandidates)
+          .where(eq(identityMatchCandidates.id, identity!.id))
+          .limit(1)
+      )[0]!.decision,
+    ).toBe("rejected_merge");
+    const retainedDomains = await db
+      .select({ domain: companyDomains.domain })
+      .from(companyDomains)
+      .where(eq(companyDomains.companyId, company!.id));
+    expect(retainedDomains.map((row) => row.domain)).toEqual([retainedRelation]);
+    expect(
+      await db
+        .select()
+        .from(companyDomains)
+        .where(eq(companyDomains.domain, outOfScopeRelation)),
+    ).toHaveLength(1);
+    expect(
+      await db.select().from(auditEvents).where(eq(auditEvents.action, preservedAuditAction)),
+    ).toHaveLength(1);
+    const aggregate = await db
+      .select()
+      .from(auditEvents)
+      .where(eq(auditEvents.action, "remediation.third_party_domain_links_applied"));
+    expect(
+      aggregate.some(
+        (event) =>
+          event.metadata["scriptVersion"] === "2026-08-24" &&
+          (event.after as Record<string, unknown>)["candidatesRejected"] === 1,
+      ),
+    ).toBe(true);
+
+    const secondApply = await correctThirdPartyDomainLinks(db, { apply: true, ...scope });
+    expect(secondApply).toMatchObject({
+      leads: [],
+      companies: [],
+      candidates: [],
+      domainRelations: [],
+    });
   });
 });

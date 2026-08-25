@@ -8,6 +8,8 @@ import {
   ExaApiKeyMissingError,
   ExaSearchClient,
   ExaSearchError,
+  isSuppressedDirectoryDomain,
+  OFFICIAL_CANDIDATE_BLOCKED_DOMAIN_SUFFIXES,
   searchOfficialDomainCandidates,
 } from "./exa.js";
 
@@ -235,6 +237,38 @@ describe("searchOfficialDomainCandidates", () => {
         score: 0.7,
       },
     ]);
+  });
+  it("exports the suffix-safe official-candidate directory blocklist", () => {
+    const required = [
+      "highergov.com",
+      "govtribe.com",
+      "cage.report",
+      "sam.gov",
+      "usaspending.gov",
+      "dnb.com",
+      "zoominfo.com",
+      "rocketreach.co",
+      "opencorporates.com",
+      "linkedin.com",
+      "crunchbase.com",
+      "bloomberg.com",
+      "pitchbook.com",
+      "manta.com",
+      "bbb.org",
+      "chamberofcommerce.com",
+      "mapquest.com",
+      "lead411.com",
+      "signalhire.com",
+      "inknowvation.com",
+    ];
+    expect([...OFFICIAL_CANDIDATE_BLOCKED_DOMAIN_SUFFIXES]).toEqual(
+      expect.arrayContaining(required),
+    );
+    for (const domain of required) {
+      expect(isSuppressedDirectoryDomain(domain), domain).toBe(true);
+      expect(isSuppressedDirectoryDomain(`profiles.${domain}`), `profiles.${domain}`).toBe(true);
+      expect(isSuppressedDirectoryDomain(`not-${domain}`), `not-${domain}`).toBe(false);
+    }
   });
   it("makes one identity-specific official-site query", async () => {
     const queries: string[] = [];
