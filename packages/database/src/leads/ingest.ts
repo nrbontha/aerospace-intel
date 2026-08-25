@@ -16,6 +16,7 @@ import {
   leads,
 } from "../schema.js";
 import { upsertCandidate } from "../candidates/storage.js";
+import { withVerifiedDomainLock } from "./domain-resolution.js";
 
 /**
  * Lead ingestion + identity resolution.
@@ -123,13 +124,13 @@ async function findIdentifierMatch(
   return result.rows[0]?.id ?? null;
 }
 
-/** Owner of an exact lowercase domain row, when any. */
+/** Owner of a normalized domain row, including historical www/dot variants. */
 async function findDomainOwner(db: DbOrTx, domain: string): Promise<string | null> {
   const result = await db.execute<{ id: string }>(sql`
     SELECT c.id
     FROM company_domains d
     JOIN companies c ON c.id = d.company_id
-    WHERE lower(d.domain) = ${domain}
+    WHERE lower(regexp_replace(rtrim(d.domain, '.'), '^www\\.', '', 'i')) = ${domain}
     ORDER BY d.is_primary DESC, c.created_at
     LIMIT 1
   `);
@@ -431,41 +432,37 @@ async function applyIngestOutcome(
     }
 
     if (domain !== null) {
-      try {
-        const companyId = await createCompanyFromLead(tx, lead.id, {
-          rawName: value.rawName,
-          domain,
-          stateCode,
-          uei: value.uei,
-          cageCode: value.cageCode,
-          sourceLocator: value.sourceLocator,
-        });
+      await withVerifiedDomainLock(tx, domain, async (normalizedDomain) => {
+        // Re-read only after acquiring the lock. Resolution may have attached
+        // this domain after the pre-transaction identity lookup.
+        const existingCompanyId = await findDomainOwner(tx, normalizedDomain);
+        const companyId =
+          existingCompanyId ??
+          (await createCompanyFromLead(tx, lead.id, {
+            rawName: value.rawName,
+            domain: normalizedDomain,
+            stateCode,
+            uei: value.uei,
+            cageCode: value.cageCode,
+            sourceLocator: value.sourceLocator,
+          }));
         await tx
           .update(leads)
           .set({
             status: "resolved",
             resolvedCompanyId: companyId,
+            possibleDomain: normalizedDomain,
             context: sql`${leads.context} || ${JSON.stringify({
               provenance: {
-                canonicalCompanyCreated: true,
+                canonicalCompanyCreated: existingCompanyId === null,
                 companyId,
                 createdFromSourceLocator: value.sourceLocator,
               },
             })}::jsonb`,
           })
           .where(eq(leads.id, lead.id));
-        return;
-      } catch (error) {
-        if ((error as { code?: string }).code !== "23505") throw error;
-        // Concurrent creation won the unique-domain race: exact hit instead.
-        const winner = await findDomainOwner(tx, domain);
-        if (winner === null) throw error;
-        await tx
-          .update(leads)
-          .set({ status: "resolved", resolvedCompanyId: winner })
-          .where(eq(leads.id, lead.id));
-        return;
-      }
+      });
+      return;
     }
     // Otherwise the lead keeps its default terminal ingestion state.
     await tx.update(leads).set({ status: "unresolved_lead" }).where(eq(leads.id, lead.id));

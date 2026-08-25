@@ -23,12 +23,40 @@
  * in the apps/web route layer where @asi/research IS importable.
  */
 
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
 import type { Database } from "../client.js";
 import { upsertCandidate } from "../candidates/storage.js";
 import { normalizeDomain } from "../provenance.js";
 import { auditEvents, companies, companyDomains, leads } from "../schema.js";
+
+type VerifiedDomainTx = Parameters<Parameters<Database["transaction"]>[0]>[0];
+const VERIFIED_DOMAIN_LOCK_SEED = 4_281_161;
+
+/**
+ * Normalize and transaction-lock one verified hostname. Every canonical
+ * domain attach/create path must take this lock before re-reading ownership.
+ */
+export async function lockVerifiedDomain(
+  tx: VerifiedDomainTx,
+  domain: string,
+): Promise<string> {
+  const normalizedDomain = normalizeDomain(domain);
+  if (normalizedDomain === null) throw new Error(`invalid verified domain: ${domain}`);
+  await tx.execute(
+    sql`select pg_advisory_xact_lock(hashtextextended(lower(${normalizedDomain}), ${VERIFIED_DOMAIN_LOCK_SEED}))`,
+  );
+  return normalizedDomain;
+}
+
+export async function withVerifiedDomainLock<T>(
+  tx: VerifiedDomainTx,
+  domain: string,
+  fn: (normalizedDomain: string) => Promise<T>,
+): Promise<T> {
+  const normalizedDomain = await lockVerifiedDomain(tx, domain);
+  return fn(normalizedDomain);
+}
 
 // ---------------------------------------------------------------------------
 // Injected capability interfaces.
@@ -557,12 +585,16 @@ async function commitVerifiedDomain(
   input: CommitInput,
 ): Promise<{ companyId: string; candidateId: string }> {
   return db.transaction(async (tx) => {
-    // create-or-get: an existing primary owner of this domain wins — the lead
-    // merges onto the known company instead of minting a duplicate.
+    const domain = await lockVerifiedDomain(tx, input.domain);
+    // Ownership must be re-read after acquiring the domain lock: another
+    // resolver or ingestion transaction may have attached it while probing.
     const existingOwner = await tx
       .select({ companyId: companyDomains.companyId })
       .from(companyDomains)
-      .where(eq(companyDomains.domain, input.domain))
+      .where(
+        sql`lower(regexp_replace(rtrim(${companyDomains.domain}, '.'), '^www\\.', '', 'i')) = ${domain}`,
+      )
+      .orderBy(sql`${companyDomains.isPrimary} desc`, companyDomains.createdAt)
       .limit(1);
     const existing = existingOwner[0];
 
@@ -573,14 +605,16 @@ async function commitVerifiedDomain(
       await tx
         .update(companyDomains)
         .set({ verifiedAt: new Date() })
-        .where(eq(companyDomains.domain, input.domain));
+        .where(
+          sql`lower(regexp_replace(rtrim(${companyDomains.domain}, '.'), '^www\\.', '', 'i')) = ${domain}`,
+        );
     } else {
       const inserted = await tx
         .insert(companies)
         .values({
           legalName: input.lead.rawName,
           displayName: titleCaseName(input.lead.rawName),
-          websiteUrl: `https://${input.domain}`,
+          websiteUrl: `https://${domain}`,
         })
         .returning({ id: companies.id });
       const company = inserted[0];
@@ -592,7 +626,7 @@ async function commitVerifiedDomain(
         .insert(companyDomains)
         .values({
           companyId,
-          domain: input.domain,
+          domain,
           isPrimary: true,
           verifiedAt: new Date(),
         })
@@ -631,7 +665,7 @@ async function commitVerifiedDomain(
       .update(leads)
       .set({
         status: "resolved",
-        possibleDomain: input.domain,
+        possibleDomain: domain,
         resolvedCompanyId: companyId,
         context,
       })
@@ -644,7 +678,7 @@ async function commitVerifiedDomain(
       entityType: "lead",
       entityId: input.lead.id,
       metadata: {
-        domain: input.domain,
+        domain,
         url: input.url,
         confidence: input.confidence,
         identityMethod: input.method,

@@ -12,7 +12,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
 
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import {
@@ -27,6 +27,7 @@ import {
   type DomainProber,
   type IdentityJudgment,
   resolveLeadDomain,
+  ingestLeadCandidates,
   auditEvents,
   candidates,
   companies,
@@ -553,6 +554,100 @@ describe.skipIf(!DB_TESTS_ENABLED)("lead domain resolution (DB)", () => {
         "parent_brand",
       );
     }
+  });
+
+  it("serializes simultaneous verified resolutions onto one canonical company", async () => {
+    const domain = `concurrent-parent-${randomUUID().slice(0, 8)}.com`;
+    const leadIds = await Promise.all([
+      seedLead(db, "Concurrent Parent Aviation LLC", {
+        location: "Huntsville, AL",
+        domain,
+      }),
+      seedLead(db, "Concurrent Parent Support LLC", {
+        location: "Huntsville, AL",
+        domain,
+      }),
+    ]);
+    const deps: LeadDomainDeps = {
+      prober: fakeProber({ [domain]: "Concurrent Parent serves aerospace and defense." }),
+      judge: fakeJudge([], () => ({
+        matches: true,
+        confidence: 0.97,
+        locationMatches: true,
+        identifierMatches: "unknown",
+        relationship: "parent_brand",
+        reason: "the verified site is the shared parent brand",
+      })),
+      logger: noopLogger,
+    };
+
+    const results = await Promise.all(
+      leadIds.map((leadId) => resolveLeadDomain(db, leadId, deps)),
+    );
+    expect(new Set(results.map((result) => result.companyId)).size).toBe(1);
+    const companyId = results[0]!.companyId!;
+    companyIds.push(companyId);
+    const relations = await db.execute<{ company_id: string }>(sql`
+      SELECT company_id FROM company_domains WHERE lower(domain) = ${domain}
+    `);
+    expect(relations.rows).toEqual([{ company_id: companyId }]);
+  });
+
+  it("serializes ingestion against resolution and normalizes www/case/trailing dots", async () => {
+    const domain = `ingest-resolver-race-${randomUUID().slice(0, 8)}.com`;
+    const resolverLeadId = await seedLead(db, "Shared Brand Foundry LLC", {
+      location: "Birmingham, AL",
+      domain: `https://WWW.${domain.toUpperCase()}./about`,
+    });
+    const deps: LeadDomainDeps = {
+      prober: fakeProber({ [domain]: "Shared Brand Foundry is based in Birmingham, Alabama." }),
+      judge: fakeJudge([], () => ({
+        matches: true,
+        confidence: 0.98,
+        locationMatches: true,
+        identifierMatches: "unknown",
+        relationship: "parent_brand",
+        reason: "the verified site is the shared parent brand",
+      })),
+      logger: noopLogger,
+    };
+
+    await Promise.all([
+      resolveLeadDomain(db, resolverLeadId, deps),
+      ingestLeadCandidates(campaignId, [
+        {
+          rawName: "Shared Brand Castings LLC",
+          domain: `WWW.${domain.toUpperCase()}.`,
+          city: "Birmingham",
+          state: "AL",
+          awardCount: 2,
+          totalAwardValueUsd: 1000,
+          sourceLocator: `test://domain-race/${domain}`,
+        },
+      ]),
+    ]);
+
+    const attached = await db.execute<{
+      id: string;
+      resolved_company_id: string;
+      possible_domain: string;
+    }>(sql`
+      SELECT id, resolved_company_id, possible_domain
+      FROM leads
+      WHERE campaign_id = ${campaignId}
+        AND raw_name IN ('Shared Brand Foundry LLC', 'Shared Brand Castings LLC')
+      ORDER BY raw_name
+    `);
+    expect(attached.rows).toHaveLength(2);
+    expect(new Set(attached.rows.map((lead) => lead.resolved_company_id)).size).toBe(1);
+    expect(new Set(attached.rows.map((lead) => lead.possible_domain))).toEqual(new Set([domain]));
+    const companyId = attached.rows[0]!.resolved_company_id;
+    companyIds.push(companyId);
+    const relations = await db.execute<{ company_id: string; domain: string }>(sql`
+      SELECT company_id, domain FROM company_domains
+      WHERE lower(regexp_replace(rtrim(domain, '.'), '^www\\.', '', 'i')) = ${domain}
+    `);
+    expect(relations.rows).toEqual([{ company_id: companyId, domain }]);
   });
 
   it("discards a lead with reason + audit, idempotently", async () => {

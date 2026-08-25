@@ -8,6 +8,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   auditEvents,
   candidates,
+  companyAliases,
   closeDatabase,
   companies,
   companyDomains,
@@ -24,6 +25,7 @@ import { correctZitecIdentity } from "../scripts/correct-zitec-identity.mts";
 import {
   correctThirdPartyDomainLinks,
 } from "../scripts/correct-third-party-domain-links.mts";
+import { dedupeCompanyDomains } from "../scripts/dedupe-company-domains.mts";
 
 const DB_TESTS_ENABLED = process.env.ASI_DB_TESTS === "1";
 const campaignId = randomUUID();
@@ -44,6 +46,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("legacy lead remediation scripts (DB)", () =>
   let db: Database;
   let wrongCompanyId = "";
   const thirdPartyCompanyIds: string[] = [];
+  const dedupeCompanyIds: string[] = [];
 
   beforeAll(async () => {
     loadDatabaseUrl();
@@ -55,6 +58,9 @@ describe.skipIf(!DB_TESTS_ENABLED)("legacy lead remediation scripts (DB)", () =>
     await db.delete(leads).where(eq(leads.campaignId, campaignId));
     if (wrongCompanyId) await db.delete(companies).where(eq(companies.id, wrongCompanyId));
     for (const companyId of thirdPartyCompanyIds) {
+      await db.delete(companies).where(eq(companies.id, companyId));
+    }
+    for (const companyId of dedupeCompanyIds) {
       await db.delete(companies).where(eq(companies.id, companyId));
     }
     await closeDatabase();
@@ -337,5 +343,125 @@ describe.skipIf(!DB_TESTS_ENABLED)("legacy lead remediation scripts (DB)", () =>
       candidates: [],
       domainRelations: [],
     });
+  });
+
+  it("deduplicates one verified domain idempotently while preserving both leads and one candidate", async () => {
+    const domain = `dedupe-foundry-${randomUUID().slice(0, 8)}.com`;
+    const [survivor, duplicate] = await db
+      .insert(companies)
+      .values([
+        {
+          legalName: "A&B Foundry, Inc.",
+          displayName: "A&B Foundry",
+          createdAt: new Date("2025-01-01T00:00:00Z"),
+        },
+        {
+          legalName: "A and B Foundry LLC",
+          displayName: "A and B Foundry",
+          createdAt: new Date("2025-02-01T00:00:00Z"),
+        },
+      ])
+      .returning({ id: companies.id });
+    dedupeCompanyIds.push(survivor!.id, duplicate!.id);
+    await db.insert(companyDomains).values({
+      companyId: survivor!.id,
+      domain,
+      isPrimary: true,
+      verifiedAt: new Date(),
+    });
+    await db.insert(companyAliases).values({
+      companyId: duplicate!.id,
+      alias: "A&B Castings",
+      aliasType: "name",
+    });
+    const insertedLeads = await db
+      .insert(leads)
+      .values([
+        {
+          campaignId,
+          rawName: "A&B Foundry",
+          status: "resolved",
+          possibleDomain: domain,
+          resolvedCompanyId: survivor!.id,
+          context: {},
+        },
+        {
+          campaignId,
+          rawName: "A and B Foundry",
+          status: "resolved",
+          possibleDomain: `WWW.${domain.toUpperCase()}.`,
+          resolvedCompanyId: duplicate!.id,
+          context: {},
+        },
+      ])
+      .returning({ id: leads.id });
+    await db.insert(candidates).values([
+      {
+        companyId: survivor!.id,
+        rationale: {
+          whyInteresting: ["survivor evidence"],
+          risks: [],
+          unknowns: [],
+        },
+      },
+      {
+        companyId: duplicate!.id,
+        rationale: {
+          whyInteresting: ["duplicate evidence"],
+          risks: [],
+          unknowns: [],
+        },
+      },
+    ]);
+
+    const dryRun = await dedupeCompanyDomains(db, { domain, apply: false });
+    expect(dryRun).toMatchObject({
+      mode: "dry-run",
+      mergedCompanyCount: 0,
+      plans: [
+        {
+          domain,
+          survivor: { id: survivor!.id },
+          duplicates: [{ id: duplicate!.id }],
+        },
+      ],
+    });
+    expect(await db.select().from(candidates).where(eq(candidates.companyId, duplicate!.id))).toHaveLength(1);
+
+    const applied = await dedupeCompanyDomains(db, { domain, apply: true });
+    expect(applied.mergedCompanyCount).toBe(1);
+    const preservedLeads = await db
+      .select({ id: leads.id, companyId: leads.resolvedCompanyId })
+      .from(leads)
+      .where(and(eq(leads.campaignId, campaignId), eq(leads.possibleDomain, domain)));
+    const secondLead = (
+      await db.select({ id: leads.id, companyId: leads.resolvedCompanyId }).from(leads).where(eq(leads.id, insertedLeads[1]!.id))
+    )[0]!;
+    expect([...preservedLeads, secondLead]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ id: insertedLeads[0]!.id, companyId: survivor!.id }),
+        expect.objectContaining({ id: insertedLeads[1]!.id, companyId: survivor!.id }),
+      ]),
+    );
+    const survivingCandidates = await db
+      .select()
+      .from(candidates)
+      .where(eq(candidates.companyId, survivor!.id));
+    expect(survivingCandidates).toHaveLength(1);
+    expect(survivingCandidates[0]!.rationale.whyInteresting).toEqual(
+      expect.arrayContaining(["survivor evidence", "duplicate evidence"]),
+    );
+    expect(
+      await db
+        .select()
+        .from(companyAliases)
+        .where(and(eq(companyAliases.companyId, survivor!.id), eq(companyAliases.alias, "A&B Castings"))),
+    ).toHaveLength(1);
+    expect(
+      await db.select().from(companyDomains).where(eq(companyDomains.domain, domain)),
+    ).toHaveLength(1);
+
+    const secondApply = await dedupeCompanyDomains(db, { domain, apply: true });
+    expect(secondApply).toMatchObject({ plans: [], mergedCompanyCount: 0 });
   });
 });
