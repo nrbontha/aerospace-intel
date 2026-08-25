@@ -283,6 +283,90 @@ describe.skipIf(!DB_TESTS_ENABLED)("source synthesis persistence (DB)", () => {
       expect(links.some(({ facilityQualificationId }) => facilityQualificationId !== null)).toBe(true);
     }
   });
+  it("reuses one stable qualification across transient DRS GUID versions while separating part and supplement identities", async () => {
+    const companyId = await createCompany(`${testKey} FAA Version Company`);
+    const holderNumber = `VG${testKey.slice(-7)}`.toUpperCase();
+    const firstVersion = faaRecord("VERSION-1", {
+      holderNumber,
+      pmaPartNumber: "RAM-101-1",
+      supplementNumber: "S-42",
+      renderedSourceText: `${testKey} FAA version one`,
+    });
+    const secondVersion = {
+      ...firstVersion,
+      recordId: `${testKey}-TRANSIENT-GUID-2`,
+      guidUrl: `https://drs.faa.gov/browse/excelExternalWindow/${encodeURIComponent(testKey)}-version-2`,
+      renderedSourceText: `${testKey} FAA version two`,
+    };
+    const differentSupplement = {
+      ...firstVersion,
+      recordId: `${testKey}-TRANSIENT-GUID-3`,
+      guidUrl: `https://drs.faa.gov/browse/excelExternalWindow/${encodeURIComponent(testKey)}-version-3`,
+      supplementNumber: "S-43",
+      supplementDate: "2025-02-03",
+      renderedSourceText: `${testKey} FAA version three`,
+    };
+    const differentPart = {
+      ...firstVersion,
+      recordId: `${testKey}-TRANSIENT-GUID-4`,
+      guidUrl: `https://drs.faa.gov/browse/excelExternalWindow/${encodeURIComponent(testKey)}-version-4`,
+      pmaPartNumber: "RAM-101-2",
+      renderedSourceText: `${testKey} FAA version four`,
+    };
+
+    await persistFaaPmaRecordsForCompany(getDatabase(), companyId, [
+      firstVersion,
+      secondVersion,
+      differentSupplement,
+      differentPart,
+    ]);
+    const qualifications = await getDatabase()
+      .select({
+        id: facilityQualifications.id,
+        reference: facilityQualifications.qualificationReference,
+      })
+      .from(facilityQualifications)
+      .innerJoin(
+        facilities,
+        eq(facilities.id, facilityQualifications.facilityId),
+      )
+      .where(eq(facilities.companyId, companyId));
+    expect(qualifications).toHaveLength(3);
+    const stable = qualifications.find(
+      ({ reference }) =>
+        reference === `FAA-PMA:${holderNumber}:S-42:RAM-101-1`,
+    );
+    expect(stable).toBeDefined();
+    const versionDocuments = await getDatabase()
+      .select({ id: sourceDocuments.id })
+      .from(sourceDocuments)
+      .where(
+        inArray(sourceDocuments.canonicalUrl, [
+          firstVersion.guidUrl,
+          secondVersion.guidUrl,
+        ]),
+      );
+    expect(versionDocuments).toHaveLength(2);
+    const versionLinks = await getDatabase()
+      .select({
+        documentId: sourceDocumentLinks.sourceDocumentId,
+        qualificationId: sourceDocumentLinks.facilityQualificationId,
+      })
+      .from(sourceDocumentLinks)
+      .where(
+        and(
+          inArray(
+            sourceDocumentLinks.sourceDocumentId,
+            versionDocuments.map(({ id }) => id),
+          ),
+          eq(sourceDocumentLinks.facilityQualificationId, stable!.id),
+        ),
+      );
+    expect(new Set(versionLinks.map(({ documentId }) => documentId)).size).toBe(
+      2,
+    );
+  });
+
 
   it("does not attach an exact model variant when the exact make is mismatched", async () => {
     const supplierCompanyId = await createCompany(`${testKey} Variant Supplier`);

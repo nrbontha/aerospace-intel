@@ -969,6 +969,23 @@ function normalizedSqlEquals(column: AnyPgColumn, value: string) {
   return sql`lower(regexp_replace(btrim(coalesce(${column}, '')), '\\s+', ' ', 'g')) = ${value}`;
 }
 
+/** Stable across transient DRS card GUID/version changes. */
+export function faaPmaQualificationReference(
+  record: Pick<
+    FaaPmaRecord,
+    "holderNumber" | "supplementNumber" | "pmaPartNumber"
+  >,
+): string {
+  const holder = normalizeIdentifier(record.holderNumber) ?? "NO-HOLDER";
+  const supplement =
+    normalizeIdentifier(record.supplementNumber) ?? "NO-SUPPLEMENT";
+  const partNumber = normalizeIdentifier(record.pmaPartNumber);
+  if (partNumber === null) {
+    throw new Error("FAA PMA part number is required for qualification identity");
+  }
+  return `FAA-PMA:${holder}:${supplement}:${partNumber}`;
+}
+
 async function upsertQualification(
   tx: Tx,
   facilityId: string,
@@ -982,9 +999,7 @@ async function upsertQualification(
   readonly platformId: string | null;
   readonly platformVariantId: string | null;
 }> {
-  const holder = normalizeIdentifier(record.holderNumber) ?? "NO-HOLDER";
-  const supplement = normalizeIdentifier(record.supplementNumber) ?? "NO-SUPPLEMENT";
-  const reference = `FAA-PMA:${holder}:${supplement}:${record.recordId.trim()}`;
+  const reference = faaPmaQualificationReference(record);
   const [existing] = await tx
     .select({
       id: facilityQualifications.id,
