@@ -1,25 +1,109 @@
 {
   "totalRecords": 2,
-  "records": [
+  "entityData": [
     {
-      "ueiUEI": "EEE555555555",
-      "cageCode": "8X2Y4",
-      "legalBusinessName": "Helix Fastener Systems Inc",
-      "registrationStatus": "Active",
-      "physicalAddress": {
-        "addressLine1": "1200 Industrial Pkwy",
-        "city": "Wichita",
-        "stateOrProvinceCode": "KS",
-        "zipCode": "67209",
-        "countryCode": "USA"
+      "entityRegistration": {
+        "ueiSAM": "EEE555555555",
+        "cageCode": "8X2Y4",
+        "legalBusinessName": "Helix Fastener Systems Inc",
+        "registrationStatus": "Active",
+        "exclusionStatusFlag": "N"
       },
-      "naicsCodes": ["336413", "332722"],
-      "businessTypes": "Manufacturer, Small Business"
+      "coreData": {
+        "physicalAddress": {
+          "addressLine1": "1200 Industrial Pkwy",
+          "addressLine2": "Building 4",
+          "city": "Wichita",
+          "stateOrProvinceCode": "KS",
+          "zipCode": "67209",
+          "zipCodePlus4": "1234",
+          "countryCode": "USA"
+        },
+        "entityInformation": {
+          "entityURL": "https://www.helix-fasteners.example/about",
+          "entityType": "Business or Organization",
+          "immediateOwnerUei": "PARENT123456"
+        },
+        "generalInformation": {
+          "entityStructureDesc": "Corporate Entity (Not Tax Exempt)",
+          "profitStructureDesc": "For Profit Organization"
+        }
+      },
+      "assertions": {
+        "goodsAndServices": {
+          "primaryNaics": "336413",
+          "naicsList": [
+            {
+              "naicsCode": "336413",
+              "naicsDescription": "Other Aircraft Parts and Auxiliary Equipment Manufacturing",
+              "sbaSmallBusiness": "Y"
+            },
+            {
+              "naicsCode": "332722",
+              "naicsDescription": "Bolt, Nut, Screw, Rivet, and Washer Manufacturing",
+              "sbaSmallBusiness": false
+            }
+          ],
+          "pscList": [
+            {
+              "pscCode": "1560",
+              "pscDescription": "Airframe Structural Components"
+            }
+          ]
+        },
+        "entityTypes": {
+          "entityTypeList": [
+            {
+              "entityTypeCode": "2L",
+              "entityTypeDesc": "Corporate Entity"
+            }
+          ]
+        },
+        "businessTypes": {
+          "businessTypeList": [
+            {
+              "businessTypeCode": "27",
+              "businessTypeDesc": "Self Certified Small Disadvantaged Business"
+            }
+          ]
+        },
+        "ownershipAndControl": {
+          "womanOwnedBusiness": true,
+          "veteranOwnedBusiness": false
+        }
+      },
+      "providerAddedField": {
+        "preserved": true
+      }
     },
     {
-      "ueiUEI": "FFF666666666",
-      "legalBusinessName": "Cascade Hydraulics LLC",
-      "registrationStatus": "Active"
+      "entityRegistration": {
+        "ueiSAM": "FFF666666666",
+        "legalBusinessName": "Cascade Hydraulics LLC",
+        "registrationStatus": "A",
+        "exclusionStatusFlag": false
+      },
+      "coreData": {
+        "physicalAddress": {
+          "city": "Portland",
+          "stateOrProvinceCode": "OR",
+          "countryCode": "USA"
+        },
+        "entityInformation": {
+          "entityURL": "not a public URL"
+        }
+      },
+      "assertions": {
+        "goodsAndServices": {
+          "primaryNaics": {
+            "naicsCode": "336413",
+            "naicsDescription": "Aircraft Parts Manufacturing",
+            "sbaSmallBusiness": true
+          },
+          "naicsList": [],
+          "pscList": ["1650"]
+        }
+      }
     }
   ]
 }

@@ -37,7 +37,7 @@ export const SOURCE_CATALOG: Readonly<
     adapterAvailable: true,
     accessModel: "api_key_required",
     notes:
-      "Entity registration/search API v3. Free API key from api.sam.gov required as query param; SamEntityClient refuses to run without one.",
+      "Entity Management API v4. Free api.sam.gov key is sent only in the X-Api-Key header; SamEntityClient refuses to run without one.",
   },
   USAspending: {
     adapterAvailable: true,

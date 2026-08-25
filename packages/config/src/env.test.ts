@@ -77,6 +77,20 @@ describe("getServerEnv", () => {
     ).toBe("test-exa-key");
   });
 
+  it("keeps SAM_API_KEY server-only, optional, and trimmed", () => {
+    expect(getServerEnv({ NODE_ENV: "test" }).SAM_API_KEY).toBeUndefined();
+    expect(
+      getServerEnv({ NODE_ENV: "test", SAM_API_KEY: "  test-sam-key  " })
+        .SAM_API_KEY,
+    ).toBe("test-sam-key");
+    expect(
+      getPublicEnv({
+        NEXT_PUBLIC_APP_URL: "http://localhost:3000",
+        SAM_API_KEY: "must-not-be-public",
+      }),
+    ).not.toHaveProperty("SAM_API_KEY");
+  });
+
   it.each([
     [{ BOOTSTRAP_ADMIN_EMAIL: "nobody@example.invalid" }],
     [{ BOOTSTRAP_ADMIN_PASSWORD: "x".repeat(12) }],

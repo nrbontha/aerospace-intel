@@ -532,57 +532,143 @@ describe("SamEntityClient", () => {
     });
     const client = new SamEntityClient({ fetchImpl });
 
-    await expect(client.search({ q: "fastener" })).rejects.toBeInstanceOf(
-      SamApiKeyMissingError,
-    );
-    await expect(client.search({ q: "fastener" })).rejects.toMatchObject({
+    await expect(
+      client.search({ naicsCodes: ["336413"] }),
+    ).rejects.toBeInstanceOf(SamApiKeyMissingError);
+    await expect(client.search({ naicsCodes: ["336413"] })).rejects.toMatchObject({
       transient: false,
     });
-    expect(spy.calls).toHaveLength(0); // never fabricated, never called
+    expect(spy.calls).toHaveLength(0);
   });
 
-  it("maps records onto LeadCandidate and caps page size at 100", async () => {
-    const { spy, fetchImpl } = fetchSpy((url) => {
-      expect(url).toContain("api.sam.gov/entity-information/v3/search");
-      expect(url).toContain("api_key=test-key");
+  it("uses v4 header authentication, hard active-US filters, and maps public entity fields", async () => {
+    const { spy, fetchImpl } = fetchSpy((_url, init) => {
+      expect(new Headers(init?.headers).get("X-Api-Key")).toBe("test-key");
       return jsonResponse(loadPageFixture("sam-search"));
     });
     const client = new SamEntityClient({
       apiKey: "test-key",
       fetchImpl,
-      pageSize: 250, // must be capped to the API's 100
+      pageSize: 250,
     });
 
-    const { totalRecords, leads } = await client.search({ q: "aerospace" });
+    const { totalRecords, entities } = await client.search({
+      naicsCodes: ["336413"],
+      state: "KS",
+    });
 
     expect(totalRecords).toBe(2);
-    expect(leads).toHaveLength(2);
-    expect(
-      new URLSearchParams(spy.calls[0]!.url.split("?")[1]).get("size"),
-    ).toBe("100");
+    expect(entities).toHaveLength(2);
+    expect(spy.calls).toHaveLength(1);
+    const requestUrl = new URL(spy.calls[0]!.url);
+    expect(`${requestUrl.origin}${requestUrl.pathname}`).toBe(
+      "https://api.sam.gov/entity-information/v4/entities",
+    );
+    expect(requestUrl.search).not.toContain("test-key");
+    expect(requestUrl.searchParams.get("api_key")).toBeNull();
+    expect(requestUrl.searchParams.get("size")).toBe("10");
+    expect(requestUrl.searchParams.get("page")).toBe("0");
+    expect(requestUrl.searchParams.get("samRegistered")).toBe("Yes");
+    expect(requestUrl.searchParams.get("registrationStatus")).toBe("A");
+    expect(requestUrl.searchParams.get("physicalAddressCountryCode")).toBe("USA");
+    expect(requestUrl.searchParams.get("physicalAddressStateCode")).toBe("KS");
+    expect(requestUrl.searchParams.get("naicsCode")).toBe("336413");
+    expect(requestUrl.searchParams.get("includeSections")).toBe(
+      "entityRegistration,coreData,assertions",
+    );
 
-    expect(leads[0]).toEqual({
-      rawName: "Helix Fastener Systems Inc",
+    expect(entities[0]).toMatchObject({
+      legalName: "Helix Fastener Systems Inc",
       uei: "EEE555555555",
       cageCode: "8X2Y4",
-      addressLine: "1200 Industrial Pkwy",
+      officialUrl: "https://www.helix-fasteners.example/about",
+      officialDomain: "helix-fasteners.example",
+      addressLine1: "1200 Industrial Pkwy",
+      addressLine2: "Building 4",
       city: "Wichita",
       state: "KS",
-      zip: "67209",
-      naics: ["336413", "332722"],
-      awardCount: 0, // registry source: no award data asserted
-      totalAwardValueUsd: 0,
-      source: "sam_gov",
-      sourceLocator: "sam://entity-information/v3/search?uei=EEE555555555",
+      zip: "67209-1234",
+      country: "USA",
+      registrationStatus: "Active",
+      exclusionStatusFlag: false,
+      primaryNaics: {
+        code: "336413",
+        description:
+          "Other Aircraft Parts and Auxiliary Equipment Manufacturing",
+        sbaSmallBusiness: true,
+      },
+      psc: [{ code: "1560", description: "Airframe Structural Components" }],
+      parentUei: "PARENT123456",
+      sourceLocator:
+        "sam://entity-information/v4/entities/EEE555555555",
     });
-    // Minimal record maps with optional fields absent.
-    expect(leads[1]).toEqual({
-      rawName: "Cascade Hydraulics LLC",
-      uei: "FFF666666666",
-      awardCount: 0,
-      totalAwardValueUsd: 0,
-      source: "sam_gov",
-      sourceLocator: "sam://entity-information/v3/search?uei=FFF666666666",
+    expect(entities[0]!.naics).toHaveLength(2);
+    expect(entities[0]!.entityTypeHints).toContain("Corporate Entity");
+    expect(entities[0]!.businessTypeHints).toContain(
+      "Self Certified Small Disadvantaged Business",
+    );
+    expect(entities[0]!.ownershipHints).toContain("womanOwnedBusiness");
+    expect(entities[0]!.raw).toMatchObject({
+      providerAddedField: { preserved: true },
+    });
+    expect(entities[1]).toMatchObject({
+      officialUrl: null,
+      officialDomain: null,
+      primaryNaics: {
+        code: "336413",
+        sbaSmallBusiness: true,
+      },
+    });
+  });
+
+  it("uses zero-based pages and obeys its bounded max-pages budget", async () => {
+    const { spy, fetchImpl } = fetchSpy(() =>
+      jsonResponse({
+        totalRecords: 100,
+        entityData: Array.from({ length: 10 }, (_, index) => ({
+          entityRegistration: {
+            ueiSAM: `ENTITY${String(index).padStart(6, "0")}`,
+            legalBusinessName: `Entity ${index}`,
+            registrationStatus: "A",
+            exclusionStatusFlag: "N",
+          },
+          coreData: {
+            physicalAddress: { countryCode: "USA" },
+          },
+        })),
+      }),
+    );
+    const client = new SamEntityClient({
+      apiKey: "header-only-key",
+      fetchImpl,
+      pageSize: 10,
+      maxPages: 2,
+    });
+
+    const result = await client.search({
+      naicsCodes: ["336413"],
+      maxResults: 25,
+    });
+
+    expect(result.entities).toHaveLength(20);
+    expect(spy.calls).toHaveLength(2);
+    expect(
+      spy.calls.map((call) => new URL(call.url).searchParams.get("page")),
+    ).toEqual(["0", "1"]);
+    expect(spy.calls.every((call) => !call.url.includes("header-only-key"))).toBe(
+      true,
+    );
+  });
+
+  it("marks rate limits and provider failures transient without retrying", async () => {
+    const { fetchImpl } = fetchSpy(() => jsonResponse({}, 429));
+    const client = new SamEntityClient({ apiKey: "test-key", fetchImpl });
+
+    await expect(
+      client.search({ naicsCodes: ["336413"] }),
+    ).rejects.toMatchObject({
+      transient: true,
+      status: 429,
     });
   });
 });
@@ -636,5 +722,41 @@ describe.skipIf(!process.env.ASI_LIVE_SOURCES)("live USAspending", () => {
     console.log(
       `[live] usaspending recipients: ${leads.length}, first: ${JSON.stringify(leads[0])}`,
     );
+  }, 30_000);
+});
+
+const samLiveApiKey = process.env.SAM_API_KEY;
+const samLiveSmokeEnabled =
+  process.env.SAM_LIVE_SMOKE === "true" &&
+  process.env.CI === undefined &&
+  samLiveApiKey !== undefined;
+
+describe.skipIf(!samLiveSmokeEnabled)("live SAM v4", () => {
+  it("returns active US entities for one strict 336413 request", async () => {
+    const client = new SamEntityClient({
+      apiKey: samLiveApiKey ?? "",
+      maxPages: 1,
+      pageSize: 10,
+      timeoutMs: 20_000,
+    });
+    const result = await client.search({
+      naicsCodes: ["336413"],
+      maxResults: 10,
+    });
+
+    expect(result.entities.length).toBeGreaterThan(0);
+    expect(
+      result.entities.every(
+        (entity) =>
+          entity.uei.length > 0 &&
+          entity.legalName.length > 0 &&
+          ["A", "ACTIVE"].includes(
+            entity.registrationStatus?.toUpperCase() ?? "",
+          ) &&
+          ["US", "USA", "UNITED STATES"].includes(
+            entity.country?.toUpperCase() ?? "",
+          ),
+      ),
+    ).toBe(true);
   }, 30_000);
 });
