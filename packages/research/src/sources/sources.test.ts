@@ -599,8 +599,9 @@ describe("SamEntityClient", () => {
       },
       psc: [{ code: "1560", description: "Airframe Structural Components" }],
       parentUei: "PARENT123456",
+      matchedNaicsCodes: ["336413"],
       sourceLocator:
-        "sam://entity-information/v4/entities/EEE555555555",
+        "sam://entity-information/v4/entities/EEE555555555?naics=336413",
     });
     expect(entities[0]!.naics).toHaveLength(2);
     expect(entities[0]!.entityTypeHints).toContain("Corporate Entity");
@@ -621,23 +622,78 @@ describe("SamEntityClient", () => {
     });
   });
 
+  it("queries strict NAICS codes one at a time and dedupes UEIs across codes", async () => {
+    const { spy, fetchImpl } = fetchSpy((url) => {
+      const naicsCode = new URL(url).searchParams.get("naicsCode");
+      return jsonResponse({
+        totalRecords: 2,
+        entityData: [
+          {
+            entityRegistration: {
+              ueiSAM: "SHARED000001",
+              legalBusinessName: "Shared Aerospace",
+              registrationStatus: "A",
+              exclusionStatusFlag: "N",
+            },
+            coreData: { physicalAddress: { countryCode: "USA" } },
+          },
+          {
+            entityRegistration: {
+              ueiSAM:
+                naicsCode === "336413" ? "AIRFRAME0001" : "FASTENER0001",
+              legalBusinessName: `Entity ${naicsCode}`,
+              registrationStatus: "A",
+              exclusionStatusFlag: "N",
+            },
+            coreData: { physicalAddress: { countryCode: "USA" } },
+          },
+        ],
+      });
+    });
+    const client = new SamEntityClient({
+      apiKey: "test-key",
+      fetchImpl,
+      maxPages: 2,
+    });
+
+    const result = await client.search({
+      naicsCodes: ["336413", "332722"],
+      maxResults: 25,
+    });
+
+    expect(spy.calls).toHaveLength(2);
+    expect(
+      spy.calls.map((call) => new URL(call.url).searchParams.getAll("naicsCode")),
+    ).toEqual([["336413"], ["332722"]]);
+    expect(result.entities).toHaveLength(3);
+    expect(result.entities.find((entity) => entity.uei === "SHARED000001")).toMatchObject({
+      matchedNaicsCodes: ["332722", "336413"],
+      sourceLocator:
+        "sam://entity-information/v4/entities/SHARED000001?naics=332722%2C336413",
+    });
+  });
+
   it("uses zero-based pages and obeys its bounded max-pages budget", async () => {
-    const { spy, fetchImpl } = fetchSpy(() =>
-      jsonResponse({
+    const { spy, fetchImpl } = fetchSpy((url) => {
+      const page = Number(new URL(url).searchParams.get("page"));
+      return jsonResponse({
         totalRecords: 100,
-        entityData: Array.from({ length: 10 }, (_, index) => ({
-          entityRegistration: {
-            ueiSAM: `ENTITY${String(index).padStart(6, "0")}`,
-            legalBusinessName: `Entity ${index}`,
-            registrationStatus: "A",
-            exclusionStatusFlag: "N",
-          },
-          coreData: {
-            physicalAddress: { countryCode: "USA" },
-          },
-        })),
-      }),
-    );
+        entityData: Array.from({ length: 10 }, (_, index) => {
+          const recordIndex = page * 10 + index;
+          return {
+            entityRegistration: {
+              ueiSAM: `ENTITY${String(recordIndex).padStart(6, "0")}`,
+              legalBusinessName: `Entity ${recordIndex}`,
+              registrationStatus: "A",
+              exclusionStatusFlag: "N",
+            },
+            coreData: {
+              physicalAddress: { countryCode: "USA" },
+            },
+          };
+        }),
+      });
+    });
     const client = new SamEntityClient({
       apiKey: "header-only-key",
       fetchImpl,
@@ -759,4 +815,31 @@ describe.skipIf(!samLiveSmokeEnabled)("live SAM v4", () => {
       ),
     ).toBe(true);
   }, 30_000);
+
+  it("returns a deduped union from two strict one-code requests", async () => {
+    const client = new SamEntityClient({
+      apiKey: samLiveApiKey ?? "",
+      maxPages: 1,
+      pageSize: 10,
+      timeoutMs: 20_000,
+    });
+    const result = await client.search({
+      naicsCodes: ["336413", "332722"],
+      maxResults: 20,
+    });
+
+    expect(result.entities.length).toBeGreaterThan(0);
+    expect(new Set(result.entities.map((entity) => entity.uei)).size).toBe(
+      result.entities.length,
+    );
+    expect(
+      result.entities.every(
+        (entity) =>
+          entity.matchedNaicsCodes.length > 0 &&
+          entity.matchedNaicsCodes.every((code) =>
+            ["336413", "332722"].includes(code),
+          ),
+      ),
+    ).toBe(true);
+  }, 45_000);
 });

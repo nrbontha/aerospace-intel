@@ -139,6 +139,9 @@ function toSourceSignal(
     ...(entity.city === null ? {} : { city: entity.city }),
     ...(entity.state === null ? {} : { state: entity.state }),
     ...(entity.country === null ? {} : { country: entity.country }),
-    sourcePayload: entity.raw,
+    sourcePayload: {
+      matchedNaicsCodes: entity.matchedNaicsCodes,
+      rawEntity: entity.raw,
+    },
   };
 }

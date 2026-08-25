@@ -8,6 +8,7 @@ export const SAM_ENTITY_SEARCH_URL =
 export const SAM_ENTITY_PAGE_SIZE_MAX = 10;
 export const SAM_ENTITY_MAX_PAGES = 10;
 export const SAM_ENTITY_TIMEOUT_MS = 20_000;
+export const SAM_ENTITY_RESULT_MAX = 25;
 
 const DEFAULT_MAX_PAGES = 3;
 const DEFAULT_PAGE_SIZE = 10;
@@ -142,6 +143,7 @@ export interface SamEntity {
   readonly businessTypeHints: readonly string[];
   readonly ownershipHints: readonly string[];
   readonly parentUei: string | null;
+  readonly matchedNaicsCodes: readonly string[];
   readonly sourceLocator: string;
   readonly raw: Record<string, unknown>;
 }
@@ -170,8 +172,16 @@ export interface SamSearchResult {
 
 type SamEntityRecord = z.output<typeof samEntityRecordSchema>;
 
-export function samEntitySourceLocator(uei: string): string {
-  return `sam://entity-information/v4/entities/${encodeURIComponent(uei)}`;
+export function samEntitySourceLocator(
+  uei: string,
+  matchedNaicsCodes: readonly string[] = [],
+): string {
+  const base = `sam://entity-information/v4/entities/${encodeURIComponent(uei)}`;
+  if (matchedNaicsCodes.length === 0) return base;
+  const params = new URLSearchParams({
+    naics: [...new Set(matchedNaicsCodes)].sort().join(","),
+  });
+  return `${base}?${params.toString()}`;
 }
 
 export function isSamEntityActive(entity: SamEntity): boolean {
@@ -190,7 +200,10 @@ export function isSamEntityExcluded(entity: SamEntity): boolean {
   return status.includes("debar") || status.includes("exclud");
 }
 
-export function normalizeSamEntity(record: SamEntityRecord): SamEntity {
+export function normalizeSamEntity(
+  record: SamEntityRecord,
+  matchedNaicsCodes: readonly string[] = [],
+): SamEntity {
   const registration = record.entityRegistration;
   const address = record.coreData?.physicalAddress;
   const goods = record.assertions?.goodsAndServices;
@@ -231,7 +244,11 @@ export function normalizeSamEntity(record: SamEntityRecord): SamEntity {
       /ownership|owner|control|minority|veteran|woman|women|female|tribal/iu,
     ),
     parentUei: findParentUei(record),
-    sourceLocator: samEntitySourceLocator(registration.ueiSAM),
+    matchedNaicsCodes: [...new Set(matchedNaicsCodes)].sort(),
+    sourceLocator: samEntitySourceLocator(
+      registration.ueiSAM,
+      matchedNaicsCodes,
+    ),
     raw: record as Record<string, unknown>,
   };
 }
@@ -263,23 +280,56 @@ export class SamEntityClient {
     const apiKey = this.#apiKey;
     if (apiKey === undefined) throw new SamApiKeyMissingError();
     const parsedQuery = parseQuery(query);
-    const entities: SamEntity[] = [];
+    const entitiesByUei = new Map<string, SamEntity>();
     let totalRecords = 0;
 
-    for (let page = 0; page < this.#maxPages && entities.length < parsedQuery.maxResults; page += 1) {
-      const result = await this.#fetchPage(parsedQuery, page, apiKey);
-      totalRecords = result.totalRecords;
-      const remaining = parsedQuery.maxResults - entities.length;
-      entities.push(...result.entityData.slice(0, remaining).map(normalizeSamEntity));
-      const seen = (page + 1) * this.#pageSize;
-      if (result.entityData.length < this.#pageSize || seen >= result.totalRecords) break;
+    for (const naicsCode of parsedQuery.naicsCodes) {
+      if (entitiesByUei.size >= parsedQuery.maxResults) break;
+
+      for (let page = 0; page < this.#maxPages; page += 1) {
+        const result = await this.#fetchPage(
+          parsedQuery,
+          naicsCode,
+          page,
+          apiKey,
+        );
+        if (page === 0) totalRecords += result.totalRecords;
+
+        for (const record of result.entityData) {
+          const uei = record.entityRegistration.ueiSAM;
+          const existing = entitiesByUei.get(uei);
+          if (existing !== undefined) {
+            const matchedNaicsCodes = [
+              ...new Set([...existing.matchedNaicsCodes, naicsCode]),
+            ].sort();
+            entitiesByUei.set(uei, {
+              ...existing,
+              matchedNaicsCodes,
+              sourceLocator: samEntitySourceLocator(uei, matchedNaicsCodes),
+            });
+            continue;
+          }
+          if (entitiesByUei.size >= parsedQuery.maxResults) break;
+          entitiesByUei.set(uei, normalizeSamEntity(record, [naicsCode]));
+        }
+
+        const seen = (page + 1) * this.#pageSize;
+        if (
+          entitiesByUei.size >= parsedQuery.maxResults ||
+          result.entityData.length < this.#pageSize ||
+          seen >= result.totalRecords
+        ) {
+          break;
+        }
+      }
     }
 
-    return { totalRecords, entities };
+    return { totalRecords, entities: [...entitiesByUei.values()] };
   }
 
   async #fetchPage(
     query: ParsedSamSearchQuery,
+    naicsCode: string,
     page: number,
     apiKey: string,
   ): Promise<z.output<typeof samEntityResponseSchema>> {
@@ -287,7 +337,7 @@ export class SamEntityClient {
       samRegistered: "Yes",
       registrationStatus: "A",
       physicalAddressCountryCode: "USA",
-      naicsCode: query.naicsCodes.join(","),
+      naicsCode,
       page: String(page),
       size: String(this.#pageSize),
       includeSections: INCLUDED_SECTIONS,
@@ -351,7 +401,12 @@ function parseQuery(query: SamSearchQuery): ParsedSamSearchQuery {
     .strictObject({
       naicsCodes: z.array(z.string().regex(/^\d{6}$/u)).min(1).max(25),
       state: z.string().trim().regex(/^[A-Z]{2}$/u).optional(),
-      maxResults: z.number().int().min(1).max(100).default(DEFAULT_MAX_RESULTS),
+      maxResults: z
+        .number()
+        .int()
+        .min(1)
+        .max(SAM_ENTITY_RESULT_MAX)
+        .default(DEFAULT_MAX_RESULTS),
       signal: z.custom<AbortSignal>().optional(),
     })
     .parse(query);

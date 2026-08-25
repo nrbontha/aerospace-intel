@@ -68,7 +68,8 @@ function samEntity(
     businessTypeHints: [],
     ownershipHints: [],
     parentUei: null,
-    sourceLocator: `sam://entity-information/v4/entities/${uei}`,
+    matchedNaicsCodes: ["336413"],
+    sourceLocator: `sam://entity-information/v4/entities/${uei}?naics=336413`,
     raw: {
       entityRegistration: {
         ueiSAM: uei,
@@ -329,6 +330,9 @@ describe("SamEntityHarvester", () => {
       cageCode: "1ABC2",
       officialUrl: "https://official-aero.example/",
       officialDomain: "official-aero.example",
+      matchedNaicsCodes: ["332722", "336413"],
+      sourceLocator:
+        "sam://entity-information/v4/entities/ACTIVE000001?naics=332722%2C336413",
       raw: {
         entityRegistration: {
           ueiSAM: "ACTIVE000001",
@@ -375,7 +379,7 @@ describe("SamEntityHarvester", () => {
     expect(result.signals[0]).toEqual({
       sourceKey: "sam_entity",
       sourceLocator:
-        "sam://entity-information/v4/entities/ACTIVE000001",
+        "sam://entity-information/v4/entities/ACTIVE000001?naics=332722%2C336413",
       sourceFingerprint: fingerprintSamEntity("ACTIVE000001"),
       rawName: "Official Aero Components",
       rawDomain: "official-aero.example",
@@ -384,11 +388,17 @@ describe("SamEntityHarvester", () => {
       city: "Wichita",
       state: "KS",
       country: "USA",
-      sourcePayload: official.raw,
+      sourcePayload: {
+        matchedNaicsCodes: ["332722", "336413"],
+        rawEntity: official.raw,
+      },
     });
     expect(result.signals[0]!.sourceLocator).not.toContain("key");
     expect(result.signals[0]!.sourcePayload).toMatchObject({
-      entityRegistration: { providerPublicField: "preserved" },
+      matchedNaicsCodes: ["332722", "336413"],
+      rawEntity: {
+        entityRegistration: { providerPublicField: "preserved" },
+      },
     });
     expect(result.signals[1]).not.toHaveProperty("rawDomain");
     expect(result.signals[0]).not.toHaveProperty("awardCount");
