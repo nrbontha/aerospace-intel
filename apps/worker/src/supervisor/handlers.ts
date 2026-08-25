@@ -22,6 +22,7 @@ import {
   goldenExamples,
   leadNameTokens,
   ingestLeadCandidates,
+  identityMatchCandidates,
   mapResearchRunInput,
   observations,
   ownershipObservations,
@@ -3469,6 +3470,231 @@ async function routeQualifiedCandidate(
     );
 }
 
+type QualifiedIdentifierType = "uei" | "cage" | "faa_pma_holder";
+
+interface QualifiedIdentifier {
+  readonly type: QualifiedIdentifierType;
+  readonly value: string;
+}
+
+interface QualifiedIdentifierMatch extends QualifiedIdentifier {
+  readonly companyId: string;
+}
+
+type QualifiedIdentifierAttachment =
+  | { readonly outcome: "no_match" }
+  | {
+      readonly outcome: "conflict";
+      readonly matches: readonly QualifiedIdentifierMatch[];
+    }
+  | {
+      readonly outcome: "attached";
+      readonly companyId: string;
+      readonly leadId: string;
+      readonly matches: readonly QualifiedIdentifierMatch[];
+    };
+
+function qualifiedSignalIdentifiers(signal: SourceSignal): QualifiedIdentifier[] {
+  const identifiers: QualifiedIdentifier[] = [];
+  const append = (type: QualifiedIdentifierType, rawValue: unknown): void => {
+    if (typeof rawValue !== "string") return;
+    const value = rawValue.normalize("NFKC").trim().toLocaleUpperCase("en-US");
+    if (
+      value !== "" &&
+      !identifiers.some(
+        (identifier) => identifier.type === type && identifier.value === value,
+      )
+    ) {
+      identifiers.push({ type, value });
+    }
+  };
+  if (signal.sourceKey === "sam_entity") {
+    append("uei", signal.uei);
+    append("cage", signal.cage);
+  } else if (signal.sourceKey === "faa_drs_pma") {
+    const record = signal.sourcePayload["record"];
+    if (typeof record === "object" && record !== null && "holderNumber" in record) {
+      append("faa_pma_holder", record.holderNumber);
+    }
+  }
+  return identifiers;
+}
+
+async function quarantineIdentifierConflict(
+  db: Database,
+  signalId: string,
+  identifiers: readonly QualifiedIdentifier[],
+  matches: readonly QualifiedIdentifierMatch[],
+  existingLeadCompanyId?: string,
+): Promise<QualifiedIdentifierAttachment> {
+  await recordSourceSignalQualification(db, signalId, {
+    decision: "quarantined",
+    reason: "confirmed_identity_conflict",
+    evidence: {
+      identifiers,
+      matches,
+      ...(existingLeadCompanyId === undefined
+        ? {}
+        : { existingLeadCompanyId }),
+    },
+  });
+  return { outcome: "conflict", matches };
+}
+
+async function attachQualifiedSignalByIdentifier(
+  db: Database,
+  qualifierAgent: ResearchAgent,
+  signal: SourceSignal,
+): Promise<QualifiedIdentifierAttachment> {
+  const identifiers = qualifiedSignalIdentifiers(signal);
+  if (identifiers.length === 0) return { outcome: "no_match" };
+  const condition = or(
+    ...identifiers.map((identifier) =>
+      and(
+        eq(companyIdentifiers.type, identifier.type),
+        sql`upper(btrim(${companyIdentifiers.value})) = ${identifier.value}`,
+      ),
+    ),
+  );
+  if (condition === undefined) return { outcome: "no_match" };
+  const rows = await db
+    .select({
+      companyId: companyIdentifiers.companyId,
+      type: companyIdentifiers.type,
+      value: companyIdentifiers.value,
+    })
+    .from(companyIdentifiers)
+    .where(condition);
+  const matches: QualifiedIdentifierMatch[] = rows.map((row) => ({
+    companyId: row.companyId,
+    type: row.type as QualifiedIdentifierType,
+    value: row.value.normalize("NFKC").trim().toLocaleUpperCase("en-US"),
+  }));
+  const matchedCompanyIds = [...new Set(matches.map((match) => match.companyId))];
+  if (matchedCompanyIds.length === 0) return { outcome: "no_match" };
+  if (matchedCompanyIds.length > 1) {
+    return quarantineIdentifierConflict(
+      db,
+      signal.id,
+      identifiers,
+      matches,
+    );
+  }
+  const companyId = matchedCompanyIds[0]!;
+  const currentLead =
+    signal.leadId === null
+      ? undefined
+      : (
+          await db
+            .select({
+              id: leads.id,
+              resolvedCompanyId: leads.resolvedCompanyId,
+            })
+            .from(leads)
+            .where(eq(leads.id, signal.leadId))
+            .limit(1)
+        )[0];
+  if (
+    currentLead?.resolvedCompanyId !== null &&
+    currentLead?.resolvedCompanyId !== undefined &&
+    currentLead.resolvedCompanyId !== companyId
+  ) {
+    return quarantineIdentifierConflict(
+      db,
+      signal.id,
+      identifiers,
+      matches,
+      currentLead.resolvedCompanyId,
+    );
+  }
+  const reusableLead =
+    currentLead ??
+    (
+      await db
+        .select({ id: leads.id, resolvedCompanyId: leads.resolvedCompanyId })
+        .from(leads)
+        .where(
+          and(
+            eq(leads.campaignId, qualifierAgent.id),
+            eq(leads.rawName, signal.rawName),
+            eq(leads.resolvedCompanyId, companyId),
+          ),
+        )
+        .orderBy(desc(leads.createdAt))
+        .limit(1)
+    )[0];
+  const identityContext = {
+    sourceSignalQualification: {
+      sourceSignalId: signal.id,
+      sourceKey: signal.sourceKey,
+      identityMethod: "exact_company_identifier",
+      matches,
+    },
+  };
+  let leadId: string;
+  if (reusableLead === undefined) {
+    const [created] = await db
+      .insert(leads)
+      .values({
+        campaignId: qualifierAgent.id,
+        rawName: signal.rawName,
+        context: identityContext,
+        possibleLocation:
+          [signal.city, signal.state]
+            .filter((value): value is string => value !== null)
+            .join(", ") || null,
+        possibleIdentifiers: identifiers,
+        status: "resolved",
+        resolvedCompanyId: companyId,
+      })
+      .returning({ id: leads.id });
+    if (created === undefined) {
+      throw new Error("exact identifier lead insert returned no row");
+    }
+    leadId = created.id;
+  } else {
+    leadId = reusableLead.id;
+    await db
+      .update(leads)
+      .set({
+        status: "resolved",
+        resolvedCompanyId: companyId,
+        possibleIdentifiers: identifiers,
+        context: sql`${leads.context} || ${JSON.stringify(identityContext)}::jsonb`,
+        updatedAt: new Date(),
+      })
+      .where(eq(leads.id, leadId));
+  }
+  const strongestMatch = matches.find(
+    (match) =>
+      match.type === "uei" ||
+      (match.type === "cage" &&
+        !matches.some((candidate) => candidate.type === "uei")) ||
+      (match.type === "faa_pma_holder" &&
+        !matches.some(
+          (candidate) => candidate.type === "uei" || candidate.type === "cage",
+        )),
+  )!;
+  await db.insert(identityMatchCandidates).values({
+    leadId,
+    companyId,
+    signalType: strongestMatch.type,
+    features: { matchedValue: strongestMatch.value, matches },
+    confidence: "1.000",
+    explanation: `Automatic exact ${strongestMatch.type} match during source-signal qualification.`,
+    decision: "merged",
+    decidedAt: new Date(),
+  });
+  await recordSourceSignalQualification(db, signal.id, {
+    decision: "qualified",
+    reason: "exact_company_identifier",
+    evidence: { identifiers, matches },
+    leadId,
+    companyId,
+  });
+  return { outcome: "attached", companyId, leadId, matches };
+}
+
 async function qualifySourceSignal(input: {
   readonly db: Database;
   readonly qualifierAgent: ResearchAgent;
@@ -3841,24 +4067,42 @@ function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHand
     let needsMoreResearch = 0;
     let noTarget = 0;
     let quarantined = 0;
+    let identifierAttached = 0;
+    let identifierConflicts = 0;
     let synthesisMaterialized = 0;
     let synthesisWaiting = 0;
     const synthesisErrors: Array<{ signalId: string; error: string }> = [];
     for (const signal of signals) {
       try {
-        const result = await qualifySourceSignal({
+        const attachment = await attachQualifiedSignalByIdentifier(
           db,
-          qualifierAgent: context.agent,
+          context.agent,
           signal,
-          searchDomains: deps.searchOfficialDomains ?? officialDomainSearcher(),
-          pageProber,
-          judge: runtime.judge,
-          classifier,
-        });
-        if (result === "yes_target") yesTarget += 1;
-        else if (result === "needs_more_research") needsMoreResearch += 1;
-        else noTarget += 1;
-        if (result !== "no_target") {
+        );
+        if (attachment.outcome === "conflict") {
+          identifierConflicts += 1;
+          quarantined += 1;
+          continue;
+        }
+        let shouldSynthesize = attachment.outcome === "attached";
+        if (attachment.outcome === "attached") {
+          identifierAttached += 1;
+        } else {
+          const result = await qualifySourceSignal({
+            db,
+            qualifierAgent: context.agent,
+            signal,
+            searchDomains: deps.searchOfficialDomains ?? officialDomainSearcher(),
+            pageProber,
+            judge: runtime.judge,
+            classifier,
+          });
+          if (result === "yes_target") yesTarget += 1;
+          else if (result === "needs_more_research") needsMoreResearch += 1;
+          else noTarget += 1;
+          shouldSynthesize = result !== "no_target";
+        }
+        if (shouldSynthesize) {
           try {
             const synthesis = await synthesizeQualifiedSignalIfReady(db, signal.id, deps);
             if (synthesis === "materialized") synthesisMaterialized += 1;
@@ -3886,7 +4130,8 @@ function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHand
       findings: {
         selected: signals.length,
         statusTransitions: {
-          "qualifying->qualified": yesTarget + needsMoreResearch,
+          "qualifying->qualified":
+            identifierAttached + yesTarget + needsMoreResearch,
           "qualifying->rejected": noTarget,
           "qualifying->quarantined": quarantined,
         },
@@ -3894,6 +4139,10 @@ function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHand
           yes_target: yesTarget,
           needs_more_research: needsMoreResearch,
           no_target: noTarget,
+        },
+        identifierResolution: {
+          attached: identifierAttached,
+          conflicts: identifierConflicts,
         },
         synthesis: {
           materialized: synthesisMaterialized,

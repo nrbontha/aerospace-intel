@@ -1721,6 +1721,182 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     );
   });
 
+  it("qualify_award_lead exact-links FAA and SAM identifiers before domain identity work", async () => {
+    const qualifier = await insertAgent({
+      key: "qualify-exact-source-identifiers-test",
+      agentType: "qualify_award_lead",
+    });
+    const faaCompanyId = await insertCompany({
+      legalName: "RAM Aerospace Inc",
+      displayName: "RAM Aerospace",
+    });
+    const samCompanyId = await insertCompany({
+      legalName: "Exact SAM Aerospace LLC",
+      displayName: "Exact SAM Aerospace",
+    });
+    const conflictingUeiCompanyId = await insertCompany({
+      legalName: "Conflicting UEI Company LLC",
+      displayName: "Conflicting UEI Company",
+    });
+    const conflictingCageCompanyId = await insertCompany({
+      legalName: "Conflicting CAGE Company LLC",
+      displayName: "Conflicting CAGE Company",
+    });
+    await getDatabase().insert(companyIdentifiers).values([
+      {
+        companyId: faaCompanyId,
+        type: "faa_pma_holder",
+        value: "PQ00076WB",
+      },
+      { companyId: samCompanyId, type: "uei", value: "SAMEXACT001" },
+      { companyId: samCompanyId, type: "cage", value: "7SAM7" },
+      {
+        companyId: conflictingUeiCompanyId,
+        type: "uei",
+        value: "CONFLICTUEI1",
+      },
+      {
+        companyId: conflictingCageCompanyId,
+        type: "cage",
+        value: "9BAD9",
+      },
+    ]);
+    const insertedSignals = await getDatabase()
+      .insert(sourceSignals)
+      .values([
+        {
+          sourceKey: "faa_drs_pma",
+          sourceLocator:
+            "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCIDRAMREPEAT",
+          sourceFingerprint: "qualify-exact-faa-repeat",
+          agentId: qualifier.id,
+          rawName: "RAM Aerospace",
+          sourcePayload: {
+            record: { holderNumber: " pq00076wb " },
+          },
+        },
+        {
+          sourceKey: "sam_entity",
+          sourceLocator:
+            "sam://entity-information/v4/entities/SAMEXACT001?naics=336413",
+          sourceFingerprint: "qualify-exact-sam",
+          agentId: qualifier.id,
+          rawName: "Exact SAM Aerospace LLC",
+          uei: "samexact001",
+          cage: "7sam7",
+          sourcePayload: {},
+        },
+        {
+          sourceKey: "sam_entity",
+          sourceLocator:
+            "sam://entity-information/v4/entities/CONFLICTUEI1?naics=336413",
+          sourceFingerprint: "qualify-conflicting-sam",
+          agentId: qualifier.id,
+          rawName: "Conflicting Identifier Aerospace LLC",
+          uei: "CONFLICTUEI1",
+          cage: "9BAD9",
+          sourcePayload: {},
+        },
+      ])
+      .returning({ id: sourceSignals.id, sourceKey: sourceSignals.sourceKey });
+    const searchOfficialDomains = vi.fn(async () => []);
+    const fetchText = vi.fn(async () => ({
+      ok: false as const,
+      error: "must_not_probe",
+    }));
+    const judgeIdentity = vi.fn(async () => ({
+      matches: false,
+      confidence: 0,
+      locationMatches: "unknown" as const,
+      identifierMatches: "unknown" as const,
+      relationship: "mismatch" as const,
+      reason: "must not judge",
+    }));
+    const classifySourceSignal = vi.fn(async ({ pageUrl }: { pageUrl: string }) =>
+      sourceSignalClassification(pageUrl),
+    );
+    const synthesizeSourceSignal: NonNullable<
+      TickHandlerDeps["synthesizeSourceSignal"]
+    > = vi.fn(async (_db, signalId) => ({
+      status: "noop",
+      sourceKey: signalId,
+    }));
+    gatewayWithContents([planEnvelope([])]);
+    const result = await createV1TickHandlerRegistry({
+      ...depsWith({}),
+      searchOfficialDomains,
+      domainProber: { fetchText },
+      domainJudge: {
+        proposeDomains: async () => [],
+        judgeIdentity,
+      },
+      classifySourceSignal,
+      synthesizeSourceSignal,
+    }).get("qualify_award_lead")!({
+      agent: qualifier,
+      signal: new AbortController().signal,
+    });
+
+    expect(result.findings).toMatchObject({
+      selected: 3,
+      statusTransitions: {
+        "qualifying->qualified": 2,
+        "qualifying->quarantined": 1,
+      },
+      identifierResolution: { attached: 2, conflicts: 1 },
+      synthesis: { materialized: 2, waitingForCompany: 0, errors: [] },
+    });
+    expect(searchOfficialDomains).not.toHaveBeenCalled();
+    expect(fetchText).not.toHaveBeenCalled();
+    expect(judgeIdentity).not.toHaveBeenCalled();
+    expect(classifySourceSignal).not.toHaveBeenCalled();
+    expect(synthesizeSourceSignal).toHaveBeenCalledTimes(2);
+    const signals = await getDatabase()
+      .select()
+      .from(sourceSignals)
+      .where(eq(sourceSignals.agentId, qualifier.id));
+    const faaSignal = signals.find((signal) => signal.sourceKey === "faa_drs_pma")!;
+    const samSignal = signals.find(
+      (signal) => signal.sourceKey === "sam_entity" && signal.uei === "samexact001",
+    )!;
+    const conflict = signals.find((signal) => signal.uei === "CONFLICTUEI1")!;
+    expect(faaSignal).toMatchObject({
+      status: "qualified",
+      companyId: faaCompanyId,
+      leadId: expect.any(String),
+      qualification: { reason: "exact_company_identifier" },
+    });
+    expect(samSignal).toMatchObject({
+      status: "qualified",
+      companyId: samCompanyId,
+      leadId: expect.any(String),
+      qualification: { reason: "exact_company_identifier" },
+    });
+    expect(conflict).toMatchObject({
+      status: "quarantined",
+      companyId: null,
+      leadId: null,
+      qualification: { reason: "confirmed_identity_conflict" },
+    });
+    const resolvedLeads = await getDatabase()
+      .select()
+      .from(leads)
+      .where(eq(leads.campaignId, qualifier.id));
+    expect(resolvedLeads).toHaveLength(2);
+    expect(resolvedLeads.every((lead) => lead.status === "resolved")).toBe(true);
+    expect(resolvedLeads.map((lead) => lead.resolvedCompanyId).sort()).toEqual(
+      [faaCompanyId, samCompanyId].sort(),
+    );
+    expect(
+      vi.mocked(synthesizeSourceSignal).mock.calls.map((call) => call[1]).sort(),
+    ).toEqual(
+      insertedSignals
+        .filter((signal) => signal.sourceKey !== "sam_entity" || signal.id === samSignal.id)
+        .map((signal) => signal.id)
+        .sort(),
+    );
+  });
+
   it("leaves a qualified supported source waiting until a company is resolved", async () => {
     const qualifier = await insertAgent({
       key: "qualify-source-synthesis-wait-test",
