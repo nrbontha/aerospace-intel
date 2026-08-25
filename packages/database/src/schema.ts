@@ -48,6 +48,7 @@ import {
   char,
   check,
   date,
+  foreignKey,
   index,
   integer,
   jsonb,
@@ -378,6 +379,18 @@ export const facilities = pgTable(
   },
   (t) => [
     index("facilities_company_idx").on(t.companyId),
+    uniqueIndex("facilities_complete_address_uidx")
+      .on(
+        t.companyId,
+        sql`upper(btrim(${t.countryCode}))`,
+        sql`lower(btrim(${t.addressLine1}))`,
+        sql`lower(btrim(${t.city}))`,
+        sql`lower(btrim(${t.region}))`,
+        sql`lower(btrim(${t.postalCode}))`,
+      )
+      .where(
+        sql`${t.companyId} IS NOT NULL AND nullif(btrim(${t.countryCode}), '') IS NOT NULL AND nullif(btrim(${t.addressLine1}), '') IS NOT NULL AND nullif(btrim(${t.city}), '') IS NOT NULL AND nullif(btrim(${t.region}), '') IS NOT NULL AND nullif(btrim(${t.postalCode}), '') IS NOT NULL`,
+      ),
     index("facilities_location_idx").on(t.countryCode, t.region, t.city),
     index("facilities_name_trgm_idx").using(
       "gin",
@@ -595,6 +608,7 @@ export const platformVariants = pgTable(
     updatedAt: ut(),
   },
   (t) => [
+    uniqueIndex("platform_variants_id_platform_uidx").on(t.id, t.platformId),
     uniqueIndex("platform_variants_uidx").on(
       t.platformId,
       sql`lower(${t.name})`,
@@ -672,9 +686,14 @@ export const partAlternateIds = pgTable(
   },
   (t) => [
     uniqueIndex("part_alternate_ids_natural_uidx").on(
+      t.partId,
       t.identifierType,
       sql`upper(${t.identifierValue})`,
       sql`coalesce(${t.authority}, '')`,
+    ),
+    index("part_alternate_ids_lookup_idx").on(
+      t.identifierType,
+      sql`upper(${t.identifierValue})`,
     ),
     index("part_alternate_ids_trgm_idx").using(
       "gin",
@@ -714,6 +733,7 @@ export const facilityQualifications = pgTable(
     validFrom: date("valid_from"),
     validTo: date("valid_to"),
     confidence: conf(),
+    status: recordStatus("status").notNull().default("draft"),
     createdAt: ct(),
     updatedAt: ut(),
   },
@@ -729,6 +749,14 @@ export const facilityQualifications = pgTable(
         t.validFrom,
       )
       .nullsNotDistinct(),
+    uniqueIndex("facility_qualifications_reference_uidx")
+      .on(t.facilityId, t.qualificationReference)
+      .where(sql`${t.qualificationReference} IS NOT NULL`),
+    foreignKey({
+      columns: [t.platformVariantId, t.platformId],
+      foreignColumns: [platformVariants.id, platformVariants.platformId],
+      name: "facility_qualifications_variant_platform_fk",
+    }).onDelete("cascade"),
     index("facility_qualifications_part_idx").on(t.partId),
     check(
       "facility_qualifications_ranges_chk",
@@ -933,17 +961,36 @@ export const sourceDocumentLinks = pgTable(
     platformId: uuid("platform_id").references(() => platforms.id, {
       onDelete: "cascade",
     }),
+    platformVariantId: uuid("platform_variant_id").references(
+      () => platformVariants.id,
+      { onDelete: "cascade" },
+    ),
     contractId: uuid("contract_id").references(() => contracts.id, {
       onDelete: "cascade",
     }),
+    facilityQualificationId: uuid("facility_qualification_id").references(
+      () => facilityQualifications.id,
+      { onDelete: "cascade" },
+    ),
     relationship: text("relationship").notNull().default("mentions"),
     createdAt: ct(),
   },
   (t) => [
     index("source_document_links_document_idx").on(t.sourceDocumentId),
+    uniqueIndex("source_document_links_target_uidx").on(
+      t.sourceDocumentId,
+      t.relationship,
+      sql`coalesce(${t.companyId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+      sql`coalesce(${t.facilityId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+      sql`coalesce(${t.partId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+      sql`coalesce(${t.platformId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+      sql`coalesce(${t.platformVariantId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+      sql`coalesce(${t.contractId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+      sql`coalesce(${t.facilityQualificationId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+    ),
     check(
       "source_document_links_target_chk",
-      sql`num_nonnulls(${t.companyId}, ${t.facilityId}, ${t.partId}, ${t.platformId}, ${t.contractId}) = 1`,
+      sql`num_nonnulls(${t.companyId}, ${t.facilityId}, ${t.partId}, ${t.platformId}, ${t.platformVariantId}, ${t.contractId}, ${t.facilityQualificationId}) = 1`,
     ),
   ],
 );

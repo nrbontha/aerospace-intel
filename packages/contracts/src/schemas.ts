@@ -40,6 +40,7 @@ export const identifierTypeValues = [
   "sic",
   "ticker",
   "internal",
+  "faa_pma_holder",
 ] as const;
 export const contactVerificationStatusValues = [
   "unverified",
