@@ -492,6 +492,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
             entityTypeHints: [],
             businessTypeHints: [],
             ownershipHints: [],
+            matchedNaicsCodes: ["336413"],
             parentUei: null,
             sourceLocator: "sam://entity-information/v4/entities/STRICTSAM001",
             raw: {
@@ -537,6 +538,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
             entityTypeHints: [],
             businessTypeHints: [],
             ownershipHints: [],
+            matchedNaicsCodes: ["336413"],
             parentUei: null,
             sourceLocator: "sam://entity-information/v4/entities/INACTIVESAM1",
             raw: {
@@ -579,7 +581,10 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       rawName: "Strict SAM Aerospace LLC",
       status: "queued_qualification",
       sourcePayload: {
-        publicExtension: { preserved: true },
+        matchedNaicsCodes: ["336413"],
+        rawEntity: {
+          publicExtension: { preserved: true },
+        },
       },
     });
     expect(
