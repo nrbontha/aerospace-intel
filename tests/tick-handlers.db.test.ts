@@ -535,7 +535,8 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
         fetchText: async (url) => ({
           ok: true,
           finalUrl: url,
-          text: "Atlas Precision manufactures flight-control components for aerospace and defense programs.",
+          text:
+            "Atlas Precision in Huntsville manufactures flight-control components for aerospace and defense programs.",
         }),
       },
       domainJudge: {
@@ -595,6 +596,143 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
       .from(leads)
       .where(eq(leads.campaignId, qualifier.id));
     expect(leadRows).toHaveLength(1);
+  });
+  it("qualify_award_lead corroborates identity across two first-party pages only", async () => {
+    const qualifier = await insertAgent({
+      key: "qualify-award-multipage-test",
+      agentType: "qualify_award_lead",
+    });
+    await getDatabase().insert(sourceSignals).values([
+      {
+        sourceKey: "usaspending",
+        sourceLocator: "usaspending://qualification/zitec",
+        sourceFingerprint: "qualification-zitec-multipage",
+        agentId: qualifier.id,
+        rawName: "Zitec USA LLC",
+        city: "Niceville",
+        state: "FL",
+        cage: "ZITEC",
+        awardCount: 1,
+        awardValue: "1000.00",
+        sourcePayload: {},
+      },
+      {
+        sourceKey: "usaspending",
+        sourceLocator: "usaspending://qualification/wrong-city",
+        sourceFingerprint: "qualification-wrong-city",
+        agentId: qualifier.id,
+        rawName: "Wrong City Aerospace LLC",
+        city: "Niceville",
+        state: "FL",
+        cage: "WRONG",
+        awardCount: 1,
+        awardValue: "1000.00",
+        sourcePayload: {},
+      },
+    ]);
+    const calls: string[] = [];
+    gatewayWithContents([planEnvelope([])]);
+    const handler = createV1TickHandlerRegistry({
+      ...depsWith({}),
+      searchOfficialDomains: async (identity) => [
+        {
+          domain: identity.legalName.startsWith("Zitec") ? "zitecusa.test" : "wrong-city.test",
+          url: identity.legalName.startsWith("Zitec")
+            ? "https://zitecusa.test/"
+            : "https://wrong-city.test/",
+          title: identity.legalName,
+          textSnippet: "Official company website",
+          score: 0.9,
+        },
+      ],
+      identityPageProber: {
+        fetchIdentityPage: async (url) => {
+          calls.push(url);
+          if (url === "https://zitecusa.test/") {
+            return {
+              ok: true,
+              finalUrl: url,
+              text: "Zitec USA supports aerospace manufacturing programs.",
+              identityLinks: [
+                "https://zitecusa.test/about",
+                "https://zitecusa.test/contact",
+                "https://untrusted.example/about",
+              ],
+            };
+          }
+          if (url === "https://zitecusa.test/about") {
+            return {
+              ok: true,
+              finalUrl: url,
+              text:
+                "Zitec USA LLC manufactures aerospace components in Niceville, Florida. CAGE ZITEC.",
+              identityLinks: [],
+            };
+          }
+          if (url === "https://zitecusa.test/contact") {
+            return {
+              ok: true,
+              finalUrl: url,
+              text: "Contact Zitec USA.",
+              identityLinks: [],
+            };
+          }
+          return {
+            ok: true,
+            finalUrl: url,
+            text: "Wrong City Aerospace operates in Atlanta, Georgia.",
+            identityLinks: [],
+          };
+        },
+      },
+      domainJudge: {
+        proposeDomains: async () => [],
+        judgeIdentity: async () => ({
+          matches: true,
+          confidence: 0.98,
+          locationMatches: true,
+          identifierMatches: true,
+          relationship: "exact",
+          reason: "official pages identify the business",
+        }),
+      },
+      classifyAwardLead: async ({ pageUrl }) => ({
+        manufacturer: true,
+        aerospaceDefenseRelevance: true,
+        businessModel: "manufacturer",
+        evidenceExcerpt: "manufactures aerospace components in Niceville, Florida",
+        evidenceUrl: pageUrl,
+        confidence: 0.9,
+      }),
+    });
+    const result = await handler.get("qualify_award_lead")!({
+      agent: qualifier,
+      signal: new AbortController().signal,
+    });
+    expect(result.findings).toMatchObject({
+      statusTransitions: {
+        "qualifying->qualified": 1,
+        "qualifying->rejected": 1,
+      },
+    });
+    expect(calls.filter((url) => url.startsWith("https://zitecusa.test/"))).toHaveLength(3);
+    expect(calls).not.toContain("https://untrusted.example/about");
+    const signals = await getDatabase()
+      .select()
+      .from(sourceSignals)
+      .where(eq(sourceSignals.agentId, qualifier.id));
+    const qualified = signals.find((signal) => signal.rawName === "Zitec USA LLC");
+    const rejected = signals.find((signal) => signal.rawName === "Wrong City Aerospace LLC");
+    expect(qualified?.status).toBe("qualified");
+    expect(rejected?.status).toBe("rejected");
+    expect((qualified?.qualification as Record<string, unknown>)["evidence"]).toMatchObject({
+      identityUrls: [
+        "https://zitecusa.test/",
+        "https://zitecusa.test/about",
+        "https://zitecusa.test/contact",
+      ],
+      corroborationUrl: "https://zitecusa.test/about",
+    });
   });
   it("discover_source (sam variant) idles honestly without SAM_API_KEY", async () => {
     const previous = process.env.SAM_API_KEY;

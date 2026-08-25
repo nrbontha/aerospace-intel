@@ -138,6 +138,20 @@ export type OfficialDomainSearcher = (
   },
 ) => Promise<readonly OfficialDomainCandidate[]>;
 
+export interface IdentityPage {
+  readonly finalUrl: string;
+  readonly text: string;
+  readonly identityLinks: readonly string[];
+}
+
+export type IdentityPageProbeResult =
+  | ({ readonly ok: true } & IdentityPage)
+  | { readonly ok: false; readonly error: string };
+
+export interface IdentityPageProber {
+  fetchIdentityPage(url: string): Promise<IdentityPageProbeResult>;
+}
+
 export interface TickHandlerDeps {
   /** OpenRouter gateway; defaults to one built from OPENROUTER_API_KEY. */
   readonly client?: OpenRouterClient;
@@ -162,6 +176,8 @@ export interface TickHandlerDeps {
   readonly researchForceRefresh?: boolean;
   /** Domain-prober override (tests); default probes with browser-like headers. */
   readonly domainProber?: DomainProber;
+  /** Multi-page official-site identity probe override (tests). */
+  readonly identityPageProber?: IdentityPageProber;
   /** Domain-judge override (tests); default is the OpenRouter prompt-contract judge. */
   readonly domainJudge?: DomainJudge;
   /**
@@ -1704,11 +1720,67 @@ export function homepageIdentityText(html: string): string {
   return collapse(stripTags(html)).slice(0, MAX_IDENTITY_TEXT_CHARS);
 }
 
-class SafeFetchDomainProber implements DomainProber {
-  async fetchText(url: string) {
+const MAX_IDENTITY_PAGE_TEXT_CHARS = 4_000;
+
+function identityPageText(html: string): string {
+  const headings = [
+    ...matchAll(html, /<title[^>]*>([\s\S]*?)<\/title/giu),
+    ...matchAll(
+      html,
+      /<meta[^>]+name\s*=\s*["']description["'][^>]*content\s*=\s*["']([^"']*)["']/giu,
+    ),
+    ...matchAll(html, /<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/giu),
+  ];
+  return collapse(`${headings.join(" ")} ${stripTags(html)}`).slice(
+    0,
+    MAX_IDENTITY_PAGE_TEXT_CHARS,
+  );
+}
+
+function identityLinksFrom(html: string, baseUrl: string): string[] {
+  const baseHost = hostOf(baseUrl);
+  if (baseHost === null) return [];
+  const candidates: Array<{ url: string; priority: number }> = [];
+  for (const match of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/giu)) {
+    const href = /\bhref\s*=\s*["']([^"']+)["']/iu.exec(match[1] ?? "")?.[1];
+    if (href === undefined) continue;
+    const label = collapse(stripTags(match[2] ?? ""));
+    const relevance = `${href} ${label}`.toLocaleLowerCase("en-US");
+    if (!/(about|contact|company|profile|who[\s_-]*we[\s_-]*are)/u.test(relevance)) continue;
+    let resolved: URL;
     try {
-      // 10s ceiling here; safe-fetch itself aborts at 15s but the faster
-      // deadline wins.
+      resolved = new URL(decodeEntities(href), baseUrl);
+    } catch {
+      continue;
+    }
+    if (
+      (resolved.protocol !== "https:" && resolved.protocol !== "http:") ||
+      hostOf(resolved.toString()) !== baseHost
+    ) {
+      continue;
+    }
+    resolved.hash = "";
+    const priority = /about|who[\s_-]*we[\s_-]*are/u.test(relevance)
+      ? 0
+      : /company|profile/u.test(relevance)
+        ? 1
+        : 2;
+    candidates.push({ url: resolved.toString(), priority });
+  }
+  candidates.sort((left, right) => left.priority - right.priority);
+  return [...new Set(candidates.map((candidate) => candidate.url))].slice(0, 2);
+}
+
+class SafeFetchDomainProber implements DomainProber, IdentityPageProber {
+  async fetchText(url: string) {
+    const page = await this.fetchIdentityPage(url);
+    return page.ok
+      ? { ok: true as const, finalUrl: page.finalUrl, text: homepageIdentityText(page.text) }
+      : page;
+  }
+
+  async fetchIdentityPage(url: string): Promise<IdentityPageProbeResult> {
+    try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 10_000);
       let result;
@@ -1721,17 +1793,19 @@ class SafeFetchDomainProber implements DomainProber {
       } finally {
         clearTimeout(timer);
       }
+      const html = result.content.slice(0, MAX_HTML_BYTES);
       return {
-        ok: true as const,
+        ok: true,
         finalUrl: result.finalUrl,
-        text: homepageIdentityText(result.content.slice(0, MAX_HTML_BYTES)),
+        text: identityPageText(html),
+        identityLinks: identityLinksFrom(html, result.finalUrl),
       };
     } catch (error) {
-      if (error instanceof SafeFetchError) return { ok: false as const, error: error.code };
+      if (error instanceof SafeFetchError) return { ok: false, error: error.code };
       if (error instanceof Error && error.name === "AbortError") {
-        return { ok: false as const, error: "timeout" };
+        return { ok: false, error: "timeout" };
       }
-      return { ok: false as const, error: "network_error" };
+      return { ok: false, error: "network_error" };
     }
   }
 }
@@ -1992,30 +2066,57 @@ function awardIdentityHints(signal: {
   };
 }
 
+function identityCorroborationUrl(
+  signal: SourceSignal,
+  pages: readonly IdentityPage[],
+): string | null {
+  const identifiers = [signal.uei, signal.cage].filter(
+    (value): value is string => value !== null,
+  );
+  const locations = [
+    ...(signal.city === null ? [] : [signal.city]),
+    ...(signal.city === null || signal.state === null ? [] : [`${signal.city}, ${signal.state}`]),
+  ];
+  for (const page of pages) {
+    const normalized = normalizeText(page.text);
+    if (locations.some((location) => normalized.includes(normalizeText(location)))) {
+      return page.finalUrl;
+    }
+  }
+  for (const page of pages) {
+    const normalized = normalizeText(page.text);
+    if (identifiers.some((identifier) => normalized.includes(normalizeText(identifier)))) {
+      return page.finalUrl;
+    }
+  }
+  return null;
+}
 function identityCorroborates(
   legalName: string,
   pageText: string,
   judgment: IdentityJudgment,
+  corroborationUrl: string | null,
+  hasIdentityHints: boolean,
 ): boolean {
-  return (
-    (judgment.locationMatches === true ||
-      judgment.identifierMatches === true ||
-      (judgment.locationMatches === "unknown" &&
-        judgment.identifierMatches === "unknown" &&
-        identityOverlapRatio(legalName, pageText) >= MIN_IDENTITY_OVERLAP)) &&
+  const modelAccepts =
     judgment.matches &&
     judgment.confidence >= MIN_JUDGE_CONFIDENCE &&
-    (judgment.relationship === "exact" || judgment.relationship === "parent_brand")
+    (judgment.relationship === "exact" || judgment.relationship === "parent_brand");
+  if (!modelAccepts) return false;
+  if (corroborationUrl !== null) return true;
+  return (
+    !hasIdentityHints &&
+    judgment.locationMatches === "unknown" &&
+    judgment.identifierMatches === "unknown" &&
+    identityOverlapRatio(legalName, pageText) >= MIN_IDENTITY_OVERLAP
   );
 }
 
 function classifierQualifies(
   classification: AwardLeadClassification,
   pageText: string,
-  pageUrl: string,
+  fetchedUrls: readonly string[],
 ): boolean {
-  const evidenceHost = hostOf(classification.evidenceUrl);
-  const pageHost = hostOf(pageUrl);
   return (
     classification.manufacturer &&
     classification.aerospaceDefenseRelevance &&
@@ -2023,8 +2124,7 @@ function classifierQualifies(
     classification.businessModel !== "service" &&
     classification.confidence >= 0.75 &&
     normalizedContains(pageText, classification.evidenceExcerpt) &&
-    evidenceHost !== null &&
-    evidenceHost === pageHost
+    fetchedUrls.includes(classification.evidenceUrl)
   );
 }
 
@@ -2054,7 +2154,7 @@ async function qualifyAwardSignal(input: {
   readonly qualifierAgent: ResearchAgent;
   readonly signal: SourceSignal;
   readonly searchDomains: OfficialDomainSearcher;
-  readonly prober: DomainProber;
+  readonly pageProber: IdentityPageProber;
   readonly judge: DomainJudge;
   readonly classifier: AwardLeadClassifier;
 }): Promise<"qualified" | "rejected"> {
@@ -2067,34 +2167,62 @@ async function qualifyAwardSignal(input: {
   });
   const attempts: Array<Record<string, unknown>> = [];
   for (const proposal of proposals.slice(0, MAX_EXA_PROPOSALS_PER_SIGNAL)) {
-    const probe = await input.prober.fetchText(proposal.url);
-    if (!probe.ok) {
-      attempts.push({ domain: proposal.domain, outcome: "unreachable", reason: probe.error });
+    const homepage = await input.pageProber.fetchIdentityPage(proposal.url);
+    if (!homepage.ok) {
+      attempts.push({ domain: proposal.domain, outcome: "unreachable", reason: homepage.error });
       continue;
     }
+    const pages: IdentityPage[] = [homepage];
+    const homepageHost = hostOf(homepage.finalUrl);
+    for (const link of homepage.identityLinks.slice(0, 2)) {
+      if (homepageHost === null || hostOf(link) !== homepageHost) continue;
+      const page = await input.pageProber.fetchIdentityPage(link);
+      if (page.ok) pages.push(page);
+    }
+    const pageText = pages
+      .map((page) => `[Source URL: ${page.finalUrl}]\n${page.text}`)
+      .join("\n\n");
+    const corroborationUrl = identityCorroborationUrl(input.signal, pages);
+    const hasIdentityHints =
+      input.signal.city !== null || input.signal.uei !== null || input.signal.cage !== null;
     const judgment = await input.judge.judgeIdentity(
       input.signal.rawName,
-      probe.text,
+      pageText,
       awardIdentityHints(input.signal),
     );
-    if (!identityCorroborates(input.signal.rawName, probe.text, judgment)) {
+    if (
+      !identityCorroborates(
+        input.signal.rawName,
+        pageText,
+        judgment,
+        corroborationUrl,
+        hasIdentityHints,
+      )
+    ) {
       attempts.push({
         domain: proposal.domain,
-        url: probe.finalUrl,
+        urls: pages.map((page) => page.finalUrl),
         outcome: "identity_mismatch",
         identity: judgment,
       });
       continue;
     }
+    const evidenceUrl = corroborationUrl ?? homepage.finalUrl;
     const classification = await input.classifier({
       legalName: input.signal.rawName,
-      pageText: probe.text,
-      pageUrl: probe.finalUrl,
+      pageText,
+      pageUrl: evidenceUrl,
     });
-    if (!classifierQualifies(classification, probe.text, probe.finalUrl)) {
+    if (
+      !classifierQualifies(
+        classification,
+        pageText,
+        pages.map((page) => page.finalUrl),
+      )
+    ) {
       attempts.push({
         domain: proposal.domain,
-        url: probe.finalUrl,
+        urls: pages.map((page) => page.finalUrl),
         outcome: "classifier_rejected",
         identity: judgment,
         classification,
@@ -2137,6 +2265,8 @@ async function qualifyAwardSignal(input: {
           snippet: proposal.textSnippet,
         },
         identity: judgment,
+        identityUrls: pages.map((page) => page.finalUrl),
+        corroborationUrl,
         classification,
         ownershipActionability: {
           outcome: "passed",
@@ -2198,6 +2328,23 @@ function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHand
         findings: { idle: true, idleReason: "missing_identity_dependencies" },
       };
     }
+    const pageProber: IdentityPageProber =
+      deps.identityPageProber ??
+      (deps.domainProber === undefined
+        ? new SafeFetchDomainProber()
+        : {
+            fetchIdentityPage: async (url) => {
+              const probe = await runtime.prober.fetchText(url);
+              return probe.ok
+                ? {
+                    ok: true as const,
+                    finalUrl: probe.finalUrl,
+                    text: probe.text,
+                    identityLinks: [],
+                  }
+                : probe;
+            },
+          });
     const defaultClassifier =
       deps.classifyAwardLead === undefined && model !== null ? createAwardLeadClassifier(model) : null;
     const classifier = deps.classifyAwardLead ?? defaultClassifier?.classify;
@@ -2220,7 +2367,7 @@ function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHand
           qualifierAgent: context.agent,
           signal,
           searchDomains: deps.searchOfficialDomains ?? officialDomainSearcher(),
-          prober: runtime.prober,
+          pageProber,
           judge: runtime.judge,
           classifier,
         });
