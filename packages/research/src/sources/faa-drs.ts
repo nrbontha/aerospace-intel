@@ -93,7 +93,7 @@ export class FaaDrsStaleResultsError extends SourceFetchError {
 
 export interface FaaDrsDomCard {
   readonly href: string;
-  /** Verbatim browser innerText for the rendered result card. */
+  /** Verbatim card textContent, including collapsed metadata tags. */
   readonly renderedText: string;
 }
 
@@ -109,6 +109,7 @@ export interface FaaDrsBrowserPage {
   press(selector: string, key: "Enter"): Promise<void>;
   click(selector: string): Promise<void>;
   waitForResults(timeoutMs: number): Promise<void>;
+  readRecordText(url: string, timeoutMs: number): Promise<string>;
   bodyText(): Promise<string>;
   blockedStatus(): 401 | 403 | 429 | null;
   cards(maxRecords: number): Promise<readonly FaaDrsDomCard[]>;
@@ -235,8 +236,22 @@ export class FaaDrsBrowserClient {
       throwForBlockedAccess(page.blockedStatus(), await page.bodyText());
 
       const cards = await page.cards(query.maxRecords);
-      const records = parseFaaPmaCards(cards, query.maxRecords);
+      let records = parseFaaPmaCards(cards, query.maxRecords);
       assertRecordsMatchFilter(records, filter);
+      let hydratedRecordUrl: string | undefined;
+      if (
+        records.length > 0 &&
+        (filter.name === "holderName" || filter.name === "holderNumber")
+      ) {
+        const detailUrl = records[0]!.guidUrl;
+        const detailText = await page.readRecordText(
+          detailUrl,
+          this.#queryTimeoutMs,
+        );
+        const hydration = hydrateHolderRecords(records, detailText);
+        records = hydration.records;
+        if (hydration.matchedHolder) hydratedRecordUrl = detailUrl;
+      }
       return faaPmaScrapeResultSchema.parse({
         query,
         records,
@@ -244,6 +259,7 @@ export class FaaDrsBrowserClient {
           publicUrl: FAA_DRS_PUBLIC_PMA_URL,
           scrapedAt: this.#now().toISOString(),
           retrievalMethod: "guest_browser_dom",
+          ...(hydratedRecordUrl === undefined ? {} : { hydratedRecordUrl }),
         },
       });
     } finally {
@@ -466,6 +482,44 @@ class PlaywrightFaaDrsBrowserFactory implements FaaDrsBrowserFactory {
           }
           throw new Error("FAA DRS result cards did not stabilize before timeout");
         },
+        async readRecordText(url, timeoutMs) {
+          const expectedRecord = normalizeRecordUrl(url);
+          blockedStatus = null;
+          const response = await page.goto(expectedRecord.guidUrl, {
+            timeout: timeoutMs,
+            waitUntil: "domcontentloaded",
+          });
+          let detailText = await page.locator("body").innerText();
+          throwForBlockedAccess(
+            response?.status() ?? blockedStatus,
+            detailText,
+          );
+          const initialUrl = page.url();
+          if (/login|log-in|signin|sign-in|auth/iu.test(initialUrl)) {
+            throw new FaaDrsAccessError("authentication_required");
+          }
+          await page.waitForFunction(
+            () => {
+              const browserGlobal = globalThis as unknown as BrowserDomGlobal;
+              return (
+                browserGlobal.document.body?.innerText.includes(
+                  "PMA Holder Name",
+                ) ?? false
+              );
+            },
+            undefined,
+            { timeout: timeoutMs },
+          );
+          const actualRecord = normalizeRecordUrl(page.url());
+          if (actualRecord.recordId !== expectedRecord.recordId) {
+            throw new FaaDrsProtocolError(
+              "FAA DRS detail navigation left the selected public record",
+            );
+          }
+          detailText = await page.locator("body").innerText();
+          throwForBlockedAccess(blockedStatus, detailText);
+          return detailText;
+        },
         async bodyText() {
           return await page.locator("body").innerText();
         },
@@ -481,16 +535,11 @@ class PlaywrightFaaDrsBrowserFactory implements FaaDrsBrowserFactory {
               ).slice(0, limit);
               return anchors.map((element) => {
                 const container =
-                  element.closest(
-                    "mat-card, .card, .result-content, [role='article'], li, tr",
-                  ) ??
-                  element.parentElement?.parentElement ??
+                  element.closest("li, mat-card, .card, [role='article'], tr") ??
+                  element.closest(".result-content") ??
                   element.parentElement ??
                   element;
-                const renderedText =
-                  typeof container.innerText === "string"
-                    ? container.innerText
-                    : (container.textContent ?? "");
+                const renderedText = container.textContent ?? "";
                 return {
                   href: element.getAttribute("href") ?? "",
                   renderedText,
@@ -541,7 +590,7 @@ export function parseFaaPmaCard(card: FaaDrsDomCard): FaaPmaRecord {
     subStatus: scalarField(fields, "subStatus"),
     holderName: scalarField(fields, "holderName"),
     holderNumber: scalarField(fields, "holderNumber"),
-    fullAddress: multilineField(fields, "fullAddress"),
+    fullAddress: fullAddressField(fields),
     pmaPartNumber: scalarField(fields, "pmaPartNumber"),
     partName: scalarField(fields, "partName"),
     replacementPartNumber: scalarField(fields, "replacementPartNumber"),
@@ -558,6 +607,72 @@ export function parseFaaPmaCard(card: FaaDrsDomCard): FaaPmaRecord {
   };
   return faaPmaRecordSchema.parse(record);
 }
+interface HolderHydrationResult {
+  readonly records: FaaPmaRecord[];
+  readonly matchedHolder: boolean;
+}
+
+function hydrateHolderRecords(
+  records: readonly FaaPmaRecord[],
+  detailText: string,
+): HolderHydrationResult {
+  const firstRecord = records[0];
+  if (firstRecord === undefined) {
+    return { records: [], matchedHolder: false };
+  }
+  const fields = parseRenderedFields(detailText);
+  const detailHolderName = scalarField(fields, "holderName");
+  const detailHolderNumber = scalarField(fields, "holderNumber");
+  if (
+    !holderIdentityMatches(
+      firstRecord.holderName,
+      firstRecord.holderNumber,
+      detailHolderName,
+      detailHolderNumber,
+    )
+  ) {
+    return { records: [...records], matchedHolder: false };
+  }
+  const detailAddress = fullAddressField(fields);
+  return {
+    matchedHolder: true,
+    records: records.map((record) => {
+      if (
+        !holderIdentityMatches(
+          record.holderName,
+          record.holderNumber,
+          detailHolderName,
+          detailHolderNumber,
+        )
+      ) {
+        return record;
+      }
+      return faaPmaRecordSchema.parse({
+        ...record,
+        holderName: record.holderName ?? detailHolderName,
+        holderNumber: record.holderNumber ?? detailHolderNumber,
+        fullAddress: record.fullAddress ?? detailAddress,
+      });
+    }),
+  };
+}
+
+function holderIdentityMatches(
+  leftName: string | null,
+  leftNumber: string | null,
+  rightName: string | null,
+  rightNumber: string | null,
+): boolean {
+  if (leftNumber !== null && rightNumber !== null) {
+    return normalizeFilterValue(leftNumber) === normalizeFilterValue(rightNumber);
+  }
+  return (
+    leftName !== null &&
+    rightName !== null &&
+    normalizeFilterValue(leftName) === normalizeFilterValue(rightName)
+  );
+}
+
 
 type ParsedField =
   | "status"
@@ -565,6 +680,11 @@ type ParsedField =
   | "holderName"
   | "holderNumber"
   | "fullAddress"
+  | "addressLine"
+  | "city"
+  | "state"
+  | "zip"
+  | "country"
   | "pmaPartNumber"
   | "partName"
   | "replacementPartNumber"
@@ -613,7 +733,14 @@ const LABELS: ReadonlyArray<readonly [string, ParsedField]> = [
   ["Make", "make"],
   ["OPR", "opr"],
   ["Comments", "comments"],
-  ["Address", "fullAddress"],
+  ["State / Province", "state"],
+  ["Postal Code", "zip"],
+  ["ZIP Code", "zip"],
+  ["Country", "country"],
+  ["Address", "addressLine"],
+  ["City", "city"],
+  ["State", "state"],
+  ["Zip", "zip"],
 ];
 
 const labelPatternSource = LABELS.map(([label]) =>
@@ -687,6 +814,19 @@ function multilineField(
   const value = fields.get(field)?.join("\n").trim();
   return value === undefined || value.length === 0 ? null : value;
 }
+function fullAddressField(
+  fields: ReadonlyMap<ParsedField, readonly string[]>,
+): string | null {
+  const combinedAddress = multilineField(fields, "fullAddress");
+  if (combinedAddress !== null) return combinedAddress;
+  const components = (
+    ["addressLine", "city", "state", "zip", "country"] as const
+  )
+    .map((field) => scalarField(fields, field))
+    .filter((value): value is string => value !== null);
+  return components.length === 0 ? null : components.join(" | ");
+}
+
 
 function listField(
   fields: ReadonlyMap<ParsedField, readonly string[]>,

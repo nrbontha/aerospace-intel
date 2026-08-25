@@ -89,6 +89,22 @@ describe("FAA PMA contracts", () => {
     expect(
       faaPmaScrapeResultSchema.safeParse({
         ...result,
+        source: {
+          ...source,
+          hydratedRecordUrl:
+            "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID123456",
+        },
+      }).success,
+    ).toBe(true);
+    expect(
+      faaPmaScrapeResultSchema.safeParse({
+        ...result,
+        source: { ...source, hydratedRecordUrl: "not-a-url" },
+      }).success,
+    ).toBe(false);
+    expect(
+      faaPmaScrapeResultSchema.safeParse({
+        ...result,
         records: [record, { ...record, recordId: "DRSDOCID654321" }],
       }).success,
     ).toBe(false);

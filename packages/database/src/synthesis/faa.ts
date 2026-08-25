@@ -190,7 +190,9 @@ async function persistFaaRecord(
       .onConflictDoNothing();
     await linkDocument(tx, document.id, { companyId }, "qualification_holder");
 
+    const recordGaps: FaaSynthesisGap[] = [];
     const facility = await upsertFaaFacility(tx, companyId, record);
+    if (facility.gap !== null) recordGaps.push(facility.gap);
     if (facility.id !== null) {
       await linkDocument(tx, document.id, { facilityId: facility.id }, "qualifies_at");
     }
@@ -199,7 +201,6 @@ async function persistFaaRecord(
       await linkDocument(tx, document.id, { partId: part.id }, "approves_part");
     }
 
-    const recordGaps: FaaSynthesisGap[] = [];
     if (facility.id === null) {
       recordGaps.push({
         recordId: record.recordId,
@@ -214,7 +215,6 @@ async function persistFaaRecord(
         reason: "FAA record has no PMA part number",
       });
     }
-
     let qualification: {
       id: string | null;
       created: boolean;
@@ -270,6 +270,7 @@ async function persistFaaRecord(
     const material = collectFaaMaterial(
       companyId,
       facility.id,
+      facility.addressAccepted,
       part.id,
       qualification.id,
       record,
@@ -308,6 +309,7 @@ async function persistFaaRecord(
 function collectFaaMaterial(
   companyId: string,
   facilityId: string | null,
+  facilityAddressAccepted: boolean,
   partId: string | null,
   qualificationId: string | null,
   record: FaaPmaRecord,
@@ -339,8 +341,22 @@ function collectFaaMaterial(
   if (record.holderName !== null) {
     append("company", companyId, "faa.holder_name", record.holderName);
   }
-  if (facilityId !== null && record.fullAddress !== null) {
-    append("facility", facilityId, "registered_address", parseFaaAddress(record.fullAddress));
+  if (
+    facilityId !== null &&
+    facilityAddressAccepted &&
+    record.fullAddress !== null
+  ) {
+    append(
+      "facility",
+      facilityId,
+      "registered_address",
+      parseFaaAddress(record.fullAddress),
+    );
+  }
+  if (facilityId !== null) {
+    for (const gap of gaps.filter(({ field }) => field === "facility")) {
+      append("facility", facilityId, "faa.address_conflict", gap);
+    }
   }
   if (partId !== null) {
     append("part", partId, "faa.pma_part_number", record.pmaPartNumber);
@@ -527,37 +543,171 @@ async function upsertFaaDocument(
   return { id: raced.id, created: false };
 }
 
+export interface FaaAddress {
+  readonly addressLine1: string | null;
+  readonly addressLine2: string | null;
+  readonly city: string | null;
+  readonly region: string | null;
+  readonly postalCode: string | null;
+  readonly countryCode: string;
+}
+type FaaFacilityResult = {
+  readonly id: string | null;
+  readonly created: boolean;
+  readonly addressAccepted: boolean;
+  readonly gap: FaaSynthesisGap | null;
+};
+
 async function upsertFaaFacility(
   tx: Tx,
   companyId: string,
   record: FaaPmaRecord,
-): Promise<{ readonly id: string | null; readonly created: boolean }> {
+): Promise<FaaFacilityResult> {
   const address = record.fullAddress === null ? null : parseFaaAddress(record.fullAddress);
   const holderName = normalizeText(record.holderName);
-  if (address === null && holderName === null) return { id: null, created: false };
+  if (address === null && holderName === null) {
+    return { id: null, created: false, addressAccepted: false, gap: null };
+  }
 
-  const conditions = address === null
-    ? and(
-        eq(facilities.companyId, companyId),
-        eq(facilities.facilityType, "faa_pma_holder"),
-        sql`lower(btrim(${facilities.name})) = lower(${holderName!})`,
-        sql`${facilities.addressLine1} IS NULL`,
-      )
-    : and(
-        eq(facilities.companyId, companyId),
-        sql`lower(btrim(coalesce(${facilities.addressLine1}, ''))) = lower(${address.addressLine1 ?? ""})`,
-        sql`lower(btrim(coalesce(${facilities.addressLine2}, ''))) = lower(${address.addressLine2 ?? ""})`,
-        sql`lower(btrim(coalesce(${facilities.city}, ''))) = lower(${address.city ?? ""})`,
-        sql`lower(btrim(coalesce(${facilities.region}, ''))) = lower(${address.region ?? ""})`,
-        sql`lower(btrim(coalesce(${facilities.postalCode}, ''))) = lower(${address.postalCode ?? ""})`,
-        eq(facilities.countryCode, address.countryCode),
+
+  const holderFacilities = holderName === null
+    ? []
+    : await tx
+        .select({
+          id: facilities.id,
+          status: facilities.status,
+          addressLine1: facilities.addressLine1,
+          addressLine2: facilities.addressLine2,
+          city: facilities.city,
+          region: facilities.region,
+          postalCode: facilities.postalCode,
+          countryCode: facilities.countryCode,
+        })
+        .from(facilities)
+        .where(
+          and(
+            eq(facilities.companyId, companyId),
+            eq(facilities.facilityType, "faa_pma_holder"),
+            sql`lower(btrim(${facilities.name})) = lower(${holderName})`,
+          ),
+        )
+        .limit(2);
+  const holderFacility = holderFacilities[0];
+  if (holderFacility !== undefined) {
+    if (address === null) {
+      return {
+        id: holderFacility.id,
+        created: false,
+        addressAccepted: false,
+        gap: null,
+      };
+    }
+    if (holderFacilities.length > 1) {
+      return facilityAddressGap(
+        holderFacility.id,
+        record,
+        "Multiple same-name FAA holder facilities prevent deterministic address enrichment",
       );
-  const [existing] = await tx
-    .select({ id: facilities.id })
-    .from(facilities)
-    .where(conditions)
-    .limit(1);
-  if (existing !== undefined) return { id: existing.id, created: false };
+    }
+    const compatibility = addressCompatibility(holderFacility, address);
+    if (!compatibility.compatible) {
+      return facilityAddressGap(
+        holderFacility.id,
+        record,
+        "FAA holder address conflicts with an existing non-null facility address",
+      );
+    }
+    if (!compatibility.missing) {
+      return {
+        id: holderFacility.id,
+        created: false,
+        addressAccepted: true,
+        gap: null,
+      };
+    }
+    const [addressOwner] = await tx
+      .select({ id: facilities.id })
+      .from(facilities)
+      .where(
+        and(
+          eq(facilities.companyId, companyId),
+          exactAddressCondition(address),
+          sql`${facilities.id} <> ${holderFacility.id}`,
+        ),
+      )
+      .limit(1);
+    if (addressOwner !== undefined) {
+      return facilityAddressGap(
+        holderFacility.id,
+        record,
+        "FAA holder address already belongs to a different company facility",
+      );
+    }
+    if (holderFacility.status !== "draft") {
+      return facilityAddressGap(
+        holderFacility.id,
+        record,
+        "Only a draft FAA holder facility may be enriched with missing address fields",
+      );
+    }
+    const [hydrated] = await tx
+      .update(facilities)
+      .set({
+        ...(holderFacility.addressLine1 === null
+          ? { addressLine1: address.addressLine1 }
+          : {}),
+        ...(holderFacility.addressLine2 === null
+          ? { addressLine2: address.addressLine2 }
+          : {}),
+        ...(holderFacility.city === null ? { city: address.city } : {}),
+        ...(holderFacility.region === null ? { region: address.region } : {}),
+        ...(holderFacility.postalCode === null
+          ? { postalCode: address.postalCode }
+          : {}),
+        updatedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(facilities.id, holderFacility.id),
+          eq(facilities.status, "draft"),
+        ),
+      )
+      .returning({ id: facilities.id });
+    if (hydrated === undefined) {
+      return facilityAddressGap(
+        holderFacility.id,
+        record,
+        "Draft FAA holder facility changed during address enrichment",
+      );
+    }
+    return {
+      id: hydrated.id,
+      created: false,
+      addressAccepted: true,
+      gap: null,
+    };
+  }
+  if (address !== null) {
+    const [exactAddress] = await tx
+      .select({ id: facilities.id })
+      .from(facilities)
+      .where(
+        and(
+          eq(facilities.companyId, companyId),
+          exactAddressCondition(address),
+        ),
+      )
+      .limit(1);
+    if (exactAddress !== undefined) {
+      return {
+        id: exactAddress.id,
+        created: false,
+        addressAccepted: true,
+        gap: null,
+      };
+    }
+  }
+
   const [inserted] = await tx
     .insert(facilities)
     .values({
@@ -569,14 +719,83 @@ async function upsertFaaFacility(
     })
     .onConflictDoNothing()
     .returning({ id: facilities.id });
-  if (inserted !== undefined) return { id: inserted.id, created: true };
-  const [raced] = await tx
-    .select({ id: facilities.id })
-    .from(facilities)
-    .where(conditions)
-    .limit(1);
-  if (raced === undefined) throw new Error("Unable to upsert FAA PMA facility");
-  return { id: raced.id, created: false };
+  if (inserted !== undefined) {
+    return {
+      id: inserted.id,
+      created: true,
+      addressAccepted: address !== null,
+      gap: null,
+    };
+  }
+  if (address !== null) {
+    const [raced] = await tx
+      .select({ id: facilities.id })
+      .from(facilities)
+      .where(and(eq(facilities.companyId, companyId), exactAddressCondition(address)))
+      .limit(1);
+    if (raced !== undefined) {
+      return { id: raced.id, created: false, addressAccepted: true, gap: null };
+    }
+  }
+  throw new Error("Unable to upsert FAA PMA facility");
+}
+
+function exactAddressCondition(address: FaaAddress) {
+  return and(
+    sql`lower(btrim(coalesce(${facilities.addressLine1}, ''))) = lower(${address.addressLine1 ?? ""})`,
+    sql`lower(btrim(coalesce(${facilities.addressLine2}, ''))) = lower(${address.addressLine2 ?? ""})`,
+    sql`lower(btrim(coalesce(${facilities.city}, ''))) = lower(${address.city ?? ""})`,
+    sql`lower(btrim(coalesce(${facilities.region}, ''))) = lower(${address.region ?? ""})`,
+    sql`lower(btrim(coalesce(${facilities.postalCode}, ''))) = lower(${address.postalCode ?? ""})`,
+    eq(facilities.countryCode, address.countryCode),
+  );
+}
+
+function addressCompatibility(
+  existing: {
+    readonly addressLine1: string | null;
+    readonly addressLine2: string | null;
+    readonly city: string | null;
+    readonly region: string | null;
+    readonly postalCode: string | null;
+    readonly countryCode: string;
+  },
+  incoming: FaaAddress,
+): { readonly compatible: boolean; readonly missing: boolean } {
+  const pairs = [
+    [existing.addressLine1, incoming.addressLine1],
+    [existing.addressLine2, incoming.addressLine2],
+    [existing.city, incoming.city],
+    [existing.region, incoming.region],
+    [existing.postalCode, incoming.postalCode],
+    [existing.countryCode, incoming.countryCode],
+  ] as const;
+  return {
+    compatible: pairs.every(
+      ([current, next]) =>
+        current === null ||
+        next === null ||
+        normalizeMatch(current) === normalizeMatch(next),
+    ),
+    missing: pairs.some(([current, next]) => current === null && next !== null),
+  };
+}
+
+function facilityAddressGap(
+  facilityId: string,
+  record: FaaPmaRecord,
+  reason: string,
+): FaaFacilityResult {
+  return {
+    id: facilityId,
+    created: false,
+    addressAccepted: false,
+    gap: {
+      recordId: record.recordId,
+      field: "facility",
+      reason,
+    },
+  };
 }
 
 async function upsertFaaPart(
@@ -927,17 +1146,24 @@ async function linkDocument(
     .onConflictDoNothing();
 }
 
-/** Deterministic parser for the newline-formatted address rendered by FAA DRS. */
-export function parseFaaAddress(fullAddress: string): {
-  readonly addressLine1: string | null;
-  readonly addressLine2: string | null;
-  readonly city: string | null;
-  readonly region: string | null;
-  readonly postalCode: string | null;
-  readonly countryCode: string;
-} {
-  const lines = fullAddress
-    .normalize("NFKC")
+/** Deterministic parser for both scraper pipe fields and legacy rendered lines. */
+export function parseFaaAddress(fullAddress: string): FaaAddress {
+  const normalized = fullAddress.normalize("NFKC").trim();
+  const pipeFields = normalized
+    .split(/\s*\|\s*/gu)
+    .map((field) => field.trim().replace(/\s+/gu, " "));
+  if (pipeFields.length === 5 && pipeFields.every(Boolean)) {
+    return {
+      addressLine1: normalizeText(pipeFields[0]),
+      addressLine2: null,
+      city: normalizeText(pipeFields[1]),
+      region: normalizeIdentifier(pipeFields[2]),
+      postalCode: normalizeIdentifier(pipeFields[3]),
+      countryCode: countryCodeFromText(pipeFields[4]!),
+    };
+  }
+
+  const lines = normalized
     .split(/\r?\n/gu)
     .map((line) => line.trim().replace(/\s+/gu, " "))
     .filter(Boolean);
@@ -959,6 +1185,13 @@ export function parseFaaAddress(fullAddress: string): {
 
 function countryCodeFromText(value: string): string {
   const normalized = normalizeIdentifier(value);
+  if (
+    normalized === "UNITED STATES" ||
+    normalized === "UNITED STATES OF AMERICA" ||
+    normalized === "USA"
+  ) {
+    return "US";
+  }
   return normalized === null ? "US" : normalized.slice(0, 2);
 }
 

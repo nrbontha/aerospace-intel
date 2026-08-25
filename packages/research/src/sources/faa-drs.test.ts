@@ -17,6 +17,7 @@ import {
 
 interface FaaFixture {
   readonly cards: readonly FaaDrsDomCard[];
+  readonly detailText: string;
 }
 
 const fixturePath = new URL(
@@ -38,6 +39,7 @@ class MockBrowserPage implements FaaDrsBrowserPage {
   renderedBody = "PMA search results";
   resultCards: readonly FaaDrsDomCard[] = fixture.cards;
   resultCardsAfterWait: readonly FaaDrsDomCard[] | undefined;
+  detailText = fixture.detailText;
 
   async navigate(url: string, timeoutMs: number) {
     this.calls.push({ method: "navigate", value: url });
@@ -64,6 +66,12 @@ class MockBrowserPage implements FaaDrsBrowserPage {
     if (this.resultCardsAfterWait !== undefined) {
       this.resultCards = this.resultCardsAfterWait;
     }
+  }
+
+  async readRecordText(url: string, timeoutMs: number) {
+    this.calls.push({ method: "detail-url", value: url });
+    this.calls.push({ method: "detail-timeout", value: timeoutMs });
+    return this.detailText;
   }
 
   async bodyText() {
@@ -139,8 +147,9 @@ describe("FAA DRS PMA card parser", () => {
     });
     expect(records[2]).toMatchObject({
       recordId: "1365986",
+      status: "Active",
       fullAddress:
-        "1450 Aviation Drive\nSt. George, UT 84790\nUnited States",
+        "3172 East Deseret Dr South | St. George | UT | 84790 | USA",
       models: ["AS907-2-1G", "AS907-3-1E"],
       cfrReferences: ["14 CFR 21.303", "14 CFR 21.316"],
       comments: "Eligible for installation as specified by the supplement.",
@@ -179,10 +188,20 @@ describe("FaaDrsBrowserClient", () => {
     });
 
     expect(result.records).toHaveLength(2);
+    expect(
+      result.records.every(
+        (record) =>
+          record.fullAddress ===
+          "3172 East Deseret Dr South | St. George | UT | 84790 | USA",
+      ),
+    ).toBe(true);
     expect(result.source).toEqual({
       publicUrl: FAA_DRS_PUBLIC_PMA_URL,
       scrapedAt: "2026-08-25T12:00:00.000Z",
       retrievalMethod: "guest_browser_dom",
+      hydratedRecordUrl: fixture.cards[0]!.href.startsWith("https:")
+        ? fixture.cards[0]!.href
+        : new URL(fixture.cards[0]!.href, FAA_DRS_PUBLIC_PMA_URL).toString(),
     });
     expect(browserFactory.page.calls).toEqual([
       { method: "navigate", value: FAA_DRS_PUBLIC_PMA_URL },
@@ -194,6 +213,12 @@ describe("FaaDrsBrowserClient", () => {
       { method: "click", value: "#apply-filters-btn" },
       { method: "query-timeout", value: 60_000 },
       { method: "cards-limit", value: 2 },
+      {
+        method: "detail-url",
+        value:
+          "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID161062274720260819195457.0001",
+      },
+      { method: "detail-timeout", value: 60_000 },
       { method: "close" },
     ]);
   });
@@ -223,6 +248,8 @@ describe("FaaDrsBrowserClient", () => {
         (record) =>
           record.holderNumber === "PQ00076WB" &&
           record.holderName === "RAM Aerospace" &&
+          record.fullAddress ===
+            "3172 East Deseret Dr South | St. George | UT | 84790 | USA" &&
           record.guidUrl.startsWith(
             "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID",
           ),
@@ -249,6 +276,50 @@ describe("FaaDrsBrowserClient", () => {
       client.search({ holderNumber: "PQ00076WB", maxRecords: 1 }),
     ).rejects.toBeInstanceOf(FaaDrsStaleResultsError);
   });
+  it("does not hydrate broad make searches from a detail page", async () => {
+    const page = new MockBrowserPage();
+    page.resultCards = [fixture.cards[0]!];
+    const client = new FaaDrsBrowserClient({
+      browserFactory: new MockBrowserFactory(page),
+      sleep: noSleep,
+    });
+
+    const result = await client.search({
+      make: "Pratt & Whitney",
+      maxRecords: 1,
+    });
+
+    expect(result.records[0]!.fullAddress).toBeNull();
+    expect(page.calls.some((call) => call.method === "detail-url")).toBe(false);
+    expect(result.source.hydratedRecordUrl).toBeUndefined();
+  });
+
+  it("does not propagate detail metadata from a different holder", async () => {
+    const page = new MockBrowserPage();
+    page.resultCards = fixture.cards.slice(0, 2);
+    page.detailText =
+      "PMA Holder Name: Different Aerospace\\n" +
+      "PMA Holder Number: PQ99999ZZ\\n" +
+      "Address: 1 Wrong Way\\nCity: Elsewhere\\nState: CA\\nZip: 90001\\nCountry: USA";
+    const client = new FaaDrsBrowserClient({
+      browserFactory: new MockBrowserFactory(page),
+      sleep: noSleep,
+    });
+
+    const result = await client.search({
+      holderNumber: "PQ00076WB",
+      maxRecords: 2,
+    });
+
+    expect(result.records.every((record) => record.fullAddress === null)).toBe(
+      true,
+    );
+    expect(result.source.hydratedRecordUrl).toBeUndefined();
+    expect(
+      page.calls.filter((call) => call.method === "detail-url"),
+    ).toHaveLength(1);
+  });
+
 
 
   it("rejects no-filter and over-limit queries before opening a browser", async () => {

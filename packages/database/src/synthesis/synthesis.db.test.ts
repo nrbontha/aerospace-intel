@@ -30,7 +30,10 @@ import {
   SynthesisStaleGroupError,
   synthesizeQualifiedSourceSignal,
 } from "./index.js";
-import { persistFaaPmaRecordsForCompany } from "./faa.js";
+import {
+  parseFaaAddress,
+  persistFaaPmaRecordsForCompany,
+} from "./faa.js";
 import {
   persistSamEntityForCompany,
   type SamEntityForSynthesis,
@@ -445,6 +448,137 @@ describe.skipIf(!DB_TESTS_ENABLED)("source synthesis persistence (DB)", () => {
     ).toBe(true);
   });
 
+  it("parses the scraper's exact RAM pipe address", () => {
+    expect(
+      parseFaaAddress(
+        "1450 Aviation Drive | St. George | UT | 84790 | United States",
+      ),
+    ).toEqual({
+      addressLine1: "1450 Aviation Drive",
+      addressLine2: null,
+      city: "St. George",
+      region: "UT",
+      postalCode: "84790",
+      countryCode: "US",
+    });
+  });
+
+  it("hydrates one blank draft FAA facility on replay and refuses a conflicting complete address", async () => {
+    const companyId = await createCompany(`${testKey} Hydration Company`);
+    const initial = faaRecord("HYDRATE", {
+      holderName: `${testKey} Hydration Holder`,
+      holderNumber: `HY${testKey.slice(-7)}`.toUpperCase(),
+      fullAddress: null,
+      renderedSourceText: `${testKey} stable hydrated FAA source`,
+    });
+    const first = await persistFaaPmaRecordsForCompany(
+      getDatabase(),
+      companyId,
+      [initial],
+    );
+    expect(first.created.facilities).toBe(1);
+    const [blank] = await getDatabase()
+      .select({
+        id: facilities.id,
+        addressLine1: facilities.addressLine1,
+        status: facilities.status,
+      })
+      .from(facilities)
+      .where(eq(facilities.companyId, companyId));
+    expect(blank).toMatchObject({ addressLine1: null, status: "draft" });
+
+    const hydrated = {
+      ...initial,
+      fullAddress:
+        "1450 Aviation Drive | St. George | UT | 84790 | United States",
+    };
+    const hydration = await persistFaaPmaRecordsForCompany(
+      getDatabase(),
+      companyId,
+      [hydrated],
+    );
+    expect(hydration.reused.facilities).toBe(1);
+    expect(hydration.gaps.filter(({ field }) => field === "facility")).toEqual(
+      [],
+    );
+    const hydratedFacilities = await getDatabase()
+      .select({
+        id: facilities.id,
+        addressLine1: facilities.addressLine1,
+        city: facilities.city,
+        region: facilities.region,
+        postalCode: facilities.postalCode,
+        countryCode: facilities.countryCode,
+      })
+      .from(facilities)
+      .where(eq(facilities.companyId, companyId));
+    expect(hydratedFacilities).toEqual([
+      {
+        id: blank!.id,
+        addressLine1: "1450 Aviation Drive",
+        city: "St. George",
+        region: "UT",
+        postalCode: "84790",
+        countryCode: "US",
+      },
+    ]);
+    const [document] = await getDatabase()
+      .select({ id: sourceDocuments.id })
+      .from(sourceDocuments)
+      .where(eq(sourceDocuments.canonicalUrl, initial.guidUrl));
+    if (document === undefined) throw new Error("hydration document is missing");
+    const addressEvidence = await getDatabase()
+      .select({ id: observations.id })
+      .from(observations)
+      .innerJoin(evidence, eq(evidence.id, observations.evidenceId))
+      .where(
+        and(
+          eq(evidence.sourceDocumentId, document.id),
+          eq(observations.subjectId, blank!.id),
+          eq(observations.fieldKey, "registered_address"),
+        ),
+      );
+    expect(addressEvidence).toHaveLength(1);
+
+    const conflicting = {
+      ...hydrated,
+      fullAddress:
+        "999 Conflict Road | Phoenix | AZ | 85001 | United States",
+    };
+    const conflict = await persistFaaPmaRecordsForCompany(
+      getDatabase(),
+      companyId,
+      [conflicting],
+    );
+    expect(conflict.gaps).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          recordId: initial.recordId,
+          field: "facility",
+          reason: expect.stringContaining("conflicts"),
+        }),
+      ]),
+    );
+    const afterConflict = await getDatabase()
+      .select({
+        id: facilities.id,
+        addressLine1: facilities.addressLine1,
+        city: facilities.city,
+        region: facilities.region,
+        postalCode: facilities.postalCode,
+      })
+      .from(facilities)
+      .where(eq(facilities.companyId, companyId));
+    expect(afterConflict).toEqual([
+      {
+        id: blank!.id,
+        addressLine1: "1450 Aviation Drive",
+        city: "St. George",
+        region: "UT",
+        postalCode: "84790",
+      },
+    ]);
+  });
 
   it("routes only qualified resolved known source keys and no-ops unknown sources", async () => {
     const companyId = await createCompany(`${testKey} Signal Router Company`);

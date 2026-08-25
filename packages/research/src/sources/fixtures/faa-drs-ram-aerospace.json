@@ -10,11 +10,12 @@
     },
     {
       "href": "/browse/excelExternalWindow/DRSDOCID1365986",
-      "renderedText": "PMA Holder Name:\nRAM Aerospace\nPMA Holder Number:\nPQ00076WB\nPMA Holder Address:\n1450 Aviation Drive\nSt. George, UT 84790\nUnited States\nPMA Part Number:\nRAM-101-1\nPart Name:\nBleed Air Valve\nReplacement Part Number:\n3215612-4\nMake:\nHoneywell\nModel:\nAS907-2-1G\nModel:\nAS907-3-1E\nSupplement Number:\n12\nSupplement Date:\n04/18/2024\nStatus:\nActive\nSub-Status:\nCurrent\nApproval Basis:\nTest and computation per 14 CFR 21.303\nService Office:\nDenver ACO Branch\nOPR:\nAIR-780\n14 CFR References:\n14 CFR 21.303; 14 CFR 21.316\nComments:\nEligible for installation as specified by the supplement.\nView Document"
+      "renderedText": "PMA Holder Name: RAM AerospacePMA Holder Number: PQ00076WBStatus: ActiveAddress: 3172 East Deseret Dr SouthCity: St. GeorgeState: UTZip: 84790Country: USAPMA Part Number: RAM-101-1Part Name: Bleed Air ValveReplacement Part Number: 3215612-4Make: HoneywellModel: AS907-2-1GModel: AS907-3-1ESupplement Number: 12Supplement Date: 04/18/2024Sub-Status: CurrentApproval Basis: Test and computation per 14 CFR 21.303Service Office: Denver ACO BranchOPR: AIR-78014 CFR References: 14 CFR 21.303; 14 CFR 21.316Comments: Eligible for installation as specified by the supplement.View Document"
     },
     {
       "href": "/browse/excelExternalWindow/DRSDOCID161062274720260819195457.0001",
       "renderedText": "PMA Holder Name: RAM Aerospace\nPMA Holder Number: PQ00076WB\nStatus: Current"
     }
-  ]
+  ],
+  "detailText": "PMA Holder Name: RAM Aerospace\nPMA Holder Number: PQ00076WB\nAddress: 3172 East Deseret Dr South\nCity: St. George\nState: UT\nZip: 84790\nCountry: USA\nStatus: Current"
 }

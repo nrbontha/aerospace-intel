@@ -69,6 +69,7 @@ export const faaPmaScrapeSourceSchema = z.strictObject({
   publicUrl: z.literal(faaPmaPublicUrl),
   scrapedAt: instantSchema,
   retrievalMethod: z.literal("guest_browser_dom"),
+  hydratedRecordUrl: z.url().max(2_000).optional(),
 });
 
 export const faaPmaScrapeResultSchema = z
