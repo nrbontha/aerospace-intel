@@ -52,6 +52,7 @@ import {
   collectCandidatePageLinks,
   ExaCompanyListHarvester,
   FaaDrsBrowserClient,
+  FAA_DRS_PUBLIC_PMA_URL,
   ExaSearchClient,
   OpenRouterClient,
   planTick,
@@ -867,6 +868,15 @@ async function selectFaaTargetCandidate(db: Database): Promise<FaaTargetCandidat
           WHERE ${companyIdentifiers.companyId} = ${companies.id}
             AND ${companyIdentifiers.type} = 'faa_pma_holder'
         )`,
+        sql`NOT EXISTS (
+          SELECT 1 FROM ${sourceSignals}
+          WHERE ${sourceSignals.sourceKey} IN ('faa_drs_pma_search', 'faa_drs_pma')
+            AND ${sourceSignals.createdAt} >= now() - interval '30 days'
+            AND (
+              ${sourceSignals.companyId} = ${companies.id}
+              OR ${sourceSignals.sourcePayload}->'knownCompanyHint'->>'companyId' = ${companies.id}::text
+            )
+        )`,
       ),
     )
     .orderBy(
@@ -900,6 +910,77 @@ function faaRecordFingerprint(recordUrl: string): string {
     .digest("hex");
 }
 
+async function upsertFaaSearchCheckpoint(
+  db: Database,
+  agentId: string,
+  candidate: FaaTargetCandidate,
+  result: FaaScrapeResult,
+  cacheHit: boolean,
+  checkedAt: Date,
+): Promise<"qualified" | "rejected"> {
+  const hasRecords = result.records.length > 0;
+  const status = hasRecords ? "qualified" : "rejected";
+  const checkedAtIso = checkedAt.toISOString();
+  const knownCompanyHint = {
+    candidateId: candidate.candidateId,
+    companyId: candidate.companyId,
+    legalName: candidate.legalName,
+    displayName: candidate.displayName,
+  };
+  const sourcePayload = {
+    query: result.query,
+    checkedAt: checkedAtIso,
+    recordCount: result.records.length,
+    cache: {
+      hit: cacheHit,
+      ttlMs: FAA_DRS_CACHE_TTL_MS,
+    },
+    source: result.source,
+    knownCompanyHint,
+  };
+  const qualification = {
+    decision: hasRecords ? "qualified" : "no_target",
+    reason: hasRecords ? "search_complete" : "no_current_pma_records",
+    checkedAt: checkedAtIso,
+  };
+  const sourceFingerprint = createHash("sha256")
+    .update(
+      `faa_drs_pma_search\u0000${candidate.companyId}\u0000${checkedAtIso.slice(0, 10)}`,
+      "utf8",
+    )
+    .digest("hex");
+  await db
+    .insert(sourceSignals)
+    .values({
+      sourceKey: "faa_drs_pma_search",
+      sourceLocator:
+        `${FAA_DRS_PUBLIC_PMA_URL}?holderName=${encodeURIComponent(candidate.legalName)}`,
+      sourceFingerprint,
+      agentId,
+      rawName: candidate.legalName,
+      companyId: candidate.companyId,
+      sourcePayload,
+      status,
+      qualification,
+      ...(hasRecords
+        ? { qualifiedAt: checkedAt }
+        : { rejectedAt: checkedAt }),
+    })
+    .onConflictDoUpdate({
+      target: sourceSignals.sourceFingerprint,
+      set: {
+        companyId: candidate.companyId,
+        sourcePayload,
+        status,
+        qualification,
+        qualifiedAt: hasRecords ? checkedAt : null,
+        rejectedAt: hasRecords ? null : checkedAt,
+        updatedAt: checkedAt,
+      },
+    });
+  return status;
+}
+
 function faaBrowserEnabled(): boolean {
   const normalized = process.env[FAA_DRS_BROWSER_ENABLED_ENV]?.trim().toLowerCase();
   return normalized === "true" || normalized === "1";
@@ -918,6 +999,7 @@ async function harvestTargetedFaaSignals(
       readonly harvested: number;
       readonly duplicates: number;
       readonly cacheHit: boolean;
+      readonly checkpointStatus: "qualified" | "rejected";
     }
 > {
   const candidate = await selectFaaTargetCandidate(db);
@@ -944,7 +1026,21 @@ async function harvestTargetedFaaSignals(
           maxRecords: MAX_SOURCE_SIGNALS_PER_HARVEST_TICK,
         });
   if (!cacheHit) cache.set(cacheKey, { cachedAt: now, result });
+  const checkpointStatus = await upsertFaaSearchCheckpoint(
+    db,
+    agent.id,
+    candidate,
+    result,
+    cacheHit,
+    new Date(now),
+  );
 
+  const knownCompanyHint = {
+    candidateId: candidate.candidateId,
+    companyId: candidate.companyId,
+    legalName: candidate.legalName,
+    displayName: candidate.displayName,
+  };
   const proposals: SourceSignalProposal[] = result.records.map((record) => ({
     sourceKey: "faa_drs_pma",
     sourceLocator: record.guidUrl,
@@ -954,12 +1050,7 @@ async function harvestTargetedFaaSignals(
       record,
       query: result.query,
       source: result.source,
-      knownCompanyHint: {
-        candidateId: candidate.candidateId,
-        companyId: candidate.companyId,
-        legalName: candidate.legalName,
-        displayName: candidate.displayName,
-      },
+      knownCompanyHint,
     },
   }));
   const persisted = await persistSourceSignalProposals(db, agent.id, proposals);
@@ -968,6 +1059,7 @@ async function harvestTargetedFaaSignals(
     fetched: result.records.length,
     harvested: persisted.harvested,
     duplicates: persisted.duplicates,
+    checkpointStatus,
     cacheHit,
   };
 }
@@ -1158,6 +1250,7 @@ function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandle
           fetched: harvest.fetched,
           harvested: harvest.harvested,
           duplicates: harvest.duplicates,
+          checkpointStatus: harvest.checkpointStatus,
           cacheHit: harvest.cacheHit,
         },
       };

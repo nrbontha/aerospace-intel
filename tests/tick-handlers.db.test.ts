@@ -618,7 +618,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
     expect(searchFaaPma).not.toHaveBeenCalled();
   });
 
-  it("discover_source (FAA targeted): caches one prioritized holder query and writes records as signals only", async () => {
+  it("discover_source (FAA targeted): records a completed search plus PMA signals and advances", async () => {
     vi.stubEnv("FAA_DRS_BROWSER_ENABLED", "true");
     gatewayWithContents([planEnvelope([{ source: "faa_pma_targeted" }])]);
     const excludedCompanyId = await insertCompany({
@@ -702,19 +702,26 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
         companyId,
         fetched: 1,
         harvested: 1,
+        checkpointStatus: "qualified",
         cacheHit: false,
       },
     });
     expect(second).toMatchObject({
-      outcome: "executed",
-      findings: { harvested: 0, duplicates: 1, cacheHit: true },
+      outcome: "done",
+      findings: {
+        note: "no active candidate without an FAA PMA holder identifier",
+      },
     });
     const signals = await getDatabase()
       .select()
       .from(sourceSignals)
       .where(eq(sourceSignals.agentId, agent.id));
-    expect(signals).toHaveLength(1);
-    expect(signals[0]).toMatchObject({
+    expect(signals).toHaveLength(2);
+    const recordSignal = signals.find((signal) => signal.sourceKey === "faa_drs_pma");
+    const checkpoint = signals.find(
+      (signal) => signal.sourceKey === "faa_drs_pma_search",
+    );
+    expect(recordSignal).toMatchObject({
       sourceKey: "faa_drs_pma",
       sourceLocator: guidUrl,
       rawName: "Priority PMA Aerospace LLC",
@@ -725,9 +732,204 @@ describe.skipIf(!DB_TESTS_ENABLED)("real tick handlers (DB)", () => {
         knownCompanyHint: { candidateId, companyId },
       },
     });
+    expect(checkpoint).toMatchObject({
+      companyId,
+      status: "qualified",
+      qualification: {
+        decision: "qualified",
+        reason: "search_complete",
+      },
+      sourcePayload: {
+        recordCount: 1,
+        cache: { hit: false, ttlMs: 86_400_000 },
+        knownCompanyHint: { candidateId, companyId },
+      },
+    });
     expect(
       await getDatabase().select().from(leads).where(eq(leads.campaignId, agent.id)),
     ).toHaveLength(0);
+  });
+
+  it("discover_source (FAA targeted): checkpoints zero results and skips the company next tick", async () => {
+    vi.stubEnv("FAA_DRS_BROWSER_ENABLED", "true");
+    gatewayWithContents([planEnvelope([{ source: "faa_pma_targeted" }])]);
+    const companyId = await insertCompany({
+      legalName: "No Current PMA Foundry LLC",
+      displayName: "No Current PMA Foundry",
+      headquartersCountryCode: "US",
+    });
+    const candidateId = await insertCandidate(companyId, "partner_review");
+    const agent = await insertAgent({
+      key: "faa-pma-targeted",
+      agentType: "discover_source",
+    });
+    const searchFaaPma: NonNullable<TickHandlerDeps["searchFaaPma"]> = vi.fn(
+      async (queryInput) => {
+        if (
+          typeof queryInput !== "object" ||
+          queryInput === null ||
+          !("holderName" in queryInput) ||
+          typeof queryInput.holderName !== "string" ||
+          !("maxRecords" in queryInput) ||
+          typeof queryInput.maxRecords !== "number"
+        ) {
+          throw new Error("FAA holder query was not supplied");
+        }
+        const query = {
+          holderName: queryInput.holderName,
+          maxRecords: queryInput.maxRecords,
+        };
+        return {
+          query,
+          records: [],
+          source: {
+            publicUrl: "https://drs.faa.gov/browse/PMA/doctypeDetails" as const,
+            scrapedAt: "2026-08-25T13:00:00.000Z",
+            retrievalMethod: "guest_browser_dom" as const,
+          },
+        };
+      },
+    );
+    const handler = createV1TickHandlerRegistry({
+      ...depsWith({}),
+      searchFaaPma,
+    }).get("discover_source")!;
+
+    const first = await handler({
+      agent,
+      signal: new AbortController().signal,
+    });
+    const second = await handler({
+      agent,
+      signal: new AbortController().signal,
+    });
+    expect(first).toMatchObject({
+      outcome: "executed",
+      findings: {
+        companyId,
+        fetched: 0,
+        harvested: 0,
+        checkpointStatus: "rejected",
+      },
+    });
+    expect(second.findings).not.toMatchObject({ companyId });
+    const targetQueries = vi
+      .mocked(searchFaaPma)
+      .mock.calls.filter(([query]) => {
+        return (
+          typeof query === "object" &&
+          query !== null &&
+          "holderName" in query &&
+          query.holderName === "No Current PMA Foundry LLC"
+        );
+      });
+    expect(targetQueries).toHaveLength(1);
+    const checkpoints = (
+      await getDatabase()
+        .select()
+        .from(sourceSignals)
+        .where(eq(sourceSignals.agentId, agent.id))
+    ).filter((signal) => signal.companyId === companyId);
+    expect(checkpoints).toHaveLength(1);
+    expect(checkpoints[0]).toMatchObject({
+      sourceKey: "faa_drs_pma_search",
+      companyId,
+      status: "rejected",
+      qualification: {
+        decision: "no_target",
+        reason: "no_current_pma_records",
+      },
+      sourcePayload: {
+        query: { holderName: "No Current PMA Foundry LLC", maxRecords: 25 },
+        recordCount: 0,
+        cache: { hit: false, ttlMs: 86_400_000 },
+        knownCompanyHint: { candidateId, companyId },
+        source: { retrievalMethod: "guest_browser_dom" },
+      },
+    });
+    expect(checkpoints[0]?.sourcePayload["checkedAt"]).toEqual(expect.any(String));
+    expect(
+      await getDatabase().select().from(leads).where(eq(leads.campaignId, agent.id)),
+    ).toHaveLength(0);
+  });
+
+  it("discover_source (FAA targeted): rechecks a company after its checkpoint is 31 days old", async () => {
+    vi.stubEnv("FAA_DRS_BROWSER_ENABLED", "true");
+    gatewayWithContents([planEnvelope([{ source: "faa_pma_targeted" }])]);
+    const companyId = await insertCompany({
+      legalName: "Stale PMA Check Aerospace LLC",
+      displayName: "Stale PMA Check Aerospace",
+      headquartersCountryCode: "US",
+    });
+    const candidateId = await insertCandidate(companyId, "partner_review");
+    const agent = await insertAgent({
+      key: "faa-pma-targeted",
+      agentType: "discover_source",
+    });
+    const oldCheckedAt = new Date(Date.now() - 31 * 24 * 60 * 60 * 1_000);
+    await getDatabase().insert(sourceSignals).values({
+      sourceKey: "faa_drs_pma_search",
+      sourceLocator:
+        "https://drs.faa.gov/browse/PMA/doctypeDetails?holderName=Stale",
+      sourceFingerprint: "faa-stale-checkpoint-test",
+      agentId: agent.id,
+      rawName: "Stale PMA Check Aerospace LLC",
+      companyId,
+      sourcePayload: {
+        checkedAt: oldCheckedAt.toISOString(),
+        recordCount: 0,
+        knownCompanyHint: { candidateId, companyId },
+      },
+      status: "rejected",
+      qualification: {
+        decision: "no_target",
+        reason: "no_current_pma_records",
+      },
+      createdAt: oldCheckedAt,
+      updatedAt: oldCheckedAt,
+      rejectedAt: oldCheckedAt,
+    });
+    const searchFaaPma: NonNullable<TickHandlerDeps["searchFaaPma"]> = vi.fn(
+      async () => ({
+        query: { holderName: "Stale PMA Check Aerospace LLC", maxRecords: 25 },
+        records: [],
+        source: {
+          publicUrl: "https://drs.faa.gov/browse/PMA/doctypeDetails" as const,
+          scrapedAt: "2026-08-25T14:00:00.000Z",
+          retrievalMethod: "guest_browser_dom" as const,
+        },
+      }),
+    );
+    const result = await createV1TickHandlerRegistry({
+      ...depsWith({}),
+      searchFaaPma,
+    }).get("discover_source")!({
+      agent,
+      signal: new AbortController().signal,
+    });
+
+    expect(result).toMatchObject({
+      outcome: "executed",
+      findings: {
+        companyId,
+        fetched: 0,
+        checkpointStatus: "rejected",
+      },
+    });
+    expect(searchFaaPma).toHaveBeenCalledWith({
+      holderName: "Stale PMA Check Aerospace LLC",
+      maxRecords: 25,
+    });
+    const checkpoints = await getDatabase()
+      .select()
+      .from(sourceSignals)
+      .where(eq(sourceSignals.agentId, agent.id));
+    expect(checkpoints).toHaveLength(2);
+    expect(
+      checkpoints.filter(
+        (checkpoint) => checkpoint.createdAt.getTime() > oldCheckedAt.getTime(),
+      ),
+    ).toHaveLength(1);
   });
 
   it("discover_source (usaspending): quarantines strict source observations and dedupes reruns", async () => {
