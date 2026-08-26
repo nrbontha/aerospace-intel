@@ -1,5 +1,6 @@
 import { eq, ilike, or, sql } from "drizzle-orm";
 
+import { engineStatusToTier } from "@asi/contracts";
 import { getDatabase } from "./client.js";
 import { stringifyCsv } from "./csv.js";
 import { searchContains } from "./search.js";
@@ -27,6 +28,7 @@ export type ExportEntity =
 export type ExportFormat = "csv" | "jsonl";
 
 const EXPORT_LIMIT = 10_000;
+const CANDIDATES_EXPORT_LIMIT = 50_000;
 
 function like(query: string | undefined) {
   return searchContains(query);
@@ -40,6 +42,7 @@ function serialize(
   format: ExportFormat,
   headers: readonly string[],
   rows: readonly Record<string, unknown>[],
+  csvHeaders?: readonly string[],
 ): { body: string; contentType: string; extension: string } {
   if (format === "jsonl") {
     return {
@@ -48,8 +51,14 @@ function serialize(
       extension: "jsonl",
     };
   }
+  const outHeaders = csvHeaders ?? headers;
+  const outRows = csvHeaders
+    ? rows.map((row) =>
+        Object.fromEntries(headers.map((header, i) => [csvHeaders[i]!, row[header]])),
+      )
+    : rows;
   return {
-    body: stringifyCsv(headers, rows),
+    body: stringifyCsv(outHeaders, outRows),
     contentType: "text/csv; charset=utf-8",
     extension: "csv",
   };
@@ -67,6 +76,19 @@ function mapRow(
   return mapped;
 }
 
+// SQL mirror of engineStatusToTier with tier_override precedence — same
+// shape as query-candidates.ts so exports cannot drift from the ?tier= filter.
+const effectiveTierSql = sql<string | null>`COALESCE(${candidates.tierOverride}::text, CASE ${candidates.status}::text ${sql.join(
+  Object.entries(engineStatusToTier).map(([status, tier]) => sql`WHEN ${status} THEN ${tier}`),
+  sql` `,
+)} END)`;
+
+function rationaleArraySql(key: string) {
+  return sql<string | null>`(
+    SELECT string_agg(v, '; ') FROM jsonb_array_elements_text(${candidates.rationale} -> ${key}) AS v
+  )`;
+}
+
 export async function exportRecords(input: {
   entity: ExportEntity;
   format: ExportFormat;
@@ -81,6 +103,7 @@ export async function exportRecords(input: {
   const pattern = like(input.query);
   let headers: string[] = [];
   let rows: Record<string, unknown>[] = [];
+  let csvHeaders: string[] | undefined;
 
   if (input.entity === "companies") {
     headers = [
@@ -88,7 +111,6 @@ export async function exportRecords(input: {
       "legalName",
       "displayName",
       "status",
-      "websiteUrl",
       "headquartersCountryCode",
       "foundedYear",
       "createdAt",
@@ -237,11 +259,43 @@ export async function exportRecords(input: {
       "companyName",
       "companyDomain",
       "status",
+      "tierOverride",
+      "effectiveTier",
       "noveltyStatus",
-      "currentScores",
+      "fit",
+      "novelty",
+      "confidence",
+      "actionability",
+      "whyInteresting",
+      "risks",
+      "unknowns",
+      "websiteUrl",
+      "hqCountry",
       "researchPriority",
       "partnerReviewPriority",
       "createdAt",
+    ];
+    csvHeaders = [
+      "Candidate ID",
+      "Company ID",
+      "Company Name",
+      "Company Domain",
+      "Status",
+      "Tier Override",
+      "Effective Tier",
+      "Novelty Status",
+      "Fit Score",
+      "Novelty Score",
+      "Confidence Score",
+      "Actionability Score",
+      "Why Interesting",
+      "Risks",
+      "Unknowns",
+      "Website URL",
+      "HQ Country",
+      "Research Priority",
+      "Partner Review Priority",
+      "Created At",
     ];
     const primaryDomain = sql<string | null>`(
       SELECT lower(d.domain) FROM company_domains d
@@ -262,7 +316,17 @@ export async function exportRecords(input: {
         companyDomain: primaryDomain,
         status: candidates.status,
         noveltyStatus: candidates.noveltyStatus,
-        currentScores: candidates.currentScores,
+        tierOverride: candidates.tierOverride,
+        effectiveTier: effectiveTierSql,
+        fit: sql<number | null>`(${candidates.currentScores} ->> 'fit')::double precision`,
+        novelty: sql<number | null>`(${candidates.currentScores} ->> 'novelty')::double precision`,
+        confidence: sql<number | null>`(${candidates.currentScores} ->> 'confidence')::double precision`,
+        actionability: sql<number | null>`(${candidates.currentScores} ->> 'actionability')::double precision`,
+        whyInteresting: rationaleArraySql("whyInteresting"),
+        risks: rationaleArraySql("risks"),
+        unknowns: rationaleArraySql("unknowns"),
+        websiteUrl: companies.websiteUrl,
+        hqCountry: companies.headquartersCountryCode,
         researchPriority: candidates.researchPriority,
         partnerReviewPriority: candidates.partnerReviewPriority,
         createdAt: candidates.createdAt,
@@ -271,11 +335,8 @@ export async function exportRecords(input: {
       .innerJoin(companies, eq(companies.id, candidates.companyId))
       .where(where)
       .orderBy(sql`${candidates.createdAt} DESC`)
-      .limit(EXPORT_LIMIT);
-    rows = raw.map((row) => ({
-      ...row,
-      currentScores: JSON.stringify(row.currentScores ?? {}),
-    })) as Record<string, unknown>[];
+      .limit(CANDIDATES_EXPORT_LIMIT);
+    rows = raw as Record<string, unknown>[];
   } else {
     headers = ["id", "name", "baseUrl", "access", "ingestion", "publisher", "createdAt"];
     const where = pattern ? ilike(dataSources.name, pattern) : undefined;
@@ -286,7 +347,6 @@ export async function exportRecords(input: {
         baseUrl: dataSources.baseUrl,
         access: dataSources.access,
         ingestion: dataSources.ingestion,
-        publisher: dataSources.publisher,
         createdAt: dataSources.createdAt,
       })
       .from(dataSources)
@@ -295,7 +355,7 @@ export async function exportRecords(input: {
   }
 
   const mapped = rows.map((row) => mapRow(row, headers));
-  const file = serialize(input.format, headers, mapped);
+  const file = serialize(input.format, headers, mapped, csvHeaders);
   return {
     body: file.body,
     contentType: file.contentType,

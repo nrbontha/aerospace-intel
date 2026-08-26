@@ -25,7 +25,6 @@ import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useState } from "react";
 
-import { CatalogExport } from "@/components/catalog-export";
 import {
   ConfidenceChip,
   NoveltyBadge,
@@ -37,6 +36,7 @@ import {
 } from "@/components/target-feed/candidate-bits";
 import {
   createFeedback,
+  downloadCandidateExport,
   listCandidates,
   resolveCandidateFacts,
   resolveCompanyIdentities,
@@ -77,14 +77,16 @@ const MANUAL_STATUS_OPTIONS: readonly ManualStatus[] = [
 // queued_research records no investment feedback — it is a research-queue
 // request, not an investment decision; the audit note on the transition
 // carries the reasoning.
-const FEEDBACK_ACTION_BY_STATUS: Record<ManualStatus, "shortlist" | "hold" | "reject" | null> =
-  {
-    shortlist: "shortlist",
-    hold: "hold",
-    rejected: "reject",
-    queued_research: null,
-    archived: null,
-  };
+const FEEDBACK_ACTION_BY_STATUS: Record<
+  ManualStatus,
+  "shortlist" | "hold" | "reject" | null
+> = {
+  shortlist: "shortlist",
+  hold: "hold",
+  rejected: "reject",
+  queued_research: null,
+  archived: null,
+};
 
 const AXIS_FILTER_KEYS = ["minFit", "minNovelty", "minActionability"] as const;
 
@@ -194,10 +196,7 @@ type RowView = Readonly<{
   facts: CandidateRowFacts;
 }>;
 
-function filterValue(
-  params: URLSearchParams,
-  key: AxisFilterKey,
-): number | "" {
+function filterValue(params: URLSearchParams, key: AxisFilterKey): number | "" {
   const raw = params.get(key);
   if (raw === null || raw.trim() === "") return "";
   const parsed = Number(raw);
@@ -234,7 +233,9 @@ function RowTierMenu({
       setOpen(false);
       setNote("");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Tier change failed.");
+      setError(
+        caught instanceof Error ? caught.message : "Tier change failed.",
+      );
     } finally {
       setPending(false);
     }
@@ -256,15 +257,17 @@ function RowTierMenu({
         }}
       >
         <p className="asi-page-description" role="note">
-          Human override — audited, recorded as investment feedback, and
-          pinned: engine routing may still move the underlying status, but it
-          will not change your tier.
+          Human override — audited, recorded as investment feedback, and pinned:
+          engine routing may still move the underlying status, but it will not
+          change your tier.
         </p>
         <label className="admin-field">
           <span className="admin-field__label">Set tier</span>
           <Select
             value={draftTier}
-            onChange={(event) => setDraftTier(event.target.value as TierOverride)}
+            onChange={(event) =>
+              setDraftTier(event.target.value as TierOverride)
+            }
           >
             {tierOverrideValues.map((tier) => (
               <option key={tier} value={tier}>
@@ -338,7 +341,9 @@ export function RowStatusMenu({
       setOpen(false);
       setNote("");
     } catch (caught) {
-      setError(caught instanceof Error ? caught.message : "Status change failed.");
+      setError(
+        caught instanceof Error ? caught.message : "Status change failed.",
+      );
     } finally {
       setPending(false);
     }
@@ -363,7 +368,9 @@ export function RowStatusMenu({
           <span className="admin-field__label">Set status</span>
           <Select
             value={draftStatus}
-            onChange={(event) => setDraftStatus(event.target.value as ManualStatus)}
+            onChange={(event) =>
+              setDraftStatus(event.target.value as ManualStatus)
+            }
           >
             {MANUAL_STATUS_OPTIONS.map((status) => (
               <option key={status} value={status}>
@@ -449,10 +456,29 @@ export function TargetFeed() {
   }, [searchParams]);
 
   const [rows, setRows] = useState<RowView[]>([]);
-  const [meta, setMeta] = useState<{ totalItems: number; totalPages: number }>();
+  const [meta, setMeta] = useState<{
+    totalItems: number;
+    totalPages: number;
+  }>();
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [reloadKey, setReloadKey] = useState(0);
+  const [exportBusy, setExportBusy] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  async function downloadExport(format: "csv" | "jsonl"): Promise<void> {
+    setExportBusy(true);
+    setExportError(null);
+    try {
+      await downloadCandidateExport(format, { q: textQuery });
+    } catch (caught) {
+      setExportError(
+        caught instanceof Error ? caught.message : "Export failed.",
+      );
+    } finally {
+      setExportBusy(false);
+    }
+  }
 
   const queryString = searchParams.toString();
 
@@ -512,7 +538,9 @@ export function TargetFeed() {
         setRows([]);
         setMeta(undefined);
         setError(
-          caught instanceof Error ? caught.message : "Unable to load candidates.",
+          caught instanceof Error
+            ? caught.message
+            : "Unable to load candidates.",
         );
       } finally {
         if (!signal.aborted) setLoading(false);
@@ -588,15 +616,19 @@ export function TargetFeed() {
         const band = confidenceBand(candidate.currentScores.confidence);
         if (band !== "weak" && band !== "thin") return false;
       }
-      if (
-        cutoff !== null &&
-        new Date(candidate.createdAt).getTime() < cutoff
-      ) {
+      if (cutoff !== null && new Date(candidate.createdAt).getTime() < cutoff) {
         return false;
       }
       return true;
     });
-  }, [rows, textQuery, ownershipFilter, revenueFilter, lowConfidenceOnly, freshOnly]);
+  }, [
+    rows,
+    textQuery,
+    ownershipFilter,
+    revenueFilter,
+    lowConfidenceOnly,
+    freshOnly,
+  ]);
 
   const anyServerFilter =
     tierFilter !== "" ||
@@ -651,7 +683,7 @@ export function TargetFeed() {
     <section aria-labelledby="target-feed-title">
       <div className="admin-panel">
         <header className="admin-panel__header">
-            <h2 id="target-feed-title">Scored candidates</h2>
+          <h2 id="target-feed-title">Scored candidates</h2>
           <p className="asi-page-description">
             One tiered table of every acquisition-target candidate. Tiers are
             engine-proposed and human-overridable; overrides are audited and
@@ -702,7 +734,9 @@ export function TargetFeed() {
             <Select
               id="feed-novelty"
               value={noveltyFilter}
-              onChange={(event) => setFilter("noveltyStatus", event.target.value)}
+              onChange={(event) =>
+                setFilter("noveltyStatus", event.target.value)
+              }
             >
               <option value="">All novelty verdicts</option>
               {NOVELTY_OPTIONS.map((value) => (
@@ -792,7 +826,9 @@ export function TargetFeed() {
           </label>
           {AXIS_FILTER_KEYS.map((key) => (
             <label className="admin-field" key={key} htmlFor={`feed-${key}`}>
-              <span className="admin-field__label">{AXIS_FILTER_LABELS[key]}</span>
+              <span className="admin-field__label">
+                {AXIS_FILTER_LABELS[key]}
+              </span>
               <Input
                 id={`feed-${key}`}
                 inputMode="numeric"
@@ -821,9 +857,48 @@ export function TargetFeed() {
             candidates list API does not support these predicates yet.
           </p>
         </form>
-        <div className="admin-actions">
-          <CatalogExport entity="candidates" />
-        </div>
+        <section
+          className="admin-panel__header"
+          aria-labelledby="target-feed-export-title"
+        >
+          <h3 id="target-feed-export-title">Export targets</h3>
+          <p className="asi-page-description">
+            Download all qualified targets as a spreadsheet
+            {meta !== undefined
+              ? ` — ${meta.totalItems.toLocaleString("en-US")} matching ${
+                  meta.totalItems === 1 ? "target" : "targets"
+                }${
+                  anyClientFilter
+                    ? " (client-side filters † are not applied to exports)"
+                    : ""
+                }`
+              : null}
+            .
+          </p>
+          <div className="admin-actions">
+            <Button
+              type="button"
+              variant="primary"
+              disabled={exportBusy}
+              onClick={() => void downloadExport("csv")}
+            >
+              Export CSV
+            </Button>
+            <Button
+              type="button"
+              variant="secondary"
+              disabled={exportBusy}
+              onClick={() => void downloadExport("jsonl")}
+            >
+              Export JSONL
+            </Button>
+          </div>
+          {exportError !== null ? (
+            <p className="admin-feedback" data-tone="error" role="alert">
+              {exportError}
+            </p>
+          ) : null}
+        </section>
       </div>
 
       {error !== null ? (
@@ -883,7 +958,9 @@ export function TargetFeed() {
                 <TableHead>Ownership</TableHead>
                 <TableHead>Novelty</TableHead>
                 <TableHead>Confidence</TableHead>
-                <TableHead title="Last researched / last update">Last researched</TableHead>
+                <TableHead title="Last researched / last update">
+                  Last researched
+                </TableHead>
                 <TableHead title="Discovery provenance">Source</TableHead>
                 <TableHead>Actions</TableHead>
               </TableRow>
@@ -909,7 +986,9 @@ export function TargetFeed() {
                       </Link>
                     </TableCell>
                     <TableCell>{identity.domain ?? "—"}</TableCell>
-                    <TableCell>{identity.headquartersCountryCode ?? "—"}</TableCell>
+                    <TableCell>
+                      {identity.headquartersCountryCode ?? "—"}
+                    </TableCell>
                     <TableCell>{facts.revenueBand ?? "—"}</TableCell>
                     <TableCell>
                       {facts.ownershipType === null
@@ -927,7 +1006,9 @@ export function TargetFeed() {
                           alignItems: "baseline",
                         }}
                       >
-                        <ConfidenceChip value={candidate.currentScores.confidence} />
+                        <ConfidenceChip
+                          value={candidate.currentScores.confidence}
+                        />
                         {lowConfidenceFields ? (
                           <Link
                             href={`/candidates/${candidate.id}`}

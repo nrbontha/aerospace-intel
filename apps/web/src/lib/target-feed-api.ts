@@ -42,7 +42,10 @@ function envelopeError(payload: unknown, status: number): Error {
   return new Error(`Request failed (${status}).`);
 }
 
-export async function fetchEnvelope<T>(url: string, signal: AbortSignal): Promise<T> {
+export async function fetchEnvelope<T>(
+  url: string,
+  signal: AbortSignal,
+): Promise<T> {
   const response = await fetch(url, {
     cache: "no-store",
     credentials: "same-origin",
@@ -118,6 +121,39 @@ export async function listCandidates(
   );
 }
 
+/**
+ * Download a candidates export as a file. Mirrors the shared CatalogExport
+ * download mechanism; only predicates the export API accepts today are
+ * forwarded (text search via `query`). Extend `filters` in lockstep with
+ * exportQuerySchema when server-side tier/axis filters land.
+ */
+export async function downloadCandidateExport(
+  format: "csv" | "jsonl",
+  filters: { readonly q?: string } = {},
+): Promise<void> {
+  const params = new URLSearchParams({ entity: "candidates", format });
+  if (filters.q !== undefined && filters.q.trim() !== "") {
+    params.set("query", filters.q.trim());
+  }
+  const response = await fetch(`/api/v1/exports?${params}`, {
+    cache: "no-store",
+    credentials: "same-origin",
+  });
+  if (!response.ok) throw new Error(`Export failed (${response.status}).`);
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  const matched = response.headers
+    .get("content-disposition")
+    ?.match(/filename="([^"]+)"/);
+  link.href = url;
+  link.download = matched?.[1] ?? `candidates.${format}`;
+  document.body.append(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 export type CandidateFeatureSnapshot = Readonly<{
   id: string;
   schemaVersion: string;
@@ -181,7 +217,12 @@ export async function setCandidateTier(
 ): Promise<TierMutationResult> {
   const envelope = await postJson<SuccessEnvelope<TierMutationResult>>(
     `/api/v1/candidates/${candidateId}/tier`,
-    { tier, ...(note === undefined || note.trim() === "" ? {} : { note: note.trim() }) },
+    {
+      tier,
+      ...(note === undefined || note.trim() === ""
+        ? {}
+        : { note: note.trim() }),
+    },
   );
   return envelope.data;
 }
@@ -209,7 +250,10 @@ type RawCompanySlice = Readonly<{
   domains?: unknown;
 }>;
 
-const identityCache = new Map<string, { value: CompanyIdentity; expires: number }>();
+const identityCache = new Map<
+  string,
+  { value: CompanyIdentity; expires: number }
+>();
 const IDENTITY_TTL_MS = 60_000;
 
 function text(value: unknown): string | null {
@@ -314,7 +358,10 @@ export type CandidateRowFacts = Readonly<{
 
 const NO_FACTS: CandidateRowFacts = { revenueBand: null, ownershipType: null };
 
-const factsCache = new Map<string, { value: CandidateRowFacts; expires: number }>();
+const factsCache = new Map<
+  string,
+  { value: CandidateRowFacts; expires: number }
+>();
 const FACTS_TTL_MS = 60_000;
 
 function factsFromDetail(detail: {
@@ -482,10 +529,9 @@ export async function getCompanyProfile(
   companyId: string,
   signal: AbortSignal,
 ): Promise<CompanyProfile> {
-  const envelope = await fetchEnvelope<SuccessEnvelope<Record<string, unknown>>>(
-    `/api/v1/companies/${companyId}`,
-    signal,
-  );
+  const envelope = await fetchEnvelope<
+    SuccessEnvelope<Record<string, unknown>>
+  >(`/api/v1/companies/${companyId}`, signal);
   const payload = envelope.data;
   return {
     name:
