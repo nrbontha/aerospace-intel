@@ -127,6 +127,13 @@ export function compareDecisions(a: unknown, b: unknown): ComparisonResult {
       provisionalDecision: null,
     };
   }
+  if (first.data === second.data) {
+    return {
+      agreed: true,
+      adjudicationRequired: false,
+      provisionalDecision: first.data,
+    };
+  }
   return {
     agreed: false,
     adjudicationRequired: false,
@@ -147,12 +154,7 @@ export async function runEvaluator(
   schema: z.ZodType<EvaluatorResult> = evaluatorResultSchema,
   options?: EnsembleCallOptions,
 ): Promise<EvaluatorOutcome> {
-  const completion = await completeWithRetry(
-    client,
-    modelId,
-    prompt,
-    options,
-  );
+  const completion = await completeWithRetry(client, modelId, prompt, options);
   if (!completion.ok) {
     return {
       ok: false,
@@ -202,12 +204,7 @@ export async function runAdjudicator(
   schema: z.ZodType<AdjudicatorResult> = adjudicatorResultSchema,
   options?: EnsembleCallOptions,
 ): Promise<AdjudicatorOutcome> {
-  const completion = await completeWithRetry(
-    client,
-    modelId,
-    prompt,
-    options,
-  );
+  const completion = await completeWithRetry(client, modelId, prompt, options);
   if (!completion.ok) {
     return {
       ok: false,
@@ -343,7 +340,9 @@ async function completeWithRetry(
 function parseModelJson<T>(
   text: string,
   schema: z.ZodType<T>,
-): { readonly ok: true; readonly data: T } | { readonly ok: false; readonly error: string } {
+):
+  | { readonly ok: true; readonly data: T }
+  | { readonly ok: false; readonly error: string } {
   let value: unknown;
   try {
     value = JSON.parse(text);

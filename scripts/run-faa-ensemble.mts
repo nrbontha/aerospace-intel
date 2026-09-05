@@ -55,8 +55,8 @@ for (const line of existsSync(".env.local")
 export const FAA_EVALUATOR_PROMPT_VERSION = "faa_qualification_v1";
 export const FAA_ADJUDICATOR_PROMPT_VERSION = "faa_adjudicator_v1";
 
-export const DEFAULT_FAA_MODEL_A = "qwen/qwen3-30b-a3b:free";
-export const DEFAULT_FAA_MODEL_B = "google/gemma-3-27b-it:free";
+export const DEFAULT_FAA_MODEL_A = "z-ai/glm-5.2:free";
+export const DEFAULT_FAA_MODEL_B = "z-ai/glm-5.2:free";
 export const DEFAULT_FAA_SOURCE_KEY = "faa_pma_database";
 export const DEFAULT_FAA_STATUS = "queued_qualification";
 export const DEFAULT_FAA_CONCURRENCY = 5;
@@ -64,6 +64,40 @@ export const DEFAULT_FAA_REQUEST_DELAY_MS = 8000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+export const RATE_LIMIT_MAX_RETRIES = 5;
+export const RATE_LIMIT_BASE_DELAY_MS = 30_000;
+export const RATE_LIMIT_MAX_DELAY_MS = 300_000;
+
+export function isRateLimitError(error: unknown): boolean {
+  const message = error instanceof Error ? error.message : String(error);
+  return /rate[.\s-]*limit|429|quota|temporarily throttled/i.test(message);
+}
+
+function rateLimitDelayMs(retryIndex: number): number {
+  const capped = Math.min(
+    RATE_LIMIT_MAX_DELAY_MS,
+    RATE_LIMIT_BASE_DELAY_MS * 2 ** Math.max(0, retryIndex),
+  );
+  return Math.floor(capped / 2 + Math.random() * (capped / 2));
+}
+export async function withRateLimitPatience<T>(
+  call: () => Promise<T>,
+  sleepFn: (ms: number) => Promise<void> = sleep,
+): Promise<T> {
+  let retryIndex = 0;
+  for (;;) {
+    try {
+      return await call();
+    } catch (error) {
+      if (!isRateLimitError(error) || retryIndex >= RATE_LIMIT_MAX_RETRIES) {
+        throw error;
+      }
+      await sleepFn(rateLimitDelayMs(retryIndex));
+      retryIndex += 1;
+    }
+  }
 }
 
 export interface FaaEnsembleConfig {
@@ -462,15 +496,17 @@ async function defaultEvaluateModel(
   pkg: FaaEvidencePackage,
 ): Promise<ModelEvalOutcome> {
   try {
-    const response = await client.generateStructured({
-      route: "fast",
-      models: { fast: modelId, deep: modelId, fallback: modelId },
-      schemaName: FAA_EVALUATOR_PROMPT_VERSION,
-      schema: evaluatorResultSchema,
-      systemPrompt: FAA_EVALUATOR_SYSTEM_PROMPT,
-      prompt: buildEvaluatorPrompt(pkg),
-      maxAttempts: 3,
-    });
+    const response = await withRateLimitPatience(() =>
+      client.generateStructured({
+        route: "fast",
+        models: { fast: modelId, deep: modelId, fallback: modelId },
+        schemaName: FAA_EVALUATOR_PROMPT_VERSION,
+        schema: evaluatorResultSchema,
+        systemPrompt: FAA_EVALUATOR_SYSTEM_PROMPT,
+        prompt: buildEvaluatorPrompt(pkg),
+        maxAttempts: 3,
+      }),
+    );
     return {
       ok: true,
       result: response.data,
@@ -499,19 +535,21 @@ async function defaultAdjudicate(
   b: FaaEvaluatorResult | null,
 ): Promise<AdjudicatorOutcome> {
   try {
-    const response = await client.generateStructured({
-      route: "fast",
-      models: {
-        fast: adjudicatorModel,
-        deep: adjudicatorModel,
-        fallback: adjudicatorModel,
-      },
-      schemaName: FAA_ADJUDICATOR_PROMPT_VERSION,
-      schema: adjudicatorResultSchema,
-      systemPrompt: FAA_ADJUDICATOR_SYSTEM_PROMPT,
-      prompt: buildAdjudicatorPrompt(pkg, a, b),
-      maxAttempts: 3,
-    });
+    const response = await withRateLimitPatience(() =>
+      client.generateStructured({
+        route: "fast",
+        models: {
+          fast: adjudicatorModel,
+          deep: adjudicatorModel,
+          fallback: adjudicatorModel,
+        },
+        schemaName: FAA_ADJUDICATOR_PROMPT_VERSION,
+        schema: adjudicatorResultSchema,
+        systemPrompt: FAA_ADJUDICATOR_SYSTEM_PROMPT,
+        prompt: buildAdjudicatorPrompt(pkg, a, b),
+        maxAttempts: 3,
+      }),
+    );
     return { ok: true, result: response.data };
   } catch (error) {
     return {

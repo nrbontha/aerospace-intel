@@ -79,8 +79,12 @@ const queueName = z
 
 function isLoopbackAppUrl(value: string): boolean {
   try {
-    const hostname = new URL(value).hostname.replace(/^\[|\]$/g, "").toLowerCase();
-    return hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1";
+    const hostname = new URL(value).hostname
+      .replace(/^\[|\]$/g, "")
+      .toLowerCase();
+    return (
+      hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1"
+    );
   } catch {
     return false;
   }
@@ -96,13 +100,15 @@ const serverEnvSchema = z
     OPENROUTER_API_KEY: optionalTrimmedString(z.string().min(1)),
     EXA_API_KEY: optionalTrimmedString(z.string().min(1)),
     SAM_API_KEY: optionalTrimmedString(z.string().min(1)),
-    FAA_DRS_BROWSER_ENABLED: optionalBoolean.transform((value) => value ?? false),
+    FAA_DRS_BROWSER_ENABLED: optionalBoolean.transform(
+      (value) => value ?? false,
+    ),
     FAA_DRS_CHROMIUM_PATH: optionalTrimmedString(z.string().min(1)),
     OPENROUTER_MODEL_FAST: modelId.default("openai/gpt-5.4-mini"),
     OPENROUTER_MODEL_DEEP: modelId.default("anthropic/claude-sonnet-5"),
     OPENROUTER_MODEL_FALLBACK: modelId.default("google/gemini-3.7-flash"),
-    FAA_MODEL_A: modelId.default("qwen/qwen3-30b-a3b:free"),
-    FAA_MODEL_B: modelId.default("google/gemma-3-27b-it:free"),
+    FAA_MODEL_A: modelId.default("z-ai/glm-5.2:free"),
+    FAA_MODEL_B: modelId.default("z-ai/glm-5.2:free"),
     FAA_ADJUDICATOR_MODEL: modelId.optional(),
     FAA_QUALIFICATION_CONCURRENCY: positiveIntegerWithDefault(5, 100),
     OPENROUTER_MAX_COST_PER_RUN_USD: positiveNumberWithDefault(2),

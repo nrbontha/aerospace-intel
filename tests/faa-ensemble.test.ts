@@ -5,6 +5,7 @@ import {
   buildEvidencePackage,
   ensembleDecisionSchema,
   evaluatorResultSchema,
+  isRateLimitError,
   parseEnsembleArgs,
   resolveEnsemble,
   resolveEnsembleConfig,
@@ -12,6 +13,7 @@ import {
   summarizeEnsembleOutcomes,
   type EnsembleSignalOutcome,
   type FaaEvaluatorResult,
+  withRateLimitPatience,
 } from "../scripts/run-faa-ensemble.mts";
 
 function evaluatorResult(
@@ -91,11 +93,11 @@ describe("parseEnsembleArgs", () => {
 });
 
 describe("resolveEnsembleConfig", () => {
-  it("defaults to the free-tier pair with adjudicator = model A", () => {
+  it("defaults to GLM single-model operation with adjudicator = model A", () => {
     expect(resolveEnsembleConfig({})).toMatchObject({
-      modelA: "qwen/qwen3-30b-a3b:free",
-      modelB: "google/gemma-3-27b-it:free",
-      adjudicatorModel: "qwen/qwen3-30b-a3b:free",
+      modelA: "z-ai/glm-5.2:free",
+      modelB: "z-ai/glm-5.2:free",
+      adjudicatorModel: "z-ai/glm-5.2:free",
       concurrency: 5,
     });
   });
@@ -190,10 +192,16 @@ describe("ensemble schemas", () => {
   it("rejects invalid decision enums like 'maybe'", () => {
     expect(() => ensembleDecisionSchema.parse("maybe")).toThrow();
     expect(() =>
-      evaluatorResultSchema.parse(evaluatorResult({ decision: "maybe" as never })),
+      evaluatorResultSchema.parse(
+        evaluatorResult({ decision: "maybe" as never }),
+      ),
     ).toThrow();
     expect(() =>
-      adjudicatorResultSchema.parse({ decision: "maybe", confidence: 50, reason: "x" }),
+      adjudicatorResultSchema.parse({
+        decision: "maybe",
+        confidence: 50,
+        reason: "x",
+      }),
     ).toThrow();
   });
 
@@ -347,5 +355,44 @@ describe("summarizeEnsembleOutcomes", () => {
     expect(metrics.adjudications).toBe(1);
     expect(metrics.apiCalls).toBe(10);
     expect(metrics.failures).toBe(2);
+  });
+});
+
+describe("withRateLimitPatience", () => {
+  it("classifies rate-limit errors", () => {
+    expect(
+      isRateLimitError(new Error("OpenRouter request was rate limited")),
+    ).toBe(true);
+    expect(isRateLimitError(new Error("429 Too Many Requests"))).toBe(true);
+    expect(isRateLimitError(new Error("validation_failed"))).toBe(false);
+  });
+
+  it("retries rate limits then returns success", async () => {
+    let calls = 0;
+    const slept: number[] = [];
+    const result = await withRateLimitPatience(
+      () => {
+        calls += 1;
+        if (calls < 3) throw new Error("rate limited");
+        return Promise.resolve("ok");
+      },
+      async (ms: number) => {
+        slept.push(ms);
+      },
+    );
+    expect(result).toBe("ok");
+    expect(calls).toBe(3);
+    expect(slept).toHaveLength(2);
+  });
+
+  it("throws non-rate-limit errors immediately", async () => {
+    let calls = 0;
+    await expect(
+      withRateLimitPatience(() => {
+        calls += 1;
+        throw new Error("validation_failed");
+      }),
+    ).rejects.toThrow("validation_failed");
+    expect(calls).toBe(1);
   });
 });
