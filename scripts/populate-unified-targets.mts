@@ -100,6 +100,14 @@ const OFF_THESIS_NAMES = new Set(["anduril industries", "skydweller us"]);
 export function isOffThesisName(name: string): boolean {
   return OFF_THESIS_NAMES.has(normalizeUnifiedName(name));
 }
+
+/**
+ * Affirmative non-independence stated in the name itself ("Subsidiary of
+ * HEICO", "Division of ..."). Flags oversize/owned rather than dropping.
+ */
+export function isSubsidiaryName(name: string): boolean {
+  return /\b(subsidiary|division|unit)\s+of\b/i.test(name);
+}
 export function higherTier(a: string, b: string): string {
   return (TIER_RANK[a] ?? 0) >= (TIER_RANK[b] ?? 0) ? a : b;
 }
@@ -838,9 +846,8 @@ async function loadDiscovery(
             : null,
         origin: ORIGIN_DISCOVERY,
         goldenV1Member: false,
-        tier,
         ...investorAssessment,
-        oversizeFlag: false,
+        oversizeFlag: isSubsidiaryName(name),
         pipelineStatus: status,
         fit: scoreNumber(scores["fit"]),
         novelty: scoreNumber(scores["novelty"]),
@@ -956,9 +963,8 @@ async function loadEnsemble(
           typeof r["country"] === "string" ? (r["country"] as string) : null,
         origin: ORIGIN_FAA_ENSEMBLE,
         goldenV1Member: false,
-        tier,
         ...investorAssessment,
-        oversizeFlag: false,
+        oversizeFlag: isSubsidiaryName(name),
         pipelineStatus: null,
         fit: null,
         novelty: null,

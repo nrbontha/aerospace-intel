@@ -7,10 +7,13 @@ import {
 import {
   higherTier,
   isOffThesisName,
+  isSubsidiaryName,
   isSyntheticTargetName,
   mapCandidateTier,
   mapCuratedTier,
+  mapCuratedInvestorAssessment,
   mapDiscoveryInvestorAssessment,
+  mapEnsembleInvestorAssessment,
   mapEnsembleTier,
   mergeBatchDuplicates,
   normalizeUnifiedName,
@@ -233,5 +236,21 @@ describe("isOffThesisName", () => {
   it("keeps plausible small suppliers", () => {
     expect(isOffThesisName("RAM Aviation, Space & Defense")).toBe(false);
     expect(isOffThesisName("Zephyr International LLC")).toBe(false);
+  });
+});
+
+describe("isSubsidiaryName", () => {
+  it("flags stated subsidiaries and divisions", () => {
+    expect(
+      isSubsidiaryName("Turbine Kinetics Inc, Subsidiary of HEICO Corp"),
+    ).toBe(true);
+    expect(isSubsidiaryName("Acme, a Division of XYZ")).toBe(true);
+  });
+
+  it("keeps independent names", () => {
+    expect(isSubsidiaryName("Zephyr International LLC")).toBe(false);
+    expect(
+      isSubsidiaryName("B/E Aerospace Inc, DBA, SMR Technologies Inc"),
+    ).toBe(false);
   });
 });
