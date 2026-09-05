@@ -101,6 +101,10 @@ const serverEnvSchema = z
     OPENROUTER_MODEL_FAST: modelId.default("openai/gpt-5.4-mini"),
     OPENROUTER_MODEL_DEEP: modelId.default("anthropic/claude-sonnet-5"),
     OPENROUTER_MODEL_FALLBACK: modelId.default("google/gemini-3.7-flash"),
+    FAA_MODEL_A: modelId.default("qwen/qwen3-30b-a3b:free"),
+    FAA_MODEL_B: modelId.default("google/gemma-3-27b-it:free"),
+    FAA_ADJUDICATOR_MODEL: modelId.optional(),
+    FAA_QUALIFICATION_CONCURRENCY: positiveIntegerWithDefault(5, 100),
     OPENROUTER_MAX_COST_PER_RUN_USD: positiveNumberWithDefault(2),
     OPENROUTER_MAX_COST_PER_DAY_USD: positiveNumberWithDefault(15),
     RESEARCH_MAX_TOOL_CALLS: positiveIntegerWithDefault(50, 10_000),
@@ -159,6 +163,7 @@ const serverEnvSchema = z
   })
   .transform((env) => ({
     ...env,
+    FAA_ADJUDICATOR_MODEL: env.FAA_ADJUDICATOR_MODEL ?? env.FAA_MODEL_A,
     SESSION_COOKIE_SECURE:
       env.SESSION_COOKIE_SECURE ?? env.NODE_ENV === "production",
   }));

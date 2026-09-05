@@ -2362,3 +2362,100 @@ export type NewAgentTick = InsertRow<typeof agentTicks>;
 export type TickOutcome = (typeof tickOutcome.enumValues)[number];
 export type AgentType = (typeof agentType.enumValues)[number];
 export type AgentStatus = (typeof agentStatus.enumValues)[number];
+
+// ---------------------------------------------------------------------------
+// FAA two-model ensemble qualification (migration 0007) — additive persistence
+// for evaluator votes and ensemble outcomes. The runner persists these rows
+// only; promotion wiring is a later decision.
+// ---------------------------------------------------------------------------
+
+export const faaEnsembleEvaluations = pgTable(
+  "faa_ensemble_evaluations",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    signalId: uuid("signal_id")
+      .notNull()
+      .references(() => sourceSignals.id, { onDelete: "cascade" }),
+    modelId: text("model_id").notNull(),
+    promptVersion: text("prompt_version").notNull().default("faa_qualification_v1"),
+    rawResponse: text("raw_response"),
+    parsed: jsonb("parsed").$type<Record<string, unknown>>(),
+    decision: text("decision"),
+    confidence: integer("confidence"),
+    companyType: text("company_type"),
+    aerospaceDefenseRelevance: text("aerospace_defense_relevance"),
+    manufacturingEvidence: text("manufacturing_evidence"),
+    thesisSignals: jsonb("thesis_signals").$type<string[]>().notNull().default([]),
+    disqualifiers: jsonb("disqualifiers").$type<string[]>().notNull().default([]),
+    missingEvidence: jsonb("missing_evidence").$type<string[]>().notNull().default([]),
+    falseNegativeRisk: text("false_negative_risk"),
+    reason: text("reason"),
+    tokens: jsonb("tokens").$type<Record<string, unknown>>(),
+    costUsd: numeric("cost_usd", { precision: 10, scale: 6 }),
+    error: text("error"),
+    retryCount: integer("retry_count").notNull().default(0),
+    createdAt: ct(),
+  },
+  (t) => [
+    index("faa_ensemble_evaluations_signal_idx").on(t.signalId),
+    unique("faa_ensemble_evaluations_signal_model_prompt_uidx").on(
+      t.signalId,
+      t.modelId,
+      t.promptVersion,
+    ),
+    check(
+      "faa_ensemble_evaluations_decision_chk",
+      sql`${t.decision} IS NULL OR ${t.decision} IN ('reject', 'research', 'high_priority')`,
+    ),
+    check(
+      "faa_ensemble_evaluations_confidence_chk",
+      sql`${t.confidence} IS NULL OR (${t.confidence} >= 0 AND ${t.confidence} <= 100)`,
+    ),
+  ],
+);
+
+export const faaEnsembleResults = pgTable(
+  "faa_ensemble_results",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    signalId: uuid("signal_id")
+      .notNull()
+      .unique()
+      .references(() => sourceSignals.id, { onDelete: "cascade" }),
+    promptVersion: text("prompt_version").default("faa_qualification_v1"),
+    adjudicatorPromptVersion: text("adjudicator_prompt_version").default(
+      "faa_adjudicator_v1",
+    ),
+    modelAId: text("model_a_id"),
+    modelBId: text("model_b_id"),
+    modelADecision: text("model_a_decision"),
+    modelBDecision: text("model_b_decision"),
+    agreed: boolean("agreed"),
+    adjudicationRequired: boolean("adjudication_required"),
+    adjudicatorModel: text("adjudicator_model"),
+    adjudicatorOutput: jsonb("adjudicator_output").$type<Record<string, unknown>>(),
+    finalDecision: text("final_decision").notNull(),
+    finalConfidence: integer("final_confidence"),
+    reason: text("reason"),
+    falseNegativeRisk: text("false_negative_risk"),
+    createdAt: ct(),
+    updatedAt: ut(),
+  },
+  (t) => [
+    index("faa_ensemble_results_final_decision_idx").on(t.finalDecision),
+    check(
+      "faa_ensemble_results_final_decision_chk",
+      sql`${t.finalDecision} IN ('reject', 'research', 'high_priority')`,
+    ),
+    check(
+      "faa_ensemble_results_final_confidence_chk",
+      sql`${t.finalConfidence} IS NULL OR (${t.finalConfidence} >= 0 AND ${t.finalConfidence} <= 100)`,
+    ),
+  ],
+);
+
+export type FaaEnsembleEvaluation = SelectRow<typeof faaEnsembleEvaluations>;
+export type NewFaaEnsembleEvaluation = InsertRow<typeof faaEnsembleEvaluations>;
+export type FaaEnsembleResult = SelectRow<typeof faaEnsembleResults>;
+export type NewFaaEnsembleResult = InsertRow<typeof faaEnsembleResults>;
+export type FaaEnsembleDecision = "reject" | "research" | "high_priority";
