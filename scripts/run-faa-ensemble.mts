@@ -40,7 +40,11 @@ for (const line of existsSync(".env.local")
   const match = line.match(/^\s*([A-Za-z0-9_]+)\s*=\s*(.*)\s*$/u);
   const key = match?.[1];
   const value = match?.[2];
-  if (key !== undefined && value !== undefined && process.env[key] === undefined) {
+  if (
+    key !== undefined &&
+    value !== undefined &&
+    process.env[key] === undefined
+  ) {
     process.env[key] = value;
   }
 }
@@ -56,12 +60,18 @@ export const DEFAULT_FAA_MODEL_B = "google/gemma-3-27b-it:free";
 export const DEFAULT_FAA_SOURCE_KEY = "faa_pma_database";
 export const DEFAULT_FAA_STATUS = "queued_qualification";
 export const DEFAULT_FAA_CONCURRENCY = 5;
+export const DEFAULT_FAA_REQUEST_DELAY_MS = 8000;
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 export interface FaaEnsembleConfig {
   readonly modelA: string;
   readonly modelB: string;
   readonly adjudicatorModel: string;
   readonly concurrency: number;
+  readonly requestDelayMs: number;
 }
 
 export function resolveEnsembleConfig(
@@ -72,7 +82,10 @@ export function resolveEnsembleConfig(
     (env["FAA_MODEL_A"] ?? "").trim() === ""
       ? DEFAULT_FAA_MODEL_A
       : (env["FAA_MODEL_A"] ?? "").trim();
-  const modelB = (env["FAA_MODEL_B"] ?? "").trim() === "" ? DEFAULT_FAA_MODEL_B : (env["FAA_MODEL_B"] ?? "").trim();
+  const modelB =
+    (env["FAA_MODEL_B"] ?? "").trim() === ""
+      ? DEFAULT_FAA_MODEL_B
+      : (env["FAA_MODEL_B"] ?? "").trim();
   const adjudicatorModel =
     (env["FAA_ADJUDICATOR_MODEL"] ?? "").trim() === ""
       ? modelA
@@ -81,7 +94,13 @@ export function resolveEnsembleConfig(
   const parsed = rawConcurrency === "" ? Number.NaN : Number(rawConcurrency);
   const concurrency =
     Number.isInteger(parsed) && parsed > 0 ? parsed : DEFAULT_FAA_CONCURRENCY;
-  return { modelA, modelB, adjudicatorModel, concurrency };
+  const rawDelay = (env["FAA_REQUEST_DELAY_MS"] ?? "").trim();
+  const parsedDelay = rawDelay === "" ? Number.NaN : Number(rawDelay);
+  const requestDelayMs =
+    Number.isInteger(parsedDelay) && parsedDelay >= 0
+      ? parsedDelay
+      : DEFAULT_FAA_REQUEST_DELAY_MS;
+  return { modelA, modelB, adjudicatorModel, concurrency, requestDelayMs };
 }
 
 // ---------------------------------------------------------------------------
@@ -125,6 +144,7 @@ export interface FaaEnsembleCliOptions {
   readonly dryRun: boolean;
   readonly sample: number | null;
   readonly concurrency: number;
+  readonly delayMs: number | null;
   readonly includeKnown: boolean;
   readonly benchmarkNames: readonly string[];
   readonly failedOnly: boolean;
@@ -177,6 +197,10 @@ export function parseEnsembleArgs(
     .map((name) => name.trim())
     .filter((name) => name.length > 0);
   const failedOnly = hasFlag(argv, "--failed-only");
+  const delayMs = parseNonNegativeInt(
+    flagValue(argv, "--delay-ms"),
+    "--delay-ms",
+  );
   return {
     limit,
     status,
@@ -184,6 +208,7 @@ export function parseEnsembleArgs(
     dryRun,
     sample,
     concurrency,
+    delayMs,
     includeKnown,
     benchmarkNames,
     failedOnly,
@@ -251,7 +276,9 @@ function asStringList(value: unknown, cap: number): readonly string[] {
   return out;
 }
 
-export function buildEvidencePackage(row: SourceSignalRowLike): FaaEvidencePackage {
+export function buildEvidencePackage(
+  row: SourceSignalRowLike,
+): FaaEvidencePackage {
   const payload =
     typeof row.source_payload === "object" && row.source_payload !== null
       ? (row.source_payload as Record<string, unknown>)
@@ -412,10 +439,18 @@ export type ModelEvalOutcome =
       readonly ok: true;
       readonly result: FaaEvaluatorResult;
       readonly rawResponse: string;
-      readonly tokens: { input: number | null; output: number | null; total: number | null };
+      readonly tokens: {
+        input: number | null;
+        output: number | null;
+        total: number | null;
+      };
       readonly costUsd: number | null;
     }
-  | { readonly ok: false; readonly error: string; readonly rawResponse: string | null };
+  | {
+      readonly ok: false;
+      readonly error: string;
+      readonly rawResponse: string | null;
+    };
 
 export type AdjudicatorOutcome =
   | { readonly ok: true; readonly result: FaaAdjudicatorResult }
@@ -497,7 +532,8 @@ export async function selectCandidateSignals(
   db: Database,
   options: FaaEnsembleCliOptions,
 ): Promise<CandidateSignalRow[]> {
-  const trancheCap = options.sample ?? (options.limit === 0 ? null : options.limit);
+  const trancheCap =
+    options.sample ?? (options.limit === 0 ? null : options.limit);
   const base = await db.execute<CandidateSignalRow>(sql`
     SELECT
       ss.id,
@@ -818,7 +854,11 @@ async function qualifySignal(
     deps.adjudicate ??
     (client === null
       ? null
-      : (evidence: FaaEvidencePackage, a: FaaEvaluatorResult | null, b: FaaEvaluatorResult | null) =>
+      : (
+          evidence: FaaEvidencePackage,
+          a: FaaEvaluatorResult | null,
+          b: FaaEvaluatorResult | null,
+        ) =>
           defaultAdjudicate(client, config.adjudicatorModel, evidence, a, b));
   if (adjudicate === null) {
     throw new Error("OPENROUTER_API_KEY is required (no adjudicate override)");
@@ -828,11 +868,13 @@ async function qualifySignal(
   let failures = 0;
 
   // Persist Model A even if Model B fails: sequential, each persisted.
+  await sleep(config.requestDelayMs);
   const outcomeA = await evaluate(config.modelA, pkg);
   apiCalls += 1;
   if (!outcomeA.ok) failures += 1;
   await persistEvaluation(db, row.id, config.modelA, outcomeA);
 
+  await sleep(config.requestDelayMs);
   const outcomeB = await evaluate(config.modelB, pkg);
   apiCalls += 1;
   if (!outcomeB.ok) failures += 1;
@@ -847,13 +889,17 @@ async function qualifySignal(
   let adjudicated = false;
   let adjudicatorOutput: Record<string, unknown> | null = null;
   if (resolution.adjudicationRequired) {
+    await sleep(config.requestDelayMs);
     const adjudication = await adjudicate(pkg, resultA, resultB);
     apiCalls += 1;
     if (adjudication.ok) {
       adjudicated = true;
       finalDecision = adjudication.result.decision;
       finalConfidence = adjudication.result.confidence;
-      adjudicatorOutput = adjudication.result as unknown as Record<string, unknown>;
+      adjudicatorOutput = adjudication.result as unknown as Record<
+        string,
+        unknown
+      >;
     } else {
       failures += 1;
       adjudicatorOutput = { error: adjudication.error };
@@ -868,14 +914,17 @@ async function qualifySignal(
     modelBDecision: resultB?.decision ?? null,
     agreed: resolution.agreed,
     adjudicationRequired: resolution.adjudicationRequired,
-    adjudicatorModel: resolution.adjudicationRequired ? config.adjudicatorModel : null,
+    adjudicatorModel: resolution.adjudicationRequired
+      ? config.adjudicatorModel
+      : null,
     adjudicatorOutput,
     finalDecision,
     finalConfidence,
     reason: adjudicated
       ? `adjudicated: ${JSON.stringify(adjudicatorOutput)}`
       : resolution.reason,
-    falseNegativeRisk: resultA?.false_negative_risk ?? resultB?.false_negative_risk ?? null,
+    falseNegativeRisk:
+      resultA?.false_negative_risk ?? resultB?.false_negative_risk ?? null,
   });
 
   return {
@@ -894,7 +943,11 @@ export async function runFaaEnsemble(
   options: FaaEnsembleCliOptions,
   dependencies: FaaEnsembleDependencies = {},
 ): Promise<FaaEnsembleSummary> {
-  const config = resolveEnsembleConfig(process.env);
+  const baseConfig = resolveEnsembleConfig(process.env);
+  const config: FaaEnsembleConfig =
+    options.delayMs === null
+      ? baseConfig
+      : { ...baseConfig, requestDelayMs: options.delayMs };
   const db = dependencies.db ?? getDatabase();
 
   const rows = await selectCandidateSignals(db, options);
@@ -920,10 +973,8 @@ export async function runFaaEnsemble(
       ? null
       : new OpenRouterClient(apiKey);
 
-  const outcomes = await runWithConcurrency(
-    rows,
-    options.concurrency,
-    (row) => qualifySignal(row, config, dependencies, db, client),
+  const outcomes = await runWithConcurrency(rows, options.concurrency, (row) =>
+    qualifySignal(row, config, dependencies, db, client),
   );
   const metrics = summarizeEnsembleOutcomes(outcomes);
   console.log(formatEnsembleMetrics(metrics));
@@ -937,7 +988,9 @@ async function main(): Promise<void> {
     const db = getDatabase();
     try {
       const known = await loadKnownNames(db);
-      console.log(`known-name filter: ${known.size} names (golden_examples + companies)`);
+      console.log(
+        `known-name filter: ${known.size} names (golden_examples + companies)`,
+      );
     } finally {
       await closeDatabase();
     }
