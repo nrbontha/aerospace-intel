@@ -368,9 +368,12 @@ export function buildEvidencePackage(
 // missing ownership/size/revenue -> research, never reject)
 // ---------------------------------------------------------------------------
 const HIGH_RECALL_POLICY = `You are a high-recall FAA PMA supplier filter. Reject ONLY on affirmative negative evidence (e.g. the holder is verifiably a distributor with no manufacturing, a foreign shell with no US presence, or the PMA record demonstrably belongs to a different company). Missing ownership, size, or revenue information MUST route to research, NEVER to reject. When in doubt, choose research.`;
+const INVESTOR_RULES = `Investor rules: (1) Proprietary PRODUCT (patented/branded manufactured components, parts, systems, PMA/STC/TSO articles) is P1-grade evidence; proprietary PROCESS alone (kitting, assembly methods, repair processes, services) is never product evidence — Priority 2 at best. (2) A Products catalog/menu on the website is a strong fit signal; capabilities/services-only pages with no products lean build-to-print (Priority 3 hopper). No website fetched means research, never reject. (3) Scale from public knowledge: you MAY use widely-known public facts ONLY to recognize obviously large strategics (major primes, Fortune-scale aerospace groups, and their named subsidiaries) — mark likely_oversize, never high_priority on fame, and name the basis; never invent revenue, ownership, or customer facts beyond this. (4) Platform OEMs building whole aircraft are outside the thesis (reject). (5) Suggested priority: 1 = proprietary product + qualification + small/private indicators; 2 = capable manufacturer, no clear proprietary product; 3 = possible surprise or thin evidence.`;
 
 export function buildEvaluatorPrompt(pkg: FaaEvidencePackage): string {
   return `${HIGH_RECALL_POLICY}
+
+${INVESTOR_RULES}
 
 Evidence for one FAA PMA holder (compact JSON):
 ${JSON.stringify(pkg)}
@@ -386,6 +389,8 @@ export function buildAdjudicatorPrompt(
   b: FaaEvaluatorResult | null,
 ): string {
   return `${HIGH_RECALL_POLICY}
+
+${INVESTOR_RULES}
 
 Two independent evaluators disagreed (or one produced malformed output) for this FAA PMA holder.
 
