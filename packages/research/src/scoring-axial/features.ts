@@ -46,6 +46,45 @@ export const PROPRIETARY_EVIDENCE_VALUES = [
   "demonstrated",
   "patented",
 ] as const;
+
+/**
+ * Separates a proprietary manufactured PRODUCT from a proprietary process.
+ * `process_only` covers kitting, assembly, services, and repair methods; it
+ * MUST NOT be treated as proprietary product evidence. `unknown` means the
+ * available evidence does not establish either category.
+ */
+export const PROPRIETARY_PRODUCT_VALUES = [
+  "patented_product",
+  "demonstrated_product",
+  "claimed_product",
+  "process_only",
+  "none",
+  "unknown",
+] as const;
+
+/**
+ * Website offering signal. A Products menu, dropdown, or catalog is a strong
+ * product-fit signal. A capabilities/services-only site with no product
+ * offering is build-to-print leaning. `unknown` means no site was fetched or
+ * the available site evidence is inconclusive.
+ */
+export const WEBSITE_OFFERING_VALUES = [
+  "products_menu",
+  "capabilities_only",
+  "unknown",
+] as const;
+
+/**
+ * Categorical size evidence only. `large_indicators` requires affirmative
+ * large-scale evidence; it never estimates or invents revenue. `unknown`
+ * means the evidence establishes neither small nor large scale.
+ */
+export const SIZE_EVIDENCE_VALUES = [
+  "small_indicators",
+  "large_indicators",
+  "unknown",
+] as const;
+
 export const QUALIFICATION_STATUS_VALUES = [
   "present",
   "claimed",
@@ -57,10 +96,7 @@ export const QUALIFICATION_STATUS_VALUES = [
  * Boolean-or-'unknown' trilean. `unknown` MUST be explicit: absence of
  * evidence is never coerced to false (or true) anywhere in the engine.
  */
-export const boolOrUnknownSchema = z.union([
-  z.boolean(),
-  z.literal("unknown"),
-]);
+export const boolOrUnknownSchema = z.union([z.boolean(), z.literal("unknown")]);
 
 const qualificationStatusSchema = z.enum(QUALIFICATION_STATUS_VALUES);
 
@@ -82,6 +118,8 @@ export const featureVectorSchema = z
       .object({
         revenueBand: z.enum(REVENUE_BAND_VALUES),
         employeesBand: z.enum(EMPLOYEES_BAND_VALUES),
+        /** Optional additive signal; see SIZE_EVIDENCE_VALUES semantics. */
+        sizeEvidence: z.enum(SIZE_EVIDENCE_VALUES).optional(),
       })
       .strict(),
     ownership: z
@@ -96,6 +134,10 @@ export const featureVectorSchema = z
         pureService: boolOrUnknownSchema,
         buildToPrintShare: z.enum(BUILD_TO_PRINT_SHARE_VALUES),
         proprietaryProductEvidence: z.enum(PROPRIETARY_EVIDENCE_VALUES),
+        /** Optional additive signal; see PROPRIETARY_PRODUCT_VALUES semantics. */
+        proprietaryProduct: z.enum(PROPRIETARY_PRODUCT_VALUES).optional(),
+        /** Optional additive signal; see WEBSITE_OFFERING_VALUES semantics. */
+        websiteOffering: z.enum(WEBSITE_OFFERING_VALUES).optional(),
       })
       .strict(),
     qualifications: z
@@ -127,6 +169,9 @@ export type RevenueBand = (typeof REVENUE_BAND_VALUES)[number];
 export type EmployeesBand = (typeof EMPLOYEES_BAND_VALUES)[number];
 export type OwnershipType = (typeof OWNERSHIP_TYPE_VALUES)[number];
 export type QualificationStatus = (typeof QUALIFICATION_STATUS_VALUES)[number];
+export type ProprietaryProduct = (typeof PROPRIETARY_PRODUCT_VALUES)[number];
+export type WebsiteOffering = (typeof WEBSITE_OFFERING_VALUES)[number];
+export type SizeEvidence = (typeof SIZE_EVIDENCE_VALUES)[number];
 
 /**
  * The closed allowlist of feature references a ScoringProgram may touch.
@@ -139,11 +184,14 @@ export type QualificationStatus = (typeof QUALIFICATION_STATUS_VALUES)[number];
 export const FEATURE_KEYS = [
   "size.revenueBand",
   "size.employeesBand",
+  "size.size_evidence",
   "ownership.ownershipType",
   "businessModel.distributes_products",
   "businessModel.pure_service",
   "businessModel.build_to_print_share",
   "businessModel.proprietary_product_evidence",
+  "businessModel.proprietary_product",
+  "businessModel.website_offering",
   "qualifications.pma",
   "qualifications.as9100",
   "qualifications.nadcap",
@@ -172,6 +220,7 @@ function requireEnum<T extends string>(
   values: readonly T[],
 ): T {
   if (raw === null || raw === undefined) return "unknown" as T;
+
   if (typeof raw === "string" && (values as readonly string[]).includes(raw)) {
     return raw as T;
   }
@@ -179,8 +228,18 @@ function requireEnum<T extends string>(
     `extractFeatureVector: invalid value for ${field}: ${JSON.stringify(raw)}`,
   );
 }
+function optionalEnum<T extends string>(
+  raw: unknown,
+  field: string,
+  values: readonly T[],
+): T | undefined {
+  return raw === undefined ? undefined : requireEnum(raw, field, values);
+}
 
-function requireBoolOrUnknown(raw: unknown, field: string): boolean | "unknown" {
+function requireBoolOrUnknown(
+  raw: unknown,
+  field: string,
+): boolean | "unknown" {
   if (raw === null || raw === undefined) return "unknown";
   if (typeof raw === "boolean") return raw;
   if (raw === "true") return true;
@@ -234,6 +293,13 @@ const KNOWN_RAW_KEYS: Record<string, true> = {
   build_to_print_share: true,
   buildToPrintShare: true,
   proprietary_product_evidence: true,
+  proprietaryProductEvidence: true,
+  proprietary_product: true,
+  proprietaryProduct: true,
+  website_offering: true,
+  websiteOffering: true,
+  size_evidence: true,
+  sizeEvidence: true,
   qualifications: true,
   platforms: true,
   aftermarket: true,
@@ -245,23 +311,26 @@ const KNOWN_RAW_KEYS: Record<string, true> = {
   identity_resolved: true,
 };
 
-
 /**
  * THE single future DB-mapping choke point.
  *
  * Everything downstream (programs, axes, priorities, evaluation harness)
  * consumes FeatureVectors exclusively. When the database is wired up, only
  * this function learns about row shapes; no SQL result ever reaches a scorer
- * directly. Missing/null inputs become the EXPLICIT `unknown` members — the
+ * directly. Legacy missing/null inputs become explicit `unknown` members — the
  * engine never guesses a default ownership, revenue band, or capability.
+ * Optional additive signals stay absent when no value is supplied; supplied
+ * `null` is explicit `unknown`.
  *
  * Accepted input keys (flat or nested): identity{domain,cage,uei},
- * revenue_band/revenueBand, employees_band/employeesBand, ownership_type/
- * ownershipType, distributes_products, pure_service, build_to_print_share,
- * proprietary_product_evidence, qualifications{pma,as9100,nadcap,qpl,
- * oem_approved,oemApproved,itar_signal,itarSignal}, platforms, aftermarket,
- * source_count, primary_source_count, conflict_count,
- * freshest_observation_days_old, identity_resolved.
+ * revenue_band/revenueBand, employees_band/employeesBand, size_evidence/
+ * sizeEvidence, ownership_type/ownershipType, distributes_products,
+ * pure_service, build_to_print_share, proprietary_product_evidence,
+ * proprietary_product/proprietaryProduct, website_offering/websiteOffering,
+ * qualifications{pma,as9100,nadcap,qpl,oem_approved,oemApproved,
+ * itar_signal,itarSignal}, platforms, aftermarket, source_count,
+ * primary_source_count, conflict_count, freshest_observation_days_old,
+ * identity_resolved.
  */
 export function extractFeatureVector(
   rawRecord: Record<string, unknown>,
@@ -306,6 +375,13 @@ export function extractFeatureVector(
         "employees_band",
         EMPLOYEES_BAND_VALUES,
       ),
+      sizeEvidence: optionalEnum(
+        rawRecord.size_evidence !== undefined
+          ? rawRecord.size_evidence
+          : rawRecord.sizeEvidence,
+        "size_evidence",
+        SIZE_EVIDENCE_VALUES,
+      ),
     },
     ownership: {
       ownershipType: requireEnum(
@@ -337,12 +413,42 @@ export function extractFeatureVector(
         "proprietary_product_evidence",
         PROPRIETARY_EVIDENCE_VALUES,
       ),
+      proprietaryProduct: optionalEnum(
+        rawRecord.proprietary_product !== undefined
+          ? rawRecord.proprietary_product
+          : rawRecord.proprietaryProduct,
+        "proprietary_product",
+        PROPRIETARY_PRODUCT_VALUES,
+      ),
+      websiteOffering: optionalEnum(
+        rawRecord.website_offering !== undefined
+          ? rawRecord.website_offering
+          : rawRecord.websiteOffering,
+        "website_offering",
+        WEBSITE_OFFERING_VALUES,
+      ),
     },
     qualifications: {
-      pma: requireEnum(qualifications.pma, "qualifications.pma", QUALIFICATION_STATUS_VALUES),
-      as9100: requireEnum(qualifications.as9100, "qualifications.as9100", QUALIFICATION_STATUS_VALUES),
-      nadcap: requireEnum(qualifications.nadcap, "qualifications.nadcap", QUALIFICATION_STATUS_VALUES),
-      qpl: requireEnum(qualifications.qpl, "qualifications.qpl", QUALIFICATION_STATUS_VALUES),
+      pma: requireEnum(
+        qualifications.pma,
+        "qualifications.pma",
+        QUALIFICATION_STATUS_VALUES,
+      ),
+      as9100: requireEnum(
+        qualifications.as9100,
+        "qualifications.as9100",
+        QUALIFICATION_STATUS_VALUES,
+      ),
+      nadcap: requireEnum(
+        qualifications.nadcap,
+        "qualifications.nadcap",
+        QUALIFICATION_STATUS_VALUES,
+      ),
+      qpl: requireEnum(
+        qualifications.qpl,
+        "qualifications.qpl",
+        QUALIFICATION_STATUS_VALUES,
+      ),
       oemApproved: requireEnum(
         qualifications.oem_approved ?? qualifications.oemApproved,
         "qualifications.oem_approved",

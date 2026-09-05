@@ -69,6 +69,15 @@ export async function PATCH(
         ...(payload.data.buildToPrintRisk === undefined
           ? {}
           : { buildToPrintRisk: payload.data.buildToPrintRisk }),
+        ...(payload.data.proprietaryProduct === undefined
+          ? {}
+          : { proprietaryProduct: payload.data.proprietaryProduct }),
+        ...(payload.data.websiteOffering === undefined
+          ? {}
+          : { websiteOffering: payload.data.websiteOffering }),
+        ...(payload.data.sizeEvidence === undefined
+          ? {}
+          : { sizeEvidence: payload.data.sizeEvidence }),
       },
       ...(requestId ? { requestId: requestId.slice(0, 500) } : {}),
     });

@@ -129,7 +129,17 @@ Do not use outside knowledge unless explicitly contained in the supplied evidenc
 
 Do not reward famous companies merely because you recognize them.
 
-Favor evidence over familiarity.`;
+Favor evidence over familiarity.
+
+## Investor rules addendum
+
+Separate proprietary manufactured PRODUCTS from proprietary PROCESSES. Count patented or branded manufactured components, parts, systems, or PMA/STC/TSO articles as proprietary product evidence. Kitting, assembly methods, services, repair processes, and other capabilities are proprietary_process_only, not proprietary product evidence. For example, the 313 Industries pattern of proprietary kitting or assembly supports engineering co-development potential and Priority 2/3, but not Priority 1 product evidence.
+
+Treat a Products menu, dropdown, catalog, or product pages as a strong product-fit signal (the RAM Aviation and Sentech Sensors pattern). A capabilities/services-only website with no Products section is build-to-print leaning (the MP Aero pattern) and belongs in the Priority 3 hopper unless stronger evidence says otherwise. If no website was fetched, choose research rather than reject.
+
+Flag scale only when affirmative evidence supports it; record observed employee counts, facilities, contract values, fleets, or stated revenue as size indicators and set likely_oversize only for clear large-scale evidence. The RAM Aviation lesson is to retain a strong product profile as a high-interest reference even when stated revenue exceeds $100M; do not silently drop it for size. Platform OEMs, such as Skydweller, are outside the thesis and should be passed over (reject).
+
+Use suggested_priority 1 for a proprietary manufactured product with qualification signals and small/private indicators; 2 for a capable manufacturer with in-house engineering but no clear proprietary product; and 3 for a possible surprise with build-to-print, no-website, or thin-evidence signals. Include proprietary_product_evidence ("none", "weak", or "strong"), proprietary_process_only, website_products_menu (true, false, or null when unknown), size_indicators, likely_oversize, and suggested_priority in the JSON.`;
 
 export const FAA_ADJUDICATOR_PROMPT_TEMPLATE = `You are the final adjudicator in a multi-model aerospace acquisition-target screening system.
 
@@ -269,7 +279,17 @@ model_a_error and model_b_error may be "none".
 
 Confidence is confidence in the final disposition.
 
-Keep reason under 100 words.`;
+Keep reason under 100 words.
+
+## Investor rules addendum
+
+Separate proprietary manufactured PRODUCTS from proprietary PROCESSES. Count patented or branded manufactured components, parts, systems, or PMA/STC/TSO articles as proprietary product evidence. Kitting, assembly methods, services, repair processes, and other capabilities are proprietary_process_only, not proprietary product evidence. For example, the 313 Industries pattern of proprietary kitting or assembly supports engineering co-development potential and Priority 2/3, but not Priority 1 product evidence.
+
+Treat a Products menu, dropdown, catalog, or product pages as a strong product-fit signal (the RAM Aviation and Sentech Sensors pattern). A capabilities/services-only website with no Products section is build-to-print leaning (the MP Aero pattern) and belongs in the Priority 3 hopper unless stronger evidence says otherwise. If no website was fetched, choose research rather than reject.
+
+Flag scale only when affirmative evidence supports it; record observed employee counts, facilities, contract values, fleets, or stated revenue as size indicators and set likely_oversize only for clear large-scale evidence. The RAM Aviation lesson is to retain a strong product profile as a high-interest reference even when stated revenue exceeds $100M; do not silently drop it for size. Platform OEMs, such as Skydweller, are outside the thesis and should be passed over (reject).
+
+Use suggested_priority 1 for a proprietary manufactured product with qualification signals and small/private indicators; 2 for a capable manufacturer with in-house engineering but no clear proprietary product; and 3 for a possible surprise with build-to-print, no-website, or thin-evidence signals. Include proprietary_product_evidence ("none", "weak", or "strong"), proprietary_process_only, website_products_menu (true, false, or null when unknown), size_indicators, likely_oversize, and suggested_priority in the JSON.`;
 
 /** Literal placeholder substitution (no regex, so `$` in values is safe). */
 function fill(

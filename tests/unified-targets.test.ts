@@ -10,6 +10,7 @@ import {
   isSyntheticTargetName,
   mapCandidateTier,
   mapCuratedTier,
+  mapDiscoveryInvestorAssessment,
   mapEnsembleTier,
   mergeBatchDuplicates,
   normalizeUnifiedName,
@@ -69,6 +70,36 @@ describe("tier mapping", () => {
   });
 });
 
+describe("investor priority mapping", () => {
+  it("treats kitting as process-only and prevents a P1 designation", () => {
+    expect(
+      mapDiscoveryInvestorAssessment(
+        "research_ready",
+        0.8,
+        "https://example.com",
+        "Custom kitting and assembly services",
+      ),
+    ).toEqual({
+      investorPriority: 2,
+      proprietaryBasis: "process_only",
+    });
+  });
+
+  it("keeps a Products-menu research-ready candidate on the P1 product path", () => {
+    expect(
+      mapDiscoveryInvestorAssessment(
+        "research_ready",
+        0.8,
+        "https://example.com",
+        "Products catalog",
+      ),
+    ).toEqual({
+      investorPriority: 1,
+      proprietaryBasis: "product",
+    });
+  });
+});
+
 describe("unified export", () => {
   it("uses the contract CSV header list", () => {
     expect([...UNIFIED_CSV_HEADERS]).toEqual([
@@ -79,6 +110,9 @@ describe("unified export", () => {
       "State",
       "Country",
       "Tier",
+      "Priority",
+      "Oversize Flag",
+      "Proprietary Basis",
       "Origins",
       "Golden v1",
       "Pipeline Status",
@@ -128,6 +162,9 @@ describe("mergeBatchDuplicates", () => {
     origin: "discovery",
     goldenV1Member: false,
     tier: "needs_research",
+    investorPriority: 3 as const,
+    oversizeFlag: false,
+    proprietaryBasis: "unknown" as const,
     pipelineStatus: null,
     fit: null,
     novelty: null,
@@ -151,6 +188,9 @@ describe("mergeBatchDuplicates", () => {
       row({
         companyName: "ZITEC, INC ",
         tier: "high_interest",
+        investorPriority: 1 as const,
+        oversizeFlag: true,
+        proprietaryBasis: "product" as const,
         city: "Niceville",
         evidenceUrls: ["https://example.com/a"],
       }),
@@ -158,6 +198,9 @@ describe("mergeBatchDuplicates", () => {
     expect(merged).toHaveLength(1);
     expect(merged[0]).toMatchObject({
       tier: "high_interest",
+      investorPriority: 1,
+      oversizeFlag: true,
+      proprietaryBasis: "product",
       domain: "zitecusa.com",
       city: "Niceville",
       evidenceUrls: ["https://example.com/a"],

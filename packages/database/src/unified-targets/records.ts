@@ -86,6 +86,19 @@ export async function upsertUnifiedTarget(
         origins: jsonbArrayUnionExpr("origins"),
         goldenV1Member: sql`"unified_targets"."golden_v1_member" OR COALESCE(excluded."golden_v1_member", false)`,
         tier: sql`CASE WHEN ${tierRankExpr('excluded."tier"')} > ${tierRankExpr('"unified_targets"."tier"')} THEN excluded."tier" ELSE "unified_targets"."tier" END`,
+        investorPriority: sql`CASE
+          WHEN "unified_targets"."investor_priority" IS NULL THEN excluded."investor_priority"
+          WHEN excluded."investor_priority" IS NULL THEN "unified_targets"."investor_priority"
+          WHEN excluded."investor_priority" < "unified_targets"."investor_priority" THEN excluded."investor_priority"
+          ELSE "unified_targets"."investor_priority"
+        END`,
+        oversizeFlag: sql`COALESCE("unified_targets"."oversize_flag", false) OR COALESCE(excluded."oversize_flag", false)`,
+        proprietaryBasis: sql`CASE
+          WHEN (CASE excluded."proprietary_basis" WHEN 'product' THEN 3 WHEN 'process_only' THEN 2 WHEN 'unknown' THEN 1 ELSE 0 END)
+             > (CASE "unified_targets"."proprietary_basis" WHEN 'product' THEN 3 WHEN 'process_only' THEN 2 WHEN 'unknown' THEN 1 ELSE 0 END)
+            THEN excluded."proprietary_basis"
+          ELSE COALESCE("unified_targets"."proprietary_basis", excluded."proprietary_basis")
+        END`,
         pipelineStatus: sql`COALESCE(excluded."pipeline_status", "unified_targets"."pipeline_status")`,
         fit: sql`COALESCE(excluded."fit", "unified_targets"."fit")`,
         novelty: sql`COALESCE(excluded."novelty", "unified_targets"."novelty")`,

@@ -7,6 +7,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "high_interest",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "discovery"
     ],
@@ -31,6 +34,9 @@
     "state_code": "OK",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -50,32 +56,6 @@
     ]
   },
   {
-    "company_name": "Aavid Niagara LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Niagara Falls",
-    "state_code": "NY",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Beech, British Aerospace, Cessna, Commonwealth of Australia, Gov't. Aircraft Factories Nomad, Machen Inc., Maule, Pilatus Britten-Norman, Piper, Schweizer, Weatherly Aviation; 3315 Haseley Drive) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/05C4268D5C8669EB862581B5006B61C3.0001"
-    ]
-  },
-  {
     "company_name": "A&B Foundry",
     "domain": null,
     "website_url": null,
@@ -83,6 +63,9 @@
     "state_code": null,
     "country_code": null,
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "discovery"
     ],
@@ -107,6 +90,9 @@
     "state_code": "AK",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -133,6 +119,9 @@
     "state_code": "WA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -152,32 +141,6 @@
     ]
   },
   {
-    "company_name": "ACME Aero Suspensions LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Maiden",
-    "state_code": "NC",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Aviat Aircraft Inc, Aviat Aircraft Inc., Cub Crafters | Inc., FS 2002 Corporation, FS 2003 Corporation, Piper Aircraft Inc, Piper Aircraft Inc., Top Cub Aircraft Inc., Top Cub Inc.; 3524 Airport Rd.) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID145017085520260513140949.0001"
-    ]
-  },
-  {
     "company_name": "Acme Aero Tooling LLC",
     "domain": "acme-aero-tooling-c0ac3224.com",
     "website_url": "https://acme-aero-tooling-c0ac3224.com",
@@ -185,6 +148,9 @@
     "state_code": null,
     "country_code": null,
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "discovery"
     ],
@@ -202,32 +168,6 @@
     "evidence_urls": []
   },
   {
-    "company_name": "Acme Electric Corp",
-    "domain": null,
-    "website_url": null,
-    "city": "Tempe",
-    "state_code": "AZ",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, Boeing, Boeing | Gulfstream, Bombardier, Inc. | Dassault Aviation | Gulfstream | McDonnell Douglas, Eurocopter Deutschland, Gulfstream, McDonnell Douglas; 528 West 21st St) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/3442E94DF9CDA5A9862575D700572F48.0001"
-    ]
-  },
-  {
     "company_name": "ACMT",
     "domain": "acmt-usa.com",
     "website_url": "https://acmt-usa.com",
@@ -235,6 +175,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "process_only",
     "origins": [
       "discovery",
       "golden_v1"
@@ -260,6 +203,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -286,6 +232,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "process_only",
     "origins": [
       "discovery",
       "golden_v1"
@@ -311,6 +260,9 @@
     "state_code": "CT",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -330,32 +282,6 @@
     ]
   },
   {
-    "company_name": "Advent Aircraft Systems Inc.",
-    "domain": null,
-    "website_url": null,
-    "city": "Tulsa",
-    "state_code": "OK",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Eclipse Aerospace, Inc.; 8712 S. Peoria Ave.) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/68E5C91D960ACD4C86257E7400608FB3.0001"
-    ]
-  },
-  {
     "company_name": "Aearo Technologies LLC",
     "domain": null,
     "website_url": null,
@@ -363,6 +289,9 @@
     "state_code": "IN",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -382,32 +311,6 @@
     ]
   },
   {
-    "company_name": "Aerocomponents Engineering LLC (CANCELLED)",
-    "domain": null,
-    "website_url": null,
-    "city": "Mesa",
-    "state_code": "AZ",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, Boeing; 2150 S Country Club Drive Suite 38) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/60708194937AEB4786257D890058353C.0001"
-    ]
-  },
-  {
     "company_name": "Aero-Composite",
     "domain": null,
     "website_url": null,
@@ -415,6 +318,9 @@
     "state_code": "FL",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -441,6 +347,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -467,6 +376,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -486,32 +398,6 @@
     ]
   },
   {
-    "company_name": "Aero Electronics Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Memphis",
-    "state_code": "TN",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing; 3900 Willow Lake Blvd, P O Box 18361) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/D1B5D4174CCBF10185257038006B9131.0001"
-    ]
-  },
-  {
     "company_name": "Aero-Engines Inc",
     "domain": null,
     "website_url": null,
@@ -519,6 +405,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -538,32 +427,6 @@
     ]
   },
   {
-    "company_name": "Aero-Fab Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Rancho Cucamonga",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, McDonnell Douglas; 8420 Red Oak St) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/672B146384FC6FF58525703B0055E652.0001"
-    ]
-  },
-  {
     "company_name": "Aeroheat Inc",
     "domain": null,
     "website_url": null,
@@ -571,6 +434,9 @@
     "state_code": "OH",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -597,6 +463,9 @@
     "state_code": "OH",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -623,6 +492,9 @@
     "state_code": "MN",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -649,6 +521,9 @@
     "state_code": "KS",
     "country_code": "USA",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -675,6 +550,9 @@
     "state_code": "NC",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -701,6 +579,9 @@
     "state_code": "TX",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -727,6 +608,9 @@
     "state_code": "MO",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -753,6 +637,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "process_only",
     "origins": [
       "discovery",
       "golden_v1"
@@ -771,32 +658,6 @@
     "evidence_urls": []
   },
   {
-    "company_name": "Aerospace Systems & Technologies Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Lawrence",
-    "state_code": "KS",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Beech, Cessna, Commander Aircraft, Mooney Aircraft, SOCATA; 2400 Airport Road Suite 2) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/1896E5BBB0C241A08525703B004FEE77.0001"
-    ]
-  },
-  {
     "company_name": "Ahlers Aerospace Inc",
     "domain": null,
     "website_url": null,
@@ -804,6 +665,9 @@
     "state_code": "TX",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -823,58 +687,6 @@
     ]
   },
   {
-    "company_name": "A & I Products Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Plattsburgh",
-    "state_code": "NY",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Beech, Cessna | Mooney Aircraft | Piper, Piper, Teledyne Continental | Textron Lycoming, Textron Lycoming; 31 Charlotte St) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/F27D4A6EA957426385257038006A77D5.0001"
-    ]
-  },
-  {
-    "company_name": "Air Alliance Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Saint Augustine",
-    "state_code": "FL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, Boeing | McDonnell Douglas, McDonnell Douglas; 6920 Cypress Way Circle) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/EDA3EA4DD4C47A97862576F5005A6FFD.0001"
-    ]
-  },
-  {
     "company_name": "Airbase Services Inc",
     "domain": null,
     "website_url": null,
@@ -882,6 +694,9 @@
     "state_code": "TX",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -908,6 +723,9 @@
     "state_code": "TX",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -934,6 +752,9 @@
     "state_code": "OK",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -960,6 +781,9 @@
     "state_code": "MS",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -979,32 +803,6 @@
     ]
   },
   {
-    "company_name": "Air Tech Coatings LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Lonoke",
-    "state_code": "AR",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: FS 2002 Corporation, McDonnell Douglas Corporation, Taylorcraft | Inc., Taylorcraft 2000 | LLC, The New Piper Aircraft | Inc., The New Piper Aircraft, Inc.; 1759 Staton Roa) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID846507048820220208124919.0001"
-    ]
-  },
-  {
     "company_name": "Airtex Products Inc",
     "domain": null,
     "website_url": null,
@@ -1012,6 +810,9 @@
     "state_code": "PA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -1031,110 +832,6 @@
     ]
   },
   {
-    "company_name": "Akro Fireguard Products Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Lenexa",
-    "state_code": "KS",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus | Boeing | British Aerospace | deHavilland | Embraer Empresa | Fokker | Lockheed | McDonnell Douglas | Saab Aircraft AB, Airbus | Boeing | British Aerospace | Embraer Empresa | Fokker | Lockheed | McDonnell Douglas | Saab Aircraft AB, ATR - GIE Avions de Transport R gional, Boeing, Boeing | Lockheed | McDonnell Douglas | British Aerospace | SAAB | Embraer | Airbus Industrie | Fokker | De Havilland | ATR, Boeing | McDonnell Douglas, Bombardier, Inc., McDonnell Douglas; 9001 Rosehill Rd) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/F25B157BB97359CB86257BA400624BAA.0001"
-    ]
-  },
-  {
-    "company_name": "Albany Aerostructures Composites LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Salt Lake City",
-    "state_code": "UT",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, Boeing | Boeing; 506 N Billy Mitchell Rd) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/0369A9013332DE3C8625847400615026.0001"
-    ]
-  },
-  {
-    "company_name": "American Fuel Cell and Coated Fabrics Co",
-    "domain": null,
-    "website_url": null,
-    "city": "Magnolia",
-    "state_code": "AR",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Piper; 601 Firestone Dr) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/FB43FF922109F90F8525703C0066EAD4.0001"
-    ]
-  },
-  {
-    "company_name": "AMI Aviation Services, LLC dba AeroMech Incorporated",
-    "domain": null,
-    "website_url": null,
-    "city": "Sanford",
-    "state_code": "FL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: BEECHCRAFT, De Havilland Aircraft of Canada Limited, Hawker/Beechcraft, McDonnell Douglas, Piper Aircraft Inc., Robinson, Textron Aviation | Inc., Textron Aviation Inc, Textron Aviation Inc.; 4151 Centerline Lane) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID110255362620260317192953.0001"
-    ]
-  },
-  {
     "company_name": "Amphenol Cable & Interconnect Technologies",
     "domain": null,
     "website_url": null,
@@ -1142,6 +839,9 @@
     "state_code": "WI",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -1161,58 +861,6 @@
     ]
   },
   {
-    "company_name": "AMS Heli Design LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Denison",
-    "state_code": "TX",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Leonardo S.p.a, Leonardo S.p.a., Leonardo S.p.A.; 164 Gosnell Street) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID183612133820250430234740.0001"
-    ]
-  },
-  {
-    "company_name": "Anillo Industries Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Orange",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing; 2090 North Glassell Avenue) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/C0D8DD23CDC247418525703C006B1CCB.0001"
-    ]
-  },
-  {
     "company_name": "Approved Air Parts Company Inc",
     "domain": null,
     "website_url": null,
@@ -1220,6 +868,9 @@
     "state_code": "PA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -1239,32 +890,6 @@
     ]
   },
   {
-    "company_name": "Arconic Fastening Systems & Rings",
-    "domain": null,
-    "website_url": null,
-    "city": "Torrance",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, Boeing Aircraft, CFM International, CFM International S. A., CFM International S.A., CFM International, S.A., GE Engine, GE Engines, General Electric, McDonnell Douglas, P&W Engine, Pratt & Whitney; 3000 W. Lomita Blvd.) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/190DD7B37510A5BB862580CE00748E4F.0001"
-    ]
-  },
-  {
     "company_name": "Arctic Built LLC",
     "domain": null,
     "website_url": null,
@@ -1272,6 +897,9 @@
     "state_code": "AK",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -1298,6 +926,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "process_only",
     "origins": [
       "discovery",
       "golden_v1"
@@ -1323,6 +954,9 @@
     "state_code": "TX",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -1342,32 +976,6 @@
     ]
   },
   {
-    "company_name": "ART Integration Services",
-    "domain": null,
-    "website_url": null,
-    "city": "Peyton",
-    "state_code": "CO",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Robinson; 13555 Piper Lane) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/D03AFF1B55C36E5C86257C850057941B.0001"
-    ]
-  },
-  {
     "company_name": "AstrodyneTDI",
     "domain": null,
     "website_url": null,
@@ -1375,6 +983,9 @@
     "state_code": "NJ",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -1394,58 +1005,6 @@
     ]
   },
   {
-    "company_name": "Astronics Advanced Electronic Systems",
-    "domain": null,
-    "website_url": null,
-    "city": "Kirkland",
-    "state_code": "WA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, Airbus SAS, Boeing, Honda Aircraft Company LLC, MHI RJ Aviation ULC, Mooney, Piper, Piper Aircraft | Inc., Textron Aviation, Textron Aviation | Inc., The Boeing Company; 12950 Willows Road N.E.) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID148452892120250522112643.0001"
-    ]
-  },
-  {
-    "company_name": "Astronics Connectivity Systems and Certification Corp, dba Telefonix, Inc.",
-    "domain": null,
-    "website_url": null,
-    "city": "Waukegan",
-    "state_code": "IL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, Boeing, The Boeing Company, Yaborã Indústria Aeronáutica; 804 S. Northpoint Blvd) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID586955120820220308135600.0001"
-    ]
-  },
-  {
     "company_name": "Aviation Acrylics",
     "domain": null,
     "website_url": null,
@@ -1453,6 +1012,9 @@
     "state_code": "GA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -1479,6 +1041,9 @@
     "state_code": "AZ",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -1505,6 +1070,9 @@
     "state_code": "FL",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -1531,6 +1099,9 @@
     "state_code": "OH",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -1550,110 +1121,6 @@
     ]
   },
   {
-    "company_name": "Aviation Design Services Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Kerrville",
-    "state_code": "TX",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Mooney Aircraft; 2025 Airport Loop) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/E8D24B00927F10BC8625738D004E6B25.0001"
-    ]
-  },
-  {
-    "company_name": "Avidyne Corporation",
-    "domain": null,
-    "website_url": null,
-    "city": "Melbourne",
-    "state_code": "FL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Aermacchi, Aermacchi S.p.A., Aeronautica Macchi S.p.A, Aeronautica Macchi S.p.A. & Aerfer-Industrie S.p.A., Aerostar Aircraft Corporation, Air Tractor Inc., Alexandria Aircraft | LLC(Bellanca), American Champion Aircraft Corp., Aviat Aircraft | Inc., B-N Group Ltd. (Britten-Norman), Bellanca Aircraft Corporation, Bushmaster Aircraft Corporation; 710 North Drive) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID193271621120250917222916.0001"
-    ]
-  },
-  {
-    "company_name": "AVTEC Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Cahokia",
-    "state_code": "IL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Gulfstream, Sabreliner; 3939 Mississippi Ave) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/4A8BE9EB1B64A6E18525703D006944F7.0001"
-    ]
-  },
-  {
-    "company_name": "Ballistic Recovery Systems Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "South St Paul",
-    "state_code": "MN",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Cessna, Cessna Aircraft Company, Symphony Aircraft Industries; 380 Airport Road) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/F4DD23311623204D8625786500588C7E.0001"
-    ]
-  },
-  {
     "company_name": "Barracuda Technologies Inc",
     "domain": null,
     "website_url": null,
@@ -1661,6 +1128,9 @@
     "state_code": "TX",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -1680,32 +1150,6 @@
     ]
   },
   {
-    "company_name": "Barron Aviation LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Perry",
-    "state_code": "MO",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Cessna, Jacobs, Teledyne Continental; 30530 Hwy Y) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/1FDCBC1FE825D1C78525703D0069478F.0001"
-    ]
-  },
-  {
     "company_name": "Basic Aircraft Products",
     "domain": null,
     "website_url": null,
@@ -1713,6 +1157,9 @@
     "state_code": "GA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -1732,84 +1179,6 @@
     ]
   },
   {
-    "company_name": "Basler Turbo Conversions, LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Oshkosh",
-    "state_code": "WI",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, The Boeing Company; 255 W. 35th Avenue) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID166138249720240523123241.0001"
-    ]
-  },
-  {
-    "company_name": "Beacon Aerospace Corp",
-    "domain": null,
-    "website_url": null,
-    "city": "Bloomfield",
-    "state_code": "CT",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: CFM International, General Electric; 85 Granby St) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/611CB59C78295E3E8525703D00694886.0001"
-    ]
-  },
-  {
-    "company_name": "BE Aerospace",
-    "domain": null,
-    "website_url": null,
-    "city": "Medley",
-    "state_code": "FL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, AIRBUS, Boeing, BOEING; 9100 NW 105th Circle) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/048E1C655EA314B986257C2800658B24.0001"
-    ]
-  },
-  {
     "company_name": "B&E Aircraft Component Repair (Cancelled 02/24/2016)",
     "domain": null,
     "website_url": null,
@@ -1817,6 +1186,9 @@
     "state_code": "MA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -1827,8 +1199,8 @@
     "confidence": null,
     "actionability": null,
     "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Rolls Royce PLC; 10 Hudson Drive) — malformed or missing evaluation requires adjudication",
+    "ensemble_confidence": 1,
+    "why_interesting": "FAA PMA holder (makes: Rolls Royce PLC; 10 Hudson Drive) — adjudicated: {\"decision\":\"research\",\"confidence\":1,\"reason\":\"The entity has a history as an FAA PMA holder for high-value engine components. While the PMA is listed as cancelled and the name suggests a repair focus, there is no affirmative negative evidence (such as proof of being a shell or distributor only) to justify rejection. Current status and manufacturing capabilities must be verified via research.\"}",
     "risks": null,
     "unknowns": null,
     "evidence_urls": [
@@ -1843,6 +1215,9 @@
     "state_code": "IN",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -1869,6 +1244,9 @@
     "state_code": "Texas",
     "country_code": "USA",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -1895,6 +1273,9 @@
     "state_code": "NY",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -1921,6 +1302,9 @@
     "state_code": "FL",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -1940,58 +1324,6 @@
     ]
   },
   {
-    "company_name": "Bogert Aviation, Bogert International",
-    "domain": null,
-    "website_url": null,
-    "city": "Pasco",
-    "state_code": "WA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Alexandria Aircraft, American Champion, Cessna, CPAC, Inc, FS2003 Corp., Globe, Hawker Beechcraft, Mooney, Mooney Aircraft, Navion, Piper, Piper | Piper | Piper | Piper | Piper; 3606 North Swallow Avenue) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/3E27025944F6462B862577C2004EA50C.0001"
-    ]
-  },
-  {
-    "company_name": "Bogert Aviation, Inc.",
-    "domain": null,
-    "website_url": null,
-    "city": "Pasco",
-    "state_code": "WA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Cessna, Piper Aircraft, Inc.; 3606 North Swallow Avenue) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/0FD50E6A1D9C60AE86257D38004E2AE7.0001"
-    ]
-  },
-  {
     "company_name": "Brinster Mods, c/o Webco Inc",
     "domain": null,
     "website_url": null,
@@ -1999,6 +1331,9 @@
     "state_code": "TX",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -2018,84 +1353,6 @@
     ]
   },
   {
-    "company_name": "Butler Avionics Inc.",
-    "domain": null,
-    "website_url": null,
-    "city": "New Century",
-    "state_code": "KS",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Learjet; 1 Aero Plaza) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID131028446220260716210950.0001"
-    ]
-  },
-  {
-    "company_name": "Cablecraft Division - Tuthill Corporation",
-    "domain": null,
-    "website_url": null,
-    "city": "Tacoma",
-    "state_code": "WA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, CFM International, CFM INTERNATIONAL, CFM International, S.A.; 4401 South Orchard, PO Box 11372) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/BBF03910A745EEAB8625779A00560041.0001"
-    ]
-  },
-  {
-    "company_name": "Camtronics, LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Tulsa",
-    "state_code": "OK",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: The Boeing Company; 122 West Beechcraft Drive) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/96472819D7907CA88625827500595379.0001"
-    ]
-  },
-  {
     "company_name": "CAP AIR LLC",
     "domain": null,
     "website_url": null,
@@ -2103,6 +1360,9 @@
     "state_code": "OK",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -2122,58 +1382,6 @@
     ]
   },
   {
-    "company_name": "C & B Aviation (CANCELLED)",
-    "domain": null,
-    "website_url": null,
-    "city": "Sturgis",
-    "state_code": "SD",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Lycoming Engine; 13345 Alkali Road) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/E87E79171936B2E686257E820057C917.0001"
-    ]
-  },
-  {
-    "company_name": "C & D Associates Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Buchanan",
-    "state_code": "MI",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Aerostar, Aerostar Aircraft Corporation, B-N Group Ltd., Cessna, Fuji Heavy Industries, Ltd., Pilatus Britten Norman, Piper, Piper Aircraft, Inc., Raytheon, Revo, Inc.; 302 Post Road) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/63B217BD744570A486257F0200636F1D.0001"
-    ]
-  },
-  {
     "company_name": "Certified Technology Inc",
     "domain": null,
     "website_url": null,
@@ -2181,6 +1389,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -2207,6 +1418,9 @@
     "state_code": "CO",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -2233,6 +1447,9 @@
     "state_code": "NV",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -2259,6 +1476,9 @@
     "state_code": "SC",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -2278,32 +1498,6 @@
     ]
   },
   {
-    "company_name": "Classic Aircraft Prod Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Seattle",
-    "state_code": "WA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Lockheed; 6505 Perimeter Rd S) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/EC894476532B1E958525703F004A6202.0001"
-    ]
-  },
-  {
     "company_name": "Cole Instrument Corporation",
     "domain": "cole-switches.com",
     "website_url": "https://cole-switches.com",
@@ -2311,6 +1505,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "process_only",
     "origins": [
       "discovery",
       "golden_v1"
@@ -2329,58 +1526,6 @@
     "evidence_urls": []
   },
   {
-    "company_name": "Cole Krueger Investments, Inc. dba Tanis Aircraft Products",
-    "domain": null,
-    "website_url": null,
-    "city": "Eden Prairie",
-    "state_code": "MN",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: AGUSTA, Continental, Lycoming; 14871 Pioneer Trail, Suite 200) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/CF48152868226FA386257BBB0049C287.0001"
-    ]
-  },
-  {
-    "company_name": "Commercial Aircraft Interiors LLC (CANCELLED 05/05/2011)",
-    "domain": null,
-    "website_url": null,
-    "city": "Burlington",
-    "state_code": "WA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: McDonnell Douglas; 1387 Pacific Drive) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/45786DF19FB1088486257488006025BB.0001"
-    ]
-  },
-  {
     "company_name": "Composite Technology Inc",
     "domain": null,
     "website_url": null,
@@ -2388,6 +1533,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -2414,6 +1562,9 @@
     "state_code": null,
     "country_code": null,
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "discovery"
     ],
@@ -2438,6 +1589,9 @@
     "state_code": null,
     "country_code": null,
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "discovery"
     ],
@@ -2462,6 +1616,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -2488,6 +1645,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -2514,6 +1674,9 @@
     "state_code": "FL",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -2533,32 +1696,6 @@
     ]
   },
   {
-    "company_name": "Curtis Superior Valve Co Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Chandler",
-    "state_code": "AZ",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Continental Engines, ContinentalEngines, ContinentalEnginesContinentalEngines, Lycoming Engines, LycomingEnginesLycomingEnginesLycomingEngines, Piper, Robinson Helicopter, Robinson Helicopter Company; 2330 S. Airport Blvd #1) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID141133512020221017193934.0001"
-    ]
-  },
-  {
     "company_name": "Custom Fiberglass Molding Inc",
     "domain": null,
     "website_url": null,
@@ -2566,6 +1703,9 @@
     "state_code": "WI",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -2592,6 +1732,9 @@
     "state_code": "TX",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -2618,6 +1761,9 @@
     "state_code": "IL",
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "discovery",
       "faa_ensemble",
@@ -2639,32 +1785,6 @@
     ]
   },
   {
-    "company_name": "Daico Industries Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Carson",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: McDonnell Douglas; 1070 E 233RD Street) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/B9C4A15CD3159A618525703E0068F4D1.0001"
-    ]
-  },
-  {
     "company_name": "Dakota Cub Aircraft",
     "domain": null,
     "website_url": null,
@@ -2672,6 +1792,9 @@
     "state_code": "SD",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -2698,6 +1821,9 @@
     "state_code": "AK",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -2724,6 +1850,9 @@
     "state_code": "TX",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -2750,6 +1879,9 @@
     "state_code": "OR",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -2776,6 +1908,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -2795,32 +1930,6 @@
     ]
   },
   {
-    "company_name": "DRI Relays Inc (formerly Deutsch Relays Inc)",
-    "domain": null,
-    "website_url": null,
-    "city": "Hauppauge",
-    "state_code": "NY",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing; 55 Engineers Road) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/6A74A3FE9D9841F58525703F004A616D.0001"
-    ]
-  },
-  {
     "company_name": "Duncan Aviation Inc.",
     "domain": null,
     "website_url": null,
@@ -2828,6 +1937,9 @@
     "state_code": "NE",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -2847,32 +1959,6 @@
     ]
   },
   {
-    "company_name": "Duraflex Fuel Cells (CANCELLED 4/8/1998)",
-    "domain": null,
-    "website_url": null,
-    "city": "Hot Springs",
-    "state_code": "AR",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Beech, Cessna, Cessna | Piper, Piper, Twin Commander; 103 Centennial Dr) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/36D97DAC18A2C622862574390056E42A.0001"
-    ]
-  },
-  {
     "company_name": "Eagle Air Engineering Inc",
     "domain": null,
     "website_url": null,
@@ -2880,6 +1966,9 @@
     "state_code": "WA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -2899,32 +1988,6 @@
     ]
   },
   {
-    "company_name": "Eagle Aviation Graphic",
-    "domain": null,
-    "website_url": null,
-    "city": "Cumberland Gap",
-    "state_code": "TN",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, Boeing, MDA, Bombardier, Cessna, Dassault Aviation, Gulfstream, Gulfstream Aerospace Corporation, Learjet, Learjet Cessna Fairchild Beech, MDA, Saab, SAAB; 391 Underwood Grove Road) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID579183512021102016084001.0001"
-    ]
-  },
-  {
     "company_name": "EarthX, Inc.",
     "domain": null,
     "website_url": null,
@@ -2932,6 +1995,9 @@
     "state_code": "CO",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -2958,6 +2024,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -2977,32 +2046,6 @@
     ]
   },
   {
-    "company_name": "Echo Aerospace LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Mukwonago",
-    "state_code": "WI",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Bombardier, Inc., General Electric Company; 461 River Crest Court, Suite A) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/E2BEA2CF9E615C1386257F6A005D2EF3.0001"
-    ]
-  },
-  {
     "company_name": "EDC",
     "domain": null,
     "website_url": null,
@@ -3010,6 +2053,9 @@
     "state_code": "FL",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -3036,6 +2082,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -3062,6 +2111,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -3088,6 +2140,9 @@
     "state_code": "MI",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -3114,6 +2169,9 @@
     "state_code": "OK",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -3133,58 +2191,6 @@
     ]
   },
   {
-    "company_name": "Erickson Incorporated dba Erickson Air-Crane",
-    "domain": null,
-    "website_url": null,
-    "city": "Central Point",
-    "state_code": "OR",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Bell, BELL, Bell Bell, Bell Bell Bell; 3100 Willow Springs Road) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/90B63BBFE7FEA80D862585E400357EC1.0001"
-    ]
-  },
-  {
-    "company_name": "ETI Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Tulsa",
-    "state_code": "OK",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: International Aero Engines, Pratt & Whitney; 8131 E 46th Street) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID616883955820220208124928.0001"
-    ]
-  },
-  {
     "company_name": "Everpure Inc",
     "domain": null,
     "website_url": null,
@@ -3192,6 +2198,9 @@
     "state_code": "IL",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -3218,6 +2227,9 @@
     "state_code": "WA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -3244,6 +2256,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -3270,6 +2285,9 @@
     "state_code": "WA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -3296,6 +2314,9 @@
     "state_code": "AK",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -3322,6 +2343,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "process_only",
     "origins": [
       "discovery",
       "golden_v1"
@@ -3340,32 +2364,6 @@
     "evidence_urls": []
   },
   {
-    "company_name": "Fliegen Works Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Portland",
-    "state_code": "OR",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus Defense and Space S.A., Bell Helicopter Textron, Boeing, Bombardier, Inc., Cessna, essna, Fliegen Works Inc., Piper Aircraft | Inc., Raytheon, Textron Aviation | Inc., Textron Aviation Inc., Textron Aviation Inc.,; 921 SE 47th Ave) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID358629427020220112165835.0001"
-    ]
-  },
-  {
     "company_name": "Foodservice Technology Corp",
     "domain": null,
     "website_url": null,
@@ -3373,6 +2371,9 @@
     "state_code": "ID",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -3392,32 +2393,6 @@
     ]
   },
   {
-    "company_name": "Forte Product Solutions",
-    "domain": null,
-    "website_url": null,
-    "city": "Farmington",
-    "state_code": "MO",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing; 1601 Airpark Drive) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/E8FD27D17CB50B7586257FCA0052E882.0001"
-    ]
-  },
-  {
     "company_name": "FUTUREFLITE INC",
     "domain": null,
     "website_url": null,
@@ -3425,6 +2400,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -3444,32 +2422,6 @@
     ]
   },
   {
-    "company_name": "Gar-Aero Alaska Tundra Tires",
-    "domain": null,
-    "website_url": null,
-    "city": "Anchor Point",
-    "state_code": "AK",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Cessna | Found Brothers | Piper; 33785 Sand Beach Road) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/5C6EB547919D99D78525703F006692E1.0001"
-    ]
-  },
-  {
     "company_name": "Garlick Helicopters Inc",
     "domain": null,
     "website_url": null,
@@ -3477,6 +2429,9 @@
     "state_code": "MT",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -3496,58 +2451,6 @@
     ]
   },
   {
-    "company_name": "Garrett Aviation Services",
-    "domain": null,
-    "website_url": null,
-    "city": "Los Angeles",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Raytheon; 6201 West Imperial Highway) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/5B29BA2B32141B988525703F00621082.0001"
-    ]
-  },
-  {
-    "company_name": "Gator Aerial Enterprises",
-    "domain": null,
-    "website_url": null,
-    "city": "Winter Haven",
-    "state_code": "FL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Cessna, Rockwell International; 3086 21 St NW Bldg 110C) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/065469B2E6013106852570420058F0E3.0001"
-    ]
-  },
-  {
     "company_name": "GE Aviation Systems LLC",
     "domain": null,
     "website_url": null,
@@ -3555,6 +2458,9 @@
     "state_code": "MI",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -3581,6 +2487,9 @@
     "state_code": "PA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -3600,58 +2509,6 @@
     ]
   },
   {
-    "company_name": "General Pneumatics Inflation Systems LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Sarasota",
-    "state_code": "FL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, McDonnell Douglas; 2236 72nd Ave E) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/919AB8675183CA88862582A6006DF392.0001"
-    ]
-  },
-  {
-    "company_name": "Global Aerospace Technology Corporation",
-    "domain": null,
-    "website_url": null,
-    "city": "Valencia",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, The Boeing Company; 29077 Avenue Penn) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID178115994820231011130909.0001"
-    ]
-  },
-  {
     "company_name": "Globe Fiberglass Ltd Inc",
     "domain": null,
     "website_url": null,
@@ -3659,6 +2516,9 @@
     "state_code": "FL",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -3678,32 +2538,6 @@
     ]
   },
   {
-    "company_name": "Goodrich Corporation Sensors and Integrated Systems",
-    "domain": null,
-    "website_url": null,
-    "city": "Union",
-    "state_code": "WV",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, Boeing; 225 Stringtown Road) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/105F2DD7E2BFA86E86257BC5004A7C4F.0001"
-    ]
-  },
-  {
     "company_name": "Greiner Purtec Inc",
     "domain": null,
     "website_url": null,
@@ -3711,6 +2545,9 @@
     "state_code": "TX",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -3730,110 +2567,6 @@
     ]
   },
   {
-    "company_name": "Griffith Enterprizes Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Cottonwood",
-    "state_code": "AZ",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing; 6000 East Coury Drive) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/9AB5C63095FAFA03852570430054BF2C.0001"
-    ]
-  },
-  {
-    "company_name": "Griggs Aircraft Refinishing LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Tunkhannock",
-    "state_code": "PA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Beechcraft, Cessna, Cessna Aircraft Company, Mooney, Piper; 172 Runway Road) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/9BD9FDE193CB0CC38625827400763922.0001"
-    ]
-  },
-  {
-    "company_name": "Growth Industries Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Grandview",
-    "state_code": "MO",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, Airbus | Airbus, Airbus | Boeing | Lockheed | McDonnell Douglas, Boeing, Boeing | Airbus, Boeing | Lockheed | McDonnell Douglas, Boeing | McDonnell Douglas, Embraer Empresa, Fokker, Lockheed, Lockheed | McDonnell Douglas, McDonnell Douglas; 12523 Third Street) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID197429648120241030141811.0001"
-    ]
-  },
-  {
-    "company_name": "Harlow Aerostructures LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Wichita",
-    "state_code": "KS",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Daher Aerospace, Daher-Socata; 1501 S. McLean Boulevard) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID118546379920220923102857.0001"
-    ]
-  },
-  {
     "company_name": "Hartzell Engine Technologies LLC",
     "domain": null,
     "website_url": null,
@@ -3841,6 +2574,9 @@
     "state_code": "AL",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -3860,32 +2596,6 @@
     ]
   },
   {
-    "company_name": "Helicomb International Inc (SURRENDERED 7/6/2016)",
-    "domain": null,
-    "website_url": null,
-    "city": "Tulsa",
-    "state_code": "OK",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Bell, BELL, Eurocopter France; 1402 S 69th East Ave) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DC05A1D83CE1FE708625741E00664283.0001"
-    ]
-  },
-  {
     "company_name": "Honeywell Aerospace US LLC",
     "domain": null,
     "website_url": null,
@@ -3893,6 +2603,9 @@
     "state_code": "AZ",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -3919,6 +2632,9 @@
     "state_code": "AZ",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -3945,6 +2661,9 @@
     "state_code": "OH",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -3971,6 +2690,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -3997,6 +2719,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -4023,6 +2748,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "high_interest",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -4042,58 +2770,6 @@
     ]
   },
   {
-    "company_name": "Hughes Avicom Intn'l",
-    "domain": null,
-    "website_url": null,
-    "city": "Pomona",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, Airbus | Boeing, Boeing, Boeing | Lockheed, Boeing | McDonnell Douglas, Bombardier, Inc., Lockheed, McDonnell Douglas; 2001 W Mission Blvd) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/18F19056ABDA6D0F852570440050242A.0001"
-    ]
-  },
-  {
-    "company_name": "Icarus Instruments Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Hunt Valley",
-    "state_code": "MD",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Aermacchi S.p.A. | Aero Commander | Aeronautica Macchi | Aerostar Aircraft | Alexandria Aircraft LLC | Aviat | Bellanca | Britten Norman | Bushmaster | Cessna | Cirrus Design Corporation | Columbia Aircraft Manufacturing | Commander Aircraft | Bombardier, Inc. | Diamond Aircraft | Embraer Empresa | M7 Aerospace LP | Found Aircraft Canada Inc | Grob | Tiger Aircraft | Gulfstream | Helio Aircraft | Revo | Learjet | Lockheed | Maule | Mitsubishi | Mooney Aircraft | Moravan | Navion Aircraft | Rockwell International | Symphony Aircraft Industries Inc | Vulcanair S.p.A. | Piaggio | Pilatus Aircraft | Piper | Prop-Jets | Raytheon | Short Brothers | SOCATA | Stinson | Tiger Aircraft | Twin Commander, Cessna, Sikorsky; 10948C Beaver Dam Rd) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/13BE6728D26D6738862573480052C8F1.0001"
-    ]
-  },
-  {
     "company_name": "Impact Dynamics Inc",
     "domain": null,
     "website_url": null,
@@ -4101,6 +2777,9 @@
     "state_code": "KS",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -4120,110 +2799,6 @@
     ]
   },
   {
-    "company_name": "International Aero Interiors",
-    "domain": null,
-    "website_url": null,
-    "city": "Burlington",
-    "state_code": "WA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, General Dynamics, Kelowna Flightcraft R & D, McDonnell Douglas, McDonnell Douglas | McDonnell Douglas; 11817 Westar Lane) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/ABD78659CA6E5CA686257583006A7AF2.0001"
-    ]
-  },
-  {
-    "company_name": "Isham Aircraft",
-    "domain": null,
-    "website_url": null,
-    "city": "Valley Center",
-    "state_code": "KS",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Cessna, Piper, Teledyne Continental; PO Box 193) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/1C43AF5D62F7646B8525704400537EFB.0001"
-    ]
-  },
-  {
-    "company_name": "Jacman Aircraft Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Chatsworth",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Aerospatiale, Boeing, Boeing | McDonnell Douglas, McDonnell Douglas; 8950 Fullbright Avenue) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/181F6A8E1095E6EB852570440056B053.0001"
-    ]
-  },
-  {
-    "company_name": "Jamco America Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Everett",
-    "state_code": "WA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, AIRBUS, Airbus S.A.S., Airbus SAS, Boeing, BOEING, Boeing | deHavilland, Bombardier, Inc., MAKE ELIGIBILITY, McDonnell Douglas, The Boeing Company; 1018 80th Street SW) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID188562279820260407134723.0001"
-    ]
-  },
-  {
     "company_name": "Jay- Em Aerospace Corporation",
     "domain": "jay-em.com",
     "website_url": "https://jay-em.com",
@@ -4231,6 +2806,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "process_only",
     "origins": [
       "discovery",
       "golden_v1"
@@ -4256,6 +2834,9 @@
     "state_code": "FL",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -4282,6 +2863,9 @@
     "state_code": "NY",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -4308,6 +2892,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "discovery",
       "golden_v1"
@@ -4326,110 +2913,6 @@
     "evidence_urls": []
   },
   {
-    "company_name": "JET-TECH ENGINEERING INC",
-    "domain": null,
-    "website_url": null,
-    "city": "Ft. Lauderdale",
-    "state_code": "FL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Bombardier Inc, Dassault Aviation, Gulfstream Aerospace Corporation, Gulfstream Aerospace LP, Learjet, Learjet Inc., MHI RJ Aviation ULC, Textron Aviation Inc.; 6701B NW 12th Avenue) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID183390918720240419110250.0001"
-    ]
-  },
-  {
-    "company_name": "JJASPP ENGINEERING SERVICES, LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Burleson",
-    "state_code": "TX",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Agusta, AGUSTA S.p.A., Airbus Helicopters, Airbus Helicopters Deutschland GmbH, Eurocopter Deutschland GmbH, Eurocopter Deutschland GMBH; 12609 Wildcat Way North Hangar 33) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/D07645919FFF2EBF86257F5600588562.0001"
-    ]
-  },
-  {
-    "company_name": "J & L Avionics Engineering Svc Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Miami",
-    "state_code": "FL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, Boeing, McDonnell Douglas; 13501 SW 128th Street #105) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/5C01250CCBF5374F852570440055BB3C.0001"
-    ]
-  },
-  {
-    "company_name": "J. L. Osborne Inc.",
-    "domain": null,
-    "website_url": null,
-    "city": "Victorville",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Piper Aircraft, Inc; 18173 Osborne Rd.) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/D1F2063441566A14862580F400660A59.0001"
-    ]
-  },
-  {
     "company_name": "John Jewell Aircraft, Inc.",
     "domain": null,
     "website_url": null,
@@ -4437,6 +2920,9 @@
     "state_code": "MS",
     "country_code": "US",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -4463,6 +2949,9 @@
     "state_code": "CT",
     "country_code": "United States",
     "tier": "high_interest",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -4489,6 +2978,9 @@
     "state_code": "UT",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -4508,32 +3000,6 @@
     ]
   },
   {
-    "company_name": "Kaiser Marquardt",
-    "domain": null,
-    "website_url": null,
-    "city": "Van Nuys",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: McDonnell Douglas; 16555 Saticoy St) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/A0B75AB4B214A1ED8525704400538012.0001"
-    ]
-  },
-  {
     "company_name": "Kamatics Corporation",
     "domain": null,
     "website_url": null,
@@ -4541,6 +3007,9 @@
     "state_code": "CT",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -4567,6 +3036,9 @@
     "state_code": "AL",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -4586,32 +3058,6 @@
     ]
   },
   {
-    "company_name": "Kirkhill Aircraft Parts Co. dba Proponent",
-    "domain": null,
-    "website_url": null,
-    "city": "Brea",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, Boeing, Pratt & Whitney; 3120 E Enterprise St) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/F455660FC689D31E862586030037F57C.0001"
-    ]
-  },
-  {
     "company_name": "Kirst Aviation",
     "domain": null,
     "website_url": null,
@@ -4619,6 +3065,9 @@
     "state_code": "AK",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -4638,32 +3087,6 @@
     ]
   },
   {
-    "company_name": "Kontron America Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "SAN DIEGO",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, Boeing, BOEING, Embraer, Embraer S.A., The Boeing Company; 9477 WAPLES ST Suite #150) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID166416453820260705232800.0001"
-    ]
-  },
-  {
     "company_name": "L2 Consulting Services Inc",
     "domain": null,
     "website_url": null,
@@ -4671,6 +3094,9 @@
     "state_code": "TX",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -4697,6 +3123,9 @@
     "state_code": "MN",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -4716,162 +3145,6 @@
     ]
   },
   {
-    "company_name": "Lamar Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Rancocas",
-    "state_code": "NJ",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Piper; 71 Indel Ave, PO Box 251) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DAF6C669D703835185257045006347D8.0001"
-    ]
-  },
-  {
-    "company_name": "Latecoere Interconnection Systems US Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Redmond",
-    "state_code": "WA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing; 18047 NE 68th Street Suite B130) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID146834975720220615163015.0001"
-    ]
-  },
-  {
-    "company_name": "LH Thomson Company Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Macon",
-    "state_code": "GA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing; 7800 Northeast Industrial Blvd) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/40C1B85F1337F2C9852570450058C224.0001"
-    ]
-  },
-  {
-    "company_name": "Life",
-    "domain": null,
-    "website_url": null,
-    "city": "Brandon",
-    "state_code": "MS",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Air Tractor, Air Tractor | Allied Ag Cat | Ayres | Cessna | Wytwornia, Air Tractor | Wytwornia; 624 Tenby Court) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/02015DFB5CAA53BA8525704600599AF0.0001"
-    ]
-  },
-  {
-    "company_name": "Limco-Airepair Inc. d/b/a Aeroduct International",
-    "domain": null,
-    "website_url": null,
-    "city": "Tulsa",
-    "state_code": "OK",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, Boeing, McDonnell Douglas; 5304 S Lawton Ave) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/857C2D7047544EC986257348006AC951.0001"
-    ]
-  },
-  {
-    "company_name": "Lite Air Aviation Products Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Anacortes",
-    "state_code": "WA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing; 7001 Palm Lane) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/E6257FEE205F83A486257AE90067FB2A.0001"
-    ]
-  },
-  {
     "company_name": "Livingston Industries Inc",
     "domain": null,
     "website_url": null,
@@ -4879,6 +3152,9 @@
     "state_code": null,
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -4905,6 +3181,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -4931,6 +3210,9 @@
     "state_code": "TN",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -4957,6 +3239,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -4976,32 +3261,6 @@
     ]
   },
   {
-    "company_name": "LP Aero Plastics Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Jeannette",
-    "state_code": "PA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Aero Commander, Aeronca, Aerostar Aircraft, Air Tractor, Aircraft Parts & Development, American Champion, Ayres, B-N Group, Beech, Beechcraft, Bellanca, Britten Norman; 1086 Boquet Road) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/12B74C097445267786258558003DD309.0001"
-    ]
-  },
-  {
     "company_name": "LW Aerospace Solutions LLC",
     "domain": null,
     "website_url": null,
@@ -5009,6 +3268,9 @@
     "state_code": "VA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -5028,32 +3290,6 @@
     ]
   },
   {
-    "company_name": "M-20 Oil Separators LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Boca Raton",
-    "state_code": "FL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Aeronca | Aerostar Aircraft | Air Tractor | Alliance Aircraft | Allied AG CAT | American Champion | Bell | Bellanca | Bohica | Brantly Helicopters | Britten Norman | Cessna | Cirrus Design Corporation | Commander Aircraft | Consolidated Vultee Aircraft Corp | Curtiss-Wright Corp. | Enstrom | Estumkeda | Grumman | Gulfstream | Hiller Aviation | Jobmaster | Lancair | LATINOAMERICANA DE AVIACION | Luscombe | Maule | McClish | Mooney Aircraft | Naval Aircraft Factory | Navion Aircraft | Omega Aircraft Corporation | Partenavia | Pilatus Britten-Norman | Piper | Rankin, Joe | Raytheon | Revo | Robinson Helicopter | Scheutzow Helicopter Corporation | Schweizer | Sky Enterprises | Sky International | Slingsby Aviation | SOCATA | Stol | Swift Museum | Taylorcraft | Tiger Aircraft | Twin Commander | Univair Aircraft Corp; 5612 NW 38th Terrace) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/5682F8155CD6FB10852570490054D746.0001"
-    ]
-  },
-  {
     "company_name": "Magellan Aerospace New York Inc (Surrendered)",
     "domain": null,
     "website_url": null,
@@ -5061,6 +3297,9 @@
     "state_code": "NY",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -5087,6 +3326,9 @@
     "state_code": "AR",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -5113,6 +3355,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "process_only",
     "origins": [
       "discovery",
       "golden_v1"
@@ -5138,6 +3383,9 @@
     "state_code": "GA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -5164,6 +3412,9 @@
     "state_code": "OH",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -5190,6 +3441,9 @@
     "state_code": "IN",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -5209,32 +3463,6 @@
     ]
   },
   {
-    "company_name": "Mid-State Aerospace Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Olathe",
-    "state_code": "KS",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing; 710 N Lindenwood Dr) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/1067CC318D8DC40E852570490054D3C7.0001"
-    ]
-  },
-  {
     "company_name": "Midwest Aero Support Inc",
     "domain": null,
     "website_url": null,
@@ -5242,6 +3470,9 @@
     "state_code": "IL",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -5268,6 +3499,9 @@
     "state_code": "WA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -5287,58 +3521,6 @@
     ]
   },
   {
-    "company_name": "Monogram Systems, TIA Division",
-    "domain": null,
-    "website_url": null,
-    "city": "Sterling",
-    "state_code": "VA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, Airbus A46NM, Airbus A58NM, ATR A53EU, Boeing, Boeing A16WE, Boeing A1NM, Bombardier, Bombardier, Inc., British Aerospace, Dassault Aviation, Dehavilland; 44931 Falcon Place) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/038DC85937966F8F862580890054E2A7.0001"
-    ]
-  },
-  {
-    "company_name": "Moog Aircraft Group (Surrendered 8/15/2012)",
-    "domain": null,
-    "website_url": null,
-    "city": "Torrance",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: BOEING; 20263 Western Ave) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/FC15286755FCA48D86257C86004F85FB.0001"
-    ]
-  },
-  {
     "company_name": "MP AERO LLC",
     "domain": "mpaero.com",
     "website_url": "https://mpaero.com",
@@ -5346,6 +3528,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "high_interest",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "discovery"
     ],
@@ -5370,6 +3555,9 @@
     "state_code": "KY",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -5389,84 +3577,6 @@
     ]
   },
   {
-    "company_name": "MSI Avionics Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Phoenix",
-    "state_code": "AZ",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Commander Aircraft; 2817 W Acoma) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/426217F4478D1496852570460060DB14.0001"
-    ]
-  },
-  {
-    "company_name": "Multisciences Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Bellingham",
-    "state_code": "WA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Viking Air Limited; 4550 Wynn Rd.) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID991098354120210819210945.0001"
-    ]
-  },
-  {
-    "company_name": "N23D Services LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Pembroke Pines",
-    "state_code": "FL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Aerospatiale, Airbus, Airbus SAS, AirbusBombardier, ATR, ATR – GIE Avions de Transport Régional, Beechcraft, Beechcraft/Textron, Boeing, BOEING, Bombardier, BOMBARDIER; 20974 Sheridan St) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID104944798420240924151532.0001"
-    ]
-  },
-  {
     "company_name": "NHBB HiTech Division",
     "domain": null,
     "website_url": null,
@@ -5474,6 +3584,9 @@
     "state_code": "NH",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -5493,110 +3606,6 @@
     ]
   },
   {
-    "company_name": "NIACC-Avitech Technologies",
-    "domain": null,
-    "website_url": null,
-    "city": "Clovis",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Bombardier, Inc.; 245 W. Dakota Ave.) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/8209856440B31E6986257BB100415D30.0001"
-    ]
-  },
-  {
-    "company_name": "Ni-Cad Systems Inc.",
-    "domain": null,
-    "website_url": null,
-    "city": "Dayton",
-    "state_code": "NV",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: McDonnell Douglas; 101 Evans Ave) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/640E911896E587778525703F004A613D.0001"
-    ]
-  },
-  {
-    "company_name": "Nordam Transparency Div",
-    "domain": null,
-    "website_url": null,
-    "city": "Tulsa",
-    "state_code": "OK",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Aerospatiale, Airbus, AIRBUS, Beech, Bell, BELL, Boeing, BOEING, Boeing | McDonnell Douglas, Bombardier, Inc., British Aerospace, deHavilland; 7018 N Lakewood) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/2580149E5F402DDF862576CC005DD83A.0001"
-    ]
-  },
-  {
-    "company_name": "Northern Piper Aviation Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Anchorage",
-    "state_code": "AK",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Piper; 7312 Tarsus Drive) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/3525EB4ECE1B04FA852570490056D4BB.0001"
-    ]
-  },
-  {
     "company_name": "North Star Aviation Inc",
     "domain": null,
     "website_url": null,
@@ -5604,6 +3613,9 @@
     "state_code": "KS",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -5630,6 +3642,9 @@
     "state_code": "OH",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -5656,6 +3671,9 @@
     "state_code": "CO",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -5675,32 +3693,6 @@
     ]
   },
   {
-    "company_name": "ONTIC Engineering & Manufacturing Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Chatsworth",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Aero Commander, Aerostar Aircraft, Aerostar Aircraft | Piper, Air Tractor, Air Tractor, Inc., Airbus, Airbus Helicopters Deutschland GmbH (AHD), Aircraft Parts & Development, American Champion, Aviat Aircraft, Aviat Aircraft, Inc., BAE Systems; 20400 Plummer Street) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID159812657220251205184936.0001"
-    ]
-  },
-  {
     "company_name": "Oregon Aircraft Design",
     "domain": null,
     "website_url": null,
@@ -5708,6 +3700,9 @@
     "state_code": "OR",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -5734,6 +3729,9 @@
     "state_code": "AZ",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -5760,6 +3758,9 @@
     "state_code": "CO",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -5779,32 +3780,6 @@
     ]
   },
   {
-    "company_name": "Parts Network II The",
-    "domain": null,
-    "website_url": null,
-    "city": "Costa Mesa",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Piper, Textron Lycoming; 3198-E Airport Loop Drive) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/663A95CE8A4623268525704A0053D4FE.0001"
-    ]
-  },
-  {
     "company_name": "Peak Air Parts",
     "domain": null,
     "website_url": null,
@@ -5812,6 +3787,9 @@
     "state_code": "CO",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -5838,6 +3816,9 @@
     "state_code": "OR",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -5857,32 +3838,6 @@
     ]
   },
   {
-    "company_name": "Pemco Engineers, A Precision Standard Co",
-    "domain": null,
-    "website_url": null,
-    "city": "Corona",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus | Boeing | Bombardier, Inc. | Lockheed | McDonnell Douglas, Boeing, Boeing | McDonnell Douglas, General Dynamics, Lockheed, McDonnell Douglas, Mitsubishi; 2398 Railroad Street) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/66626CA5799641678525704A00557C2D.0001"
-    ]
-  },
-  {
     "company_name": "Penn Yan Aero (CANCELLED)",
     "domain": null,
     "website_url": null,
@@ -5890,6 +3845,9 @@
     "state_code": "NY",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -5909,32 +3867,6 @@
     ]
   },
   {
-    "company_name": "Phoenix Aerospace Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Kansas City",
-    "state_code": "MO",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Air Tractor, Air Tractor | Ayres | Bell, Ayres, Beech | Cessna, Beech | Wytwornia, Bell, Bombardier, Inc., Cessna, Construcciones, Construcciones | Lockheed, deHavilland, Eurocopter France; 220 W 80th Terrace, PO Box 8744) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/64F483642ACE1E948525704A005D694B.0001"
-    ]
-  },
-  {
     "company_name": "Pickering Aviation Inc",
     "domain": null,
     "website_url": null,
@@ -5942,6 +3874,9 @@
     "state_code": "TX",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -5968,6 +3903,9 @@
     "state_code": "GA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -5987,111 +3925,6 @@
     ]
   },
   {
-    "company_name": "Precise Flight Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Bend",
-    "state_code": "OR",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Aerostar Aircraft, Allied Ag Cat | Messerschmitt-Bolkow-Blohm GmbH | Swift Museum | Thompson, Jimmie | White International, Beech, Beech | Cessna | Mooney Aircraft, Bell, Boeing, Bombardier, Inc., Cessna, Lancair, Miscellaneous, Miscellaneous | Mooney Aircraft | Teledyne Continental | Textron Lycoming, Mooney Aircraft; 63354 Powell Butte Hwy) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/8E96316BF9F458A486257A9500542794.0001",
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID729416487320210811194418.0001"
-    ]
-  },
-  {
-    "company_name": "Precision Components Technology",
-    "domain": null,
-    "website_url": null,
-    "city": "El Cajon",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, CFM International, CFM INTERNATIONAL, General Electric, McDonnell Douglas, Pratt & Whitney, Pratt & Whitney Canada; 965 Industrial Place) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/D73D7E2E8A493AC38625760B00580307.0001"
-    ]
-  },
-  {
-    "company_name": "Precision Conversions LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Beaverton",
-    "state_code": "OR",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing; 9800 S.W. Nimbus Ave) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/FAC881AE79359F4E862585A80037479C.0001"
-    ]
-  },
-  {
-    "company_name": "Primex Aerospace Company",
-    "domain": null,
-    "website_url": null,
-    "city": "Redmond",
-    "state_code": "WA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, Airbus | Boeing, Airbus | Boeing | McDonnell Douglas, Boeing, Boeing | McDonnell Douglas, McDonnell Douglas; 9845 Willows Road NE) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/F889F0CF2A896C9085257049005CC307.0001"
-    ]
-  },
-  {
     "company_name": "PS Engineering Inc",
     "domain": null,
     "website_url": null,
@@ -6099,6 +3932,9 @@
     "state_code": "TN",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -6125,6 +3961,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -6151,6 +3990,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "high_interest",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -6170,58 +4012,6 @@
     ]
   },
   {
-    "company_name": "Pye & Hogan Machine Co",
-    "domain": null,
-    "website_url": null,
-    "city": "Old Saybrook",
-    "state_code": "CT",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Pratt & Whitney; 167-1 Elm Street, PO Box AU) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/D27782E61A7DACA68525704A005B1E21.0001"
-    ]
-  },
-  {
-    "company_name": "Pyka Aerospace Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "San Antonio",
-    "state_code": "TX",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, McDonnell Douglas, Raytheon; 11216 Disco) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/C566DC554D156E148625715C004873E4.0001"
-    ]
-  },
-  {
     "company_name": "QUEST AVIATION SUPPLY, INC.",
     "domain": null,
     "website_url": null,
@@ -6229,6 +4019,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -6255,6 +4048,9 @@
     "state_code": "FL",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -6281,6 +4077,9 @@
     "state_code": null,
     "country_code": null,
     "tier": "high_interest",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "discovery"
     ],
@@ -6298,32 +4097,6 @@
     "evidence_urls": []
   },
   {
-    "company_name": "Rapco Inc.",
-    "domain": null,
-    "website_url": null,
-    "city": "Hartland",
-    "state_code": "WI",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Aerostar Aircraft Corporation, Air Tractor | Inc., Aircraft Parts & Development Corp., Allied Ag Cat Productions | Inc., American Champion Aircraft Corp., Aviat Aircraft Inc., Bellanca Aircraft | Inc., BlanchAir LLC, Britten-Norman Aerospace Ltd., Cirrus Design Corporation, Commander Aircraft Corporation, Daher; 445 Cardinal Lane) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID104941733720260722154727.0001"
-    ]
-  },
-  {
     "company_name": "Rapco Inc (SURRENDERED)",
     "domain": null,
     "website_url": null,
@@ -6331,6 +4104,9 @@
     "state_code": "WI",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -6350,84 +4126,6 @@
     ]
   },
   {
-    "company_name": "Raven Aviation LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Kernville",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Maule, Piper, Piper Aircraft, Inc; Kern Valley Airport, 10649 Sierra Way) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/904C2858042E944B86257B4F00518375.0001"
-    ]
-  },
-  {
-    "company_name": "RdF Corporation",
-    "domain": null,
-    "website_url": null,
-    "city": "Hudson",
-    "state_code": "NH",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Pratt & Whitney, Pratt & Whitney Canada; 23 Elm Avenue, PO Box 490) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/61743AA0CA948D7385257049005DA027.0001"
-    ]
-  },
-  {
-    "company_name": "Reabe Aircraft Improvement Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "DePere",
-    "state_code": "WI",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Air Tractor, Bell, Robinson, Thrush, Thrush Aircraft, Inc.; 2160 Greenleaf Rd) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID183578880420210617201003.0001"
-    ]
-  },
-  {
     "company_name": "Regional Airline Parts Support Company (RAPSCO)",
     "domain": null,
     "website_url": null,
@@ -6435,6 +4133,9 @@
     "state_code": "TX",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -6461,6 +4162,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -6480,32 +4184,6 @@
     ]
   },
   {
-    "company_name": "Rexnord Industries, LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Downers Grove",
-    "state_code": "IL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: 328 Support Services GmBH | Dassault Aviation | Bombardier | Embraer | BAe Systems Ltd, Airbus, Atrbus, BAE Systems, Boeing, Boeing | British Aerospace Airbus Ltd | McDonnell Douglas, Bombardier, Cessna, CFM International, S.A., Dassault, Dassualt, Fokker Service B.V.; 2400 Curtiss Street) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID329207193420211104130245.0001"
-    ]
-  },
-  {
     "company_name": "Rimark Manufacturing",
     "domain": null,
     "website_url": null,
@@ -6513,6 +4191,9 @@
     "state_code": "CT",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -6539,6 +4220,9 @@
     "state_code": "OK",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -6558,32 +4242,6 @@
     ]
   },
   {
-    "company_name": "Rockwell Collins Electromechanical Systems (formerly Kaiser Electroprecision)",
-    "domain": null,
-    "website_url": null,
-    "city": "Irvine",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Aerospatiale, Airbus, Boeing, Bombardier, Inc., British Aerospace, Fokker, Lockheed, McDonnell Douglas, Saab Aircraft AB; 17000 South Red Hill Avenue) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/61ED0A190BD34D85862571950071B4AD.0001"
-    ]
-  },
-  {
     "company_name": "Romco Manufacturing",
     "domain": "romco.net",
     "website_url": "https://romco.net",
@@ -6591,6 +4249,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "process_only",
     "origins": [
       "discovery",
       "golden_v1"
@@ -6616,6 +4277,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "process_only",
     "origins": [
       "discovery",
       "golden_v1"
@@ -6641,6 +4305,9 @@
     "state_code": "MN",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -6667,6 +4334,9 @@
     "state_code": "CT",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -6686,58 +4356,6 @@
     ]
   },
   {
-    "company_name": "Rotor Wing Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Mount Olive",
-    "state_code": "AL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: MD Helicopters, Inc.; PO Box 130) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/50354B7AAAA0128C8525704C005638A7.0001"
-    ]
-  },
-  {
-    "company_name": "Royal Air Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Waterford",
-    "state_code": "MI",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Dassault Aviation, Learjet; 2141 Airport Road) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/78BCEA238C2375A7862576F6004ED9FD.0001"
-    ]
-  },
-  {
     "company_name": "Royal Atlantic Aviation",
     "domain": null,
     "website_url": null,
@@ -6745,6 +4363,9 @@
     "state_code": "FL",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -6764,32 +4385,6 @@
     ]
   },
   {
-    "company_name": "RPMCommander LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Pompano Beach",
-    "state_code": "FL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Aero Commander, Lycoming, Rockwell; 1401 . Riverside Dr 607 Door Code 54) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/C87D669447935DD186257CBA004EDA2D.0001"
-    ]
-  },
-  {
     "company_name": "RW Martin",
     "domain": null,
     "website_url": null,
@@ -6797,6 +4392,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -6816,58 +4414,6 @@
     ]
   },
   {
-    "company_name": "Safeway Products Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Middletown",
-    "state_code": "CT",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Aerospace Technologies | Beech | British Aerospace | Cessna | Construcciones | deHavilland | Embraer Empresa | Fairchild Aircraft | Israel | Mitsubishi | Pilatus Aircraft | Piper | Short Brothers | Twin Commander, Cessna, Dowty Rotol, Hamilton Standard Division, Hartzell, McCauley; 440 Middlefield St) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/D7BC586C61316BA58525704C005638C1.0001"
-    ]
-  },
-  {
-    "company_name": "SAF Industries LLC dba Gar-Kenyon Technologies",
-    "domain": null,
-    "website_url": null,
-    "city": "Meriden",
-    "state_code": "CT",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, Commander Aircraft Corporation, Piper, Piper Aircraft; 106 Evansville Ave) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/B28654538F1D46CF8625806D005DC8A0.0001"
-    ]
-  },
-  {
     "company_name": "Sagem Avionics, LLC",
     "domain": null,
     "website_url": null,
@@ -6875,6 +4421,9 @@
     "state_code": "TX",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -6894,32 +4443,6 @@
     ]
   },
   {
-    "company_name": "Saint-Gobain Performance Plastics",
-    "domain": null,
-    "website_url": null,
-    "city": "Puyallup",
-    "state_code": "WA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing; 507 North Levee Road) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/5A519BA4A7EE7BE18625808F0068D1EB.0001"
-    ]
-  },
-  {
     "company_name": "Sandia Aerospace",
     "domain": null,
     "website_url": null,
@@ -6927,6 +4450,9 @@
     "state_code": "NM",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -6953,6 +4479,9 @@
     "state_code": "WA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -6972,58 +4501,6 @@
     ]
   },
   {
-    "company_name": "Sensata Technologies",
-    "domain": null,
-    "website_url": null,
-    "city": "Attleboro",
-    "state_code": "MA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, McDonnell Douglas; 529 Pleasant Street) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/875703B2FE5A402E8625728A006083B7.0001"
-    ]
-  },
-  {
-    "company_name": "Servicenter Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Bethany",
-    "state_code": "OK",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Israel, Israel Aircraft Industries, Twin Commander; 7301 NW 50th Street) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/0C8259D1481DB4B7862577210041F789.0001"
-    ]
-  },
-  {
     "company_name": "Servotronics, Inc.",
     "domain": "servotronics.com",
     "website_url": "https://servotronics.com",
@@ -7031,6 +4508,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "process_only",
     "origins": [
       "discovery",
       "golden_v1"
@@ -7049,84 +4529,6 @@
     "evidence_urls": []
   },
   {
-    "company_name": "Seven Q Seven Ltd",
-    "domain": null,
-    "website_url": null,
-    "city": "San Antonio",
-    "state_code": "TX",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing; 9023 Wetmore Road) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/55DAA6B82E1BB7C68625787700646A7C.0001"
-    ]
-  },
-  {
-    "company_name": "Shapes Aerospace International",
-    "domain": null,
-    "website_url": null,
-    "city": "Palm Bay",
-    "state_code": "FL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, Dassault, Dassault Aviation, Dassault Revision; 1415 Foundation Park Blvd.) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/B6C08E77F26A3D3C86257A9A006B04FD.0001"
-    ]
-  },
-  {
-    "company_name": "Simula Aerospace and Defense Group Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Phoenix",
-    "state_code": "AZ",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Eurocopter Deutschland; 7822 S 46th Street) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/F364062869D1126C862572120069BFB3.0001"
-    ]
-  },
-  {
     "company_name": "Skybolt Aerospace Fasteners",
     "domain": "skybolt.com",
     "website_url": null,
@@ -7134,6 +4536,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "discovery",
       "golden_v1"
@@ -7159,6 +4564,9 @@
     "state_code": "CT",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -7185,6 +4593,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -7211,6 +4622,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "discovery",
       "golden_v1"
@@ -7236,6 +4650,9 @@
     "state_code": "AZ",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -7262,6 +4679,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -7288,6 +4708,9 @@
     "state_code": "WA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -7307,58 +4730,6 @@
     ]
   },
   {
-    "company_name": "Southern Aeroparts AMETEK Aerospace and Defense",
-    "domain": null,
-    "website_url": null,
-    "city": "Tulsa",
-    "state_code": "OK",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, Airbus SAS, Boeing, Bombardier Inc., Bombardier, Inc., General Electric, General Electric Co., McDonnell Douglas, The Boeing Company; 4085 Southwest Blvd) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID110994341620260605135132.0001"
-    ]
-  },
-  {
-    "company_name": "Southwest Aero-Mods Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "San Antonio",
-    "state_code": "TX",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Piper; 7215 Callaghan Rd) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/9592D36206C02B9F8525704B005B363D.0001"
-    ]
-  },
-  {
     "company_name": "Southwest Antennas",
     "domain": "southwestantennas.com",
     "website_url": "https://southwestantennas.com",
@@ -7366,6 +4737,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "process_only",
     "origins": [
       "discovery",
       "golden_v1"
@@ -7391,6 +4765,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -7417,6 +4794,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -7443,6 +4823,9 @@
     "state_code": "PA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -7462,58 +4845,6 @@
     ]
   },
   {
-    "company_name": "SuperiAire Technologies",
-    "domain": null,
-    "website_url": null,
-    "city": "Albuquerque",
-    "state_code": "NM",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Aerostar International Inc., Miscellaneous; 121 Mountain Park Place) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/5C4A65C2CB4FF72B86257D510058B994.0001"
-    ]
-  },
-  {
-    "company_name": "SwisTurbine Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Ludlow",
-    "state_code": "MA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, Bombardier, Bombardier, Inc., Canadair, CFM International, General Electric, International Aero Engines, Pratt & Whitney, Pratt & Whitney Canada; 40 Ravenwood Drive) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/8004CB37EF732981862576C5004FBDC7.0001"
-    ]
-  },
-  {
     "company_name": "Symetrics Inc",
     "domain": null,
     "website_url": null,
@@ -7521,6 +4852,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -7540,32 +4874,6 @@
     ]
   },
   {
-    "company_name": "Systron Donner, Safety System Division",
-    "domain": null,
-    "website_url": null,
-    "city": "Concord",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: McDonnell Douglas; 2731 Systron Drive) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/30AEAB313BE42FDC8525704C005DF67E.0001"
-    ]
-  },
-  {
     "company_name": "Tavco Inc",
     "domain": null,
     "website_url": null,
@@ -7573,6 +4881,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -7599,6 +4910,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -7618,32 +4932,6 @@
     ]
   },
   {
-    "company_name": "Technetics Corp",
-    "domain": null,
-    "website_url": null,
-    "city": "Deland",
-    "state_code": "FL",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing; 1600 Industrial Dr) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/77ABF7FB6B917F4D8525704C0058AA5F.0001"
-    ]
-  },
-  {
     "company_name": "Telefonix, Incorporated",
     "domain": null,
     "website_url": null,
@@ -7651,6 +4939,9 @@
     "state_code": "IL",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -7677,6 +4968,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "discovery",
       "golden_v1"
@@ -7695,32 +4989,6 @@
     "evidence_urls": []
   },
   {
-    "company_name": "Texas Aero Support Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Richardson",
-    "state_code": "TX",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Boeing, McDonnell Douglas; 903 N Bowser Suite 380) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/123DCDD698190DB18525704C005B116B.0001"
-    ]
-  },
-  {
     "company_name": "The Flight Shop, Inc.",
     "domain": null,
     "website_url": null,
@@ -7728,6 +4996,9 @@
     "state_code": "UT",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -7754,6 +5025,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -7780,6 +5054,9 @@
     "state_code": null,
     "country_code": "US",
     "tier": "reference",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "process_only",
     "origins": [
       "discovery",
       "golden_v1"
@@ -7805,6 +5082,9 @@
     "state_code": "AZ",
     "country_code": "US",
     "tier": "evaluate",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "curated"
     ],
@@ -7821,6 +5101,7 @@
     "unknowns": null,
     "evidence_urls": [
       "https://www.usaspending.gov/recipient/35f8e454-11c8-aad9-055b-2453b955873f-C/latest",
+      "https://www.zippertubing.com/pages/custom-solutions",
       "https://www.zippertubing.com/pages/custom-solutions"
     ]
   },
@@ -7832,6 +5113,9 @@
     "state_code": "WA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -7858,6 +5142,9 @@
     "state_code": "TX",
     "country_code": "US",
     "tier": "evaluate",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "curated"
     ],
@@ -7873,34 +5160,9 @@
     "risks": "Include only if mandate covers naval/maritime defense components.",
     "unknowns": null,
     "evidence_urls": [
+      "https://www.marinelog.com/news/thrustmaster-auxiliary-propulsion-units-selected-for-navys-new-guided-missile-frigate/",
       "https://thrustmaster.net/thrustmaster-texas-inc/",
-      "https://www.marinelog.com/news/thrustmaster-auxiliary-propulsion-units-selected-for-navys-new-guided-missile-frigate/"
-    ]
-  },
-  {
-    "company_name": "Tornado Alley Turbo Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Ada",
-    "state_code": "OK",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Beech, Beechcraft, Cessna, Cirrus, Cirrus Design Corporation, Hawker Beechcraft, Raytheon, Teledyne Continental; 300 Airport Road) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/9499E332FB3E926F86257BFE004A1670.0001"
+      "https://thrustmaster.net/thrustmaster-texas-inc/"
     ]
   },
   {
@@ -7911,6 +5173,9 @@
     "state_code": "NC",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -7937,6 +5202,9 @@
     "state_code": "NY",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -7963,6 +5231,9 @@
     "state_code": "IN",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -7989,6 +5260,9 @@
     "state_code": "AZ",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -8015,6 +5289,9 @@
     "state_code": "WA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -8041,6 +5318,9 @@
     "state_code": "AR",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -8067,6 +5347,9 @@
     "state_code": "WA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -8086,32 +5369,6 @@
     ]
   },
   {
-    "company_name": "Twin Manufacturing",
-    "domain": null,
-    "website_url": null,
-    "city": "South Winds",
-    "state_code": "OR",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Pratt & Whitney; 273 Chapel Road) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/3A08A126588253E98525704D00562885.0001"
-    ]
-  },
-  {
     "company_name": "United Fire Protection",
     "domain": null,
     "website_url": null,
@@ -8119,6 +5376,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -8138,32 +5398,6 @@
     ]
   },
   {
-    "company_name": "United Plastics Group Inc",
-    "domain": null,
-    "website_url": null,
-    "city": "Anaheim",
-    "state_code": "CA",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, Boeing, Boeing | Fokker | McDonnell Douglas, McDonnell Douglas; 3125 E Coronado Street) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/4D7E2255C1980CC8852570500055BB05.0001"
-    ]
-  },
-  {
     "company_name": "V.A.P. Corporation",
     "domain": null,
     "website_url": null,
@@ -8171,6 +5405,9 @@
     "state_code": "IN",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -8197,6 +5434,9 @@
     "state_code": "GA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -8223,6 +5463,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -8249,6 +5492,9 @@
     "state_code": "FL",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -8268,32 +5514,6 @@
     ]
   },
   {
-    "company_name": "Weldon Pump",
-    "domain": null,
-    "website_url": null,
-    "city": "Oakwood Village",
-    "state_code": "OH",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: B-N Group Ltd., Beechcraft Corporation, Cessna, Cessna Aircraft Company, Cirrus, Cirrus Design Corporation, Commander Aircraft Corporation, Construcciones, Construcciones | Piper, CPAC, Inc, Diamond Aircraft, Diamond Aircraft Industries GmbH; 640 Golden Oak Parkway) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID102958299720250421230255.0001"
-    ]
-  },
-  {
     "company_name": "WEMS Electronics",
     "domain": null,
     "website_url": null,
@@ -8301,6 +5521,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -8327,6 +5550,9 @@
     "state_code": "CO",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -8346,32 +5572,6 @@
     ]
   },
   {
-    "company_name": "White Aviation Consulting Inc (CANCELLED 11/8/2007)",
-    "domain": null,
-    "website_url": null,
-    "city": "Waukesha",
-    "state_code": "WI",
-    "country_code": "United States",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Air Tractor | Allied Ag Cat | Ayres, Air Tractor | Allied Ag Cat | Bellanca | Cessna | Piper | Weatherly, Britten Norman | Cessna | Piper | Raytheon, Cessna, Cessna | Piper | Raytheon, Dassault Aviation, Embraer Empresa, Fairchild Aircraft, Hawker Beechcraft, Learjet, M7 Aerospace LP, Piper; 2347 Aviation Drive) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/A10C7EB531E4155B86257368005C4615.0001"
-    ]
-  },
-  {
     "company_name": "World Auxiliary Power Co",
     "domain": null,
     "website_url": null,
@@ -8379,6 +5579,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -8398,32 +5601,6 @@
     ]
   },
   {
-    "company_name": "Woven Electronics, LLC",
-    "domain": null,
-    "website_url": null,
-    "city": "Simpsonville",
-    "state_code": "SC",
-    "country_code": "USA",
-    "tier": "needs_research",
-    "origins": [
-      "faa_ensemble"
-    ],
-    "golden_v1_member": false,
-    "pipeline_status": null,
-    "fit": null,
-    "novelty": null,
-    "confidence": null,
-    "actionability": null,
-    "ensemble_decision": "research",
-    "ensemble_confidence": 0,
-    "why_interesting": "FAA PMA holder (makes: Airbus, AIRBUS, Airbus Defense and Space S.A., AIRBUS SAS, Boeing, BOEING, Bombardier, BOMBARDIER, Bombardier | Inc, BOMBARDIER | INC., British Aerospace(Operations Limited), Gulfstream Aerospace Corporation; 1001 Old Stage Road) — malformed or missing evaluation requires adjudication",
-    "risks": null,
-    "unknowns": null,
-    "evidence_urls": [
-      "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCID155732504420240613161053.0001"
-    ]
-  },
-  {
     "company_name": "Wulfsberg Electronics Division",
     "domain": null,
     "website_url": null,
@@ -8431,6 +5608,9 @@
     "state_code": "AZ",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],
@@ -8457,6 +5637,9 @@
     "state_code": "PA",
     "country_code": "US",
     "tier": "high_interest",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "process_only",
     "origins": [
       "curated",
       "discovery"
@@ -8485,6 +5668,9 @@
     "state_code": null,
     "country_code": null,
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "discovery"
     ],
@@ -8509,6 +5695,9 @@
     "state_code": null,
     "country_code": null,
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "discovery"
     ],
@@ -8533,6 +5722,9 @@
     "state_code": null,
     "country_code": null,
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "discovery"
     ],
@@ -8557,6 +5749,9 @@
     "state_code": "SC",
     "country_code": "US",
     "tier": "high_interest",
+    "investor_priority": 1,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "curated",
       "discovery"
@@ -8585,6 +5780,9 @@
     "state_code": null,
     "country_code": null,
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "discovery"
     ],
@@ -8609,6 +5807,9 @@
     "state_code": null,
     "country_code": null,
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "discovery"
     ],
@@ -8633,6 +5834,9 @@
     "state_code": "CA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "product",
     "origins": [
       "faa_ensemble"
     ],
@@ -8659,6 +5863,9 @@
     "state_code": null,
     "country_code": null,
     "tier": "high_interest",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "discovery"
     ],
@@ -8683,6 +5890,9 @@
     "state_code": "FL",
     "country_code": "US",
     "tier": "evaluate",
+    "investor_priority": 2,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "curated",
       "discovery"
@@ -8711,6 +5921,9 @@
     "state_code": "VA",
     "country_code": "United States",
     "tier": "needs_research",
+    "investor_priority": 3,
+    "oversize_flag": false,
+    "proprietary_basis": "unknown",
     "origins": [
       "faa_ensemble"
     ],

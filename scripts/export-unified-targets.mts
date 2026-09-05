@@ -48,6 +48,9 @@ export const UNIFIED_CSV_HEADERS = [
   "State",
   "Country",
   "Tier",
+  "Priority",
+  "Oversize Flag",
+  "Proprietary Basis",
   "Origins",
   "Golden v1",
   "Pipeline Status",
@@ -88,7 +91,9 @@ export function defaultExportPath(format: UnifiedExportFormat): string {
   return path.join("exports", `unified-targets-${dateStamp()}.${ext}`);
 }
 
-export function parseExportArgs(argv: readonly string[]): ExportUnifiedTargetsOptions {
+export function parseExportArgs(
+  argv: readonly string[],
+): ExportUnifiedTargetsOptions {
   let format: UnifiedExportFormat = "csv";
   let tier: string | null = null;
   let out: string | null = null;
@@ -132,6 +137,9 @@ const EXPORT_COLUMNS = [
   "state_code",
   "country_code",
   "tier",
+  "investor_priority",
+  "oversize_flag",
+  "proprietary_basis",
   "origins",
   "golden_v1_member",
   "pipeline_status",
@@ -167,7 +175,9 @@ function cellText(value: unknown): string | null {
 }
 
 /** Map one `unified_targets` row to the human-readable CSV record. */
-export function toCsvRecord(row: Record<string, unknown>): Record<string, string> {
+export function toCsvRecord(
+  row: Record<string, unknown>,
+): Record<string, string> {
   const cells: Record<string, string | null> = {
     "Company Name": cellText(row["company_name"]),
     Domain: cellText(row["domain"]),
@@ -176,6 +186,9 @@ export function toCsvRecord(row: Record<string, unknown>): Record<string, string
     State: cellText(row["state_code"]),
     Country: cellText(row["country_code"]),
     Tier: cellText(row["tier"]),
+    Priority: cellText(row["investor_priority"]),
+    "Oversize Flag": row["oversize_flag"] === true ? "yes" : "no",
+    "Proprietary Basis": cellText(row["proprietary_basis"]),
     Origins: joinList(row["origins"]),
     "Golden v1": row["golden_v1_member"] === true ? "yes" : "no",
     "Pipeline Status": cellText(row["pipeline_status"]),
@@ -219,8 +232,7 @@ async function main(argv: string[]): Promise<void> {
   const options = parseExportArgs(argv);
   const pool = getPool();
   try {
-    const where =
-      options.tier === null ? "" : "WHERE tier = $1";
+    const where = options.tier === null ? "" : "WHERE tier = $1";
     const params = options.tier === null ? [] : [options.tier];
     const { rows } = await pool.query(
       `SELECT ${EXPORT_COLUMNS.join(", ")} FROM unified_targets ${where} ORDER BY company_name`,

@@ -1,16 +1,10 @@
 import { sql } from "drizzle-orm";
 
 import type { Database } from "../client.js";
-import {
-  goldenExamples,
-  type GoldenExample,
-} from "../schema.js";
+import { goldenExamples, type GoldenExample } from "../schema.js";
 import { normalizeDomain, normalizeName } from "../snapshots/normalize.js";
 import type { GoldenCompanyRow } from "../import-parsers/types.js";
-import {
-  proposeLabels,
-  type ProposedLabelSet,
-} from "./proposal-rules.js";
+import { proposeLabels, type ProposedLabelSet } from "./proposal-rules.js";
 
 /**
  * Golden-example import (18 rows in the real workbook).
@@ -53,7 +47,8 @@ export function joinGoldenWithGrata(
   }
 
   return targetRows.map((target) => {
-    const domain = target.domain === null ? null : normalizeDomain(target.domain);
+    const domain =
+      target.domain === null ? null : normalizeDomain(target.domain);
     const grata =
       (domain !== null ? grataByDomain.get(domain) : undefined) ??
       grataByName.get(normalizeName(target.name));
@@ -102,7 +97,7 @@ function payloadValue(
 type ExistingGoldenRow = {
   id: string;
   reviewStatus: string;
-}
+};
 
 async function findExisting(
   db: Database,
@@ -235,6 +230,9 @@ export async function reviewGoldenExample(
         | "ownershipFit"
         | "goldenExampleType"
         | "buildToPrintRisk"
+        | "proprietaryProduct"
+        | "websiteOffering"
+        | "sizeEvidence"
       >
     >;
     requestId?: string | undefined;
@@ -257,13 +255,17 @@ export async function reviewGoldenExample(
       "unknown",
     businessModelFit:
       options.labels.businessModelFit ?? before.businessModelFit ?? "unknown",
-    ownershipFit: options.labels.ownershipFit ?? before.ownershipFit ?? "unknown",
+    ownershipFit:
+      options.labels.ownershipFit ?? before.ownershipFit ?? "unknown",
     goldenExampleType:
       options.labels.goldenExampleType ??
       before.goldenExampleType ??
       "unclassified",
     buildToPrintRisk:
       options.labels.buildToPrintRisk ?? before.buildToPrintRisk ?? "unknown",
+    proprietaryProduct: options.labels.proprietaryProduct ?? "unknown",
+    websiteOffering: options.labels.websiteOffering ?? "unknown",
+    sizeEvidence: options.labels.sizeEvidence ?? "unknown",
     rationale: options.rationale,
   };
 
@@ -284,7 +286,6 @@ export async function reviewGoldenExample(
     })
     .where(sql`${goldenExamples.id} = ${options.exampleId}`)
     .returning();
-
 
   await db.execute(sql`
     INSERT INTO audit_events (actor_user_id, action, entity_type, entity_id, request_id, before, after, metadata)

@@ -135,6 +135,100 @@ export function mapEnsembleTier(decision: string | null): string | null {
   return null;
 }
 
+export type InvestorPriority = 1 | 2 | 3;
+export type ProprietaryBasis = "product" | "process_only" | "unknown";
+
+export interface InvestorAssessment {
+  investorPriority: InvestorPriority;
+  proprietaryBasis: ProprietaryBasis;
+}
+
+const PROCESS_ONLY_EVIDENCE =
+  /\b(kitting|assembly|build[\s-]*to[\s-]*print|btp|capabilit(?:y|ies)[\s-]*only|services?[\s-]*only)\b/i;
+const PROPRIETARY_PRODUCT_EVIDENCE =
+  /\b(?:catalog(?:ue)?|patented|proprietary[\s_-]+(?:part|component|product|system))\b|\b(?:pma|stc|tso)(?:\b|_)/i;
+const IDENTITY_THIN_EVIDENCE =
+  /\b(identity[\s-]*(?:thin|uncertain|unresolved)|thin[\s-]*identity)\b/i;
+/** Stock qualifier sentence present in every discovery rationale; not evidence. */
+const BOILERPLATE_PRODUCT_PHRASE =
+  /verified from first-party pages as a us aerospace\/defense physical-product manufacturer\.?/gi;
+
+/** Classify evidence without treating a proprietary process as a product. */
+export function mapProprietaryBasis(
+  evidence: string | null | undefined,
+): ProprietaryBasis {
+  if (!evidence) return "unknown";
+  const scrubbed = evidence.replace(BOILERPLATE_PRODUCT_PHRASE, " ");
+  if (PROCESS_ONLY_EVIDENCE.test(scrubbed)) return "process_only";
+  if (PROPRIETARY_PRODUCT_EVIDENCE.test(scrubbed)) return "product";
+  return "unknown";
+}
+
+/**
+ * Preserve source attention unless process-only evidence prevents P1.
+ * Product evidence supports, but never manufactures, a source's attention rank.
+ */
+export function deriveInvestorAssessment(
+  defaultPriority: InvestorPriority,
+  evidence: string | null | undefined,
+): InvestorAssessment {
+  const proprietaryBasis = mapProprietaryBasis(evidence);
+  return {
+    investorPriority:
+      proprietaryBasis === "process_only" && defaultPriority === 1
+        ? 2
+        : defaultPriority,
+    proprietaryBasis,
+  };
+}
+
+export function mapCuratedInvestorAssessment(
+  screenStatus: string | null,
+  evidence: string | null | undefined,
+): InvestorAssessment {
+  return deriveInvestorAssessment(
+    (screenStatus ?? "").trim().toLowerCase() === "credible_target" ? 1 : 2,
+    evidence,
+  );
+}
+
+export function mapDiscoveryInvestorAssessment(
+  status: string | null,
+  confidence: number | null,
+  websiteUrl: string | null,
+  evidence: string | null | undefined,
+): InvestorAssessment {
+  const normalizedStatus = (status ?? "").trim().toLowerCase();
+  const defaultPriority: InvestorPriority =
+    confidence === 0 ||
+    websiteUrl === null ||
+    IDENTITY_THIN_EVIDENCE.test(evidence ?? "")
+      ? 3
+      : normalizedStatus === "research_ready"
+        ? 1
+        : normalizedStatus === "queued_research" ||
+            normalizedStatus === "queued"
+          ? 3
+          : 2;
+  return deriveInvestorAssessment(defaultPriority, evidence);
+}
+
+export function mapEnsembleInvestorAssessment(
+  decision: string | null,
+  thesisSignals: readonly string[],
+): InvestorAssessment | null {
+  const normalizedDecision = (decision ?? "").trim().toLowerCase();
+  if (normalizedDecision === "high_priority") {
+    return deriveInvestorAssessment(1, thesisSignals.join(" "));
+  }
+  if (normalizedDecision !== "research") return null;
+  const evidence = thesisSignals.join(" ");
+  return deriveInvestorAssessment(
+    mapProprietaryBasis(evidence) === "product" ? 2 : 3,
+    evidence,
+  );
+}
+
 /** Extract a bare lowercase domain from a website URL (null when absent). */
 export function domainFromUrl(url: string | null | undefined): string | null {
   if (!url) return null;
@@ -323,6 +417,9 @@ export interface UnifiedTargetRow {
   origin: string;
   goldenV1Member: boolean;
   tier: string;
+  investorPriority: InvestorPriority;
+  oversizeFlag: boolean;
+  proprietaryBasis: ProprietaryBasis;
   pipelineStatus: string | null;
   fit: number | null;
   novelty: number | null;
@@ -350,6 +447,9 @@ const UPSERT_COLUMNS = [
   "origins",
   "golden_v1_member",
   "tier",
+  "investor_priority",
+  "oversize_flag",
+  "proprietary_basis",
   "pipeline_status",
   "fit",
   "novelty",
@@ -365,6 +465,10 @@ const UPSERT_COLUMNS = [
   "signal_id",
   "candidate_id",
 ] as const;
+
+function proprietaryBasisRank(basis: ProprietaryBasis): number {
+  return basis === "product" ? 3 : basis === "process_only" ? 2 : 1;
+}
 
 function firstNonNull<T>(a: T | null, b: T | null): T | null {
   return a ?? b;
@@ -398,6 +502,16 @@ export function mergeBatchDuplicates(
       tier: rank(row.tier) > rank(existing.tier) ? row.tier : existing.tier,
       pipelineStatus: firstNonNull(existing.pipelineStatus, row.pipelineStatus),
       fit: firstNonNull(existing.fit, row.fit),
+      investorPriority:
+        row.investorPriority < existing.investorPriority
+          ? row.investorPriority
+          : existing.investorPriority,
+      oversizeFlag: existing.oversizeFlag || row.oversizeFlag,
+      proprietaryBasis:
+        proprietaryBasisRank(row.proprietaryBasis) >
+        proprietaryBasisRank(existing.proprietaryBasis)
+          ? row.proprietaryBasis
+          : existing.proprietaryBasis,
       novelty: firstNonNull(existing.novelty, row.novelty),
       confidence: firstNonNull(existing.confidence, row.confidence),
       actionability: firstNonNull(existing.actionability, row.actionability),
@@ -439,6 +553,19 @@ const CONFLICT_CLAUSE = `ON CONFLICT (normalized_name) DO UPDATE SET
   golden_v1_member = unified_targets.golden_v1_member OR EXCLUDED.golden_v1_member,
   tier = CASE WHEN (${EXCLUDED_RANK_SQL}) > (${EXISTING_RANK_SQL})
               THEN EXCLUDED.tier ELSE unified_targets.tier END,
+  investor_priority = CASE
+    WHEN unified_targets.investor_priority IS NULL THEN EXCLUDED.investor_priority
+    WHEN EXCLUDED.investor_priority IS NULL THEN unified_targets.investor_priority
+    WHEN EXCLUDED.investor_priority < unified_targets.investor_priority THEN EXCLUDED.investor_priority
+    ELSE unified_targets.investor_priority
+  END,
+  oversize_flag = COALESCE(unified_targets.oversize_flag, false) OR COALESCE(EXCLUDED.oversize_flag, false),
+  proprietary_basis = CASE
+    WHEN (CASE EXCLUDED.proprietary_basis WHEN 'product' THEN 3 WHEN 'process_only' THEN 2 WHEN 'unknown' THEN 1 ELSE 0 END)
+       > (CASE unified_targets.proprietary_basis WHEN 'product' THEN 3 WHEN 'process_only' THEN 2 WHEN 'unknown' THEN 1 ELSE 0 END)
+      THEN EXCLUDED.proprietary_basis
+    ELSE COALESCE(unified_targets.proprietary_basis, EXCLUDED.proprietary_basis)
+  END,
   pipeline_status = COALESCE(unified_targets.pipeline_status, EXCLUDED.pipeline_status),
   fit = COALESCE(unified_targets.fit, EXCLUDED.fit),
   novelty = COALESCE(unified_targets.novelty, EXCLUDED.novelty),
@@ -486,6 +613,9 @@ export async function upsertBatch(
       JSON.stringify([r.origin]),
       r.goldenV1Member,
       r.tier,
+      r.investorPriority,
+      r.oversizeFlag,
+      r.proprietaryBasis,
       r.pipelineStatus,
       r.fit,
       r.novelty,
@@ -507,7 +637,7 @@ export async function upsertBatch(
     });
     // origins / evidence_urls ride as JSON text cast to jsonb.
     placeholders[7] += "::jsonb";
-    placeholders[20] += "::jsonb";
+    placeholders[23] += "::jsonb";
     return `(${placeholders.join(", ")})`;
   });
   const text =
@@ -552,6 +682,12 @@ async function loadGolden(
       typeof r["website_url"] === "string" && r["website_url"] !== ""
         ? (r["website_url"] as string)
         : null;
+    const investorAssessment = deriveInvestorAssessment(
+      1,
+      typeof r["why_interesting"] === "string"
+        ? (r["why_interesting"] as string)
+        : null,
+    );
     return [
       {
         companyName: name,
@@ -569,6 +705,8 @@ async function loadGolden(
         origin: ORIGIN_GOLDEN_V1,
         goldenV1Member: true,
         tier: "reference",
+        ...investorAssessment,
+        oversizeFlag: false,
         pipelineStatus: null,
         fit: null,
         novelty: null,
@@ -611,6 +749,10 @@ function loadCurated(csvPath: string): UnifiedTargetRow[] {
     ]
       .map((u) => (u ?? "").trim())
       .filter((u) => u !== "");
+    const investorAssessment = mapCuratedInvestorAssessment(
+      r["screen_status"] ?? "",
+      [r["fit_summary"], r["key_risk"]].join(" "),
+    );
     return [
       {
         companyName: name,
@@ -622,6 +764,8 @@ function loadCurated(csvPath: string): UnifiedTargetRow[] {
         origin: ORIGIN_CURATED,
         goldenV1Member: false,
         tier,
+        ...investorAssessment,
+        oversizeFlag: false,
         pipelineStatus: null,
         fit: null,
         novelty: null,
@@ -661,9 +805,9 @@ async function loadDiscovery(
   return rows.flatMap((r) => {
     const name = String(r["name"] ?? "").trim();
     if (name === "" || isOffThesisName(name)) return [];
-    const tier = mapCandidateTier(
-      typeof r["status"] === "string" ? (r["status"] as string) : null,
-    );
+    const status =
+      typeof r["status"] === "string" ? (r["status"] as string) : null;
+    const tier = mapCandidateTier(status);
     if (tier === null) return [];
     const scores = (r["current_scores"] ?? {}) as Record<string, unknown>;
     const rationale = (r["rationale"] ?? {}) as Record<string, unknown>;
@@ -671,6 +815,16 @@ async function loadDiscovery(
       typeof r["website_url"] === "string" && r["website_url"] !== ""
         ? (r["website_url"] as string)
         : null;
+    const investorAssessment = mapDiscoveryInvestorAssessment(
+      status,
+      scoreNumber(scores["confidence"]),
+      websiteUrl,
+      [
+        rationaleText(rationale["whyInteresting"]),
+        rationaleText(rationale["risks"]),
+        rationaleText(rationale["unknowns"]),
+      ].join(" "),
+    );
     return [
       {
         companyName: name,
@@ -685,8 +839,9 @@ async function loadDiscovery(
         origin: ORIGIN_DISCOVERY,
         goldenV1Member: false,
         tier,
-        pipelineStatus:
-          typeof r["status"] === "string" ? (r["status"] as string) : null,
+        ...investorAssessment,
+        oversizeFlag: false,
+        pipelineStatus: status,
         fit: scoreNumber(scores["fit"]),
         novelty: scoreNumber(scores["novelty"]),
         confidence: scoreNumber(scores["confidence"]),
@@ -719,7 +874,15 @@ async function loadEnsemble(
 ): Promise<UnifiedTargetRow[]> {
   const { rows } = await query(
     `SELECT r.signal_id, r.final_decision, r.final_confidence, r.reason,
-            s.raw_name, s.raw_domain, s.city, s.state, s.country, s.source_payload
+            s.raw_name, s.raw_domain, s.city, s.state, s.country, s.source_payload,
+            COALESCE((
+              SELECT jsonb_agg(DISTINCT ts.signal)
+              FROM faa_ensemble_evaluations eval
+              CROSS JOIN LATERAL jsonb_array_elements_text(
+                COALESCE(eval.thesis_signals, '[]'::jsonb)
+              ) AS ts(signal)
+              WHERE eval.signal_id = r.signal_id
+            ), '[]'::jsonb) AS thesis_signals
      FROM faa_ensemble_results r
      JOIN source_signals s ON s.id = r.signal_id
      WHERE r.final_decision IN ('research', 'high_priority')`,
@@ -734,6 +897,17 @@ async function loadEnsemble(
         : "";
     const tier = mapEnsembleTier(decision);
     if (tier === null) return [];
+    const thesisSignals = Array.isArray(r["thesis_signals"])
+      ? (r["thesis_signals"] as unknown[]).filter(
+          (signal): signal is string =>
+            typeof signal === "string" && signal.trim() !== "",
+        )
+      : [];
+    const investorAssessment = mapEnsembleInvestorAssessment(
+      decision,
+      thesisSignals,
+    );
+    if (investorAssessment === null) return [];
     const payload = (r["source_payload"] ?? {}) as Record<string, unknown>;
     const guidUrl =
       typeof payload["guid_url"] === "string" && payload["guid_url"] !== ""
@@ -783,6 +957,8 @@ async function loadEnsemble(
         origin: ORIGIN_FAA_ENSEMBLE,
         goldenV1Member: false,
         tier,
+        ...investorAssessment,
+        oversizeFlag: false,
         pipelineStatus: null,
         fit: null,
         novelty: null,

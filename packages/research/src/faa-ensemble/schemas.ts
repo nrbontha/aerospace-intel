@@ -32,6 +32,20 @@ export type ManufacturingEvidenceLevel = z.infer<
 export const falseNegativeRiskSchema = z.enum(["low", "medium", "high"]);
 export type FalseNegativeRisk = z.infer<typeof falseNegativeRiskSchema>;
 
+/** Investor screening fields are defaulted so historical model outputs remain valid. */
+const investorFeedbackShape = {
+  proprietary_product_evidence: z
+    .enum(["none", "weak", "strong"])
+    .default("none"),
+  proprietary_process_only: z.boolean().default(false),
+  website_products_menu: z.boolean().nullable().default(null),
+  size_indicators: z.array(z.string()).default([]),
+  likely_oversize: z.boolean().default(false),
+  suggested_priority: z
+    .union([z.literal(1), z.literal(2), z.literal(3)])
+    .default(3),
+};
+
 const evaluatorShape = {
   decision: ensembleDecisionSchema,
   confidence: z.number().int().min(0).max(100),
@@ -43,6 +57,7 @@ const evaluatorShape = {
   missing_evidence: z.array(z.string()).default([]),
   false_negative_risk: falseNegativeRiskSchema,
   reason: z.string().min(1),
+  ...investorFeedbackShape,
 };
 
 /** Single-model qualification judgment (prompt `faa_qualification_v1`). */
@@ -60,6 +75,7 @@ export const adjudicatorResultSchema = z.object({
   missing_evidence: z.array(z.string()).default([]),
   false_negative_risk: falseNegativeRiskSchema,
   reason: z.string().min(1),
+  ...investorFeedbackShape,
 });
 export type AdjudicatorResult = z.infer<typeof adjudicatorResultSchema>;
 

@@ -168,19 +168,28 @@ export const buildToPrintRisk = pgEnum(
 );
 export const leadStatus = pgEnum("lead_status", leadStatusValues);
 export const matchDecision = pgEnum("match_decision", matchDecisionValues);
-export const candidateStatus = pgEnum("candidate_status", candidateStatusValues);
+export const candidateStatus = pgEnum(
+  "candidate_status",
+  candidateStatusValues,
+);
 export const noveltyStatus = pgEnum("novelty_status", noveltyStatusValues);
 export const scoreAxis = pgEnum("score_axis", scoreAxisValues);
 export const programAxis = pgEnum("program_axis", programAxisValues);
 export const programStatus = pgEnum("program_status", programStatusValues);
 export const experimentKind = pgEnum("experiment_kind", experimentKindValues);
-export const feedbackChannel = pgEnum("feedback_channel", feedbackChannelValues);
+export const feedbackChannel = pgEnum(
+  "feedback_channel",
+  feedbackChannelValues,
+);
 export const researchQuestionStatus = pgEnum(
   "research_question_status",
   researchQuestionStatusValues,
 );
 export const campaignStatus = pgEnum("campaign_status", campaignStatusValues);
-export const frontierItemType = pgEnum("frontier_item_type", frontierItemTypeValues);
+export const frontierItemType = pgEnum(
+  "frontier_item_type",
+  frontierItemTypeValues,
+);
 export const frontierItemStatus = pgEnum(
   "frontier_item_status",
   frontierItemStatusValues,
@@ -1594,7 +1603,11 @@ export const knownUniverseMembers = pgTable(
   },
   (t) => [
     uniqueIndex("known_universe_members_identity_uidx")
-      .on(t.snapshotId, sql`lower(${t.normalizedDomain})`, sql`lower(${t.normalizedName})`)
+      .on(
+        t.snapshotId,
+        sql`lower(${t.normalizedDomain})`,
+        sql`lower(${t.normalizedName})`,
+      )
       .where(sql`${t.normalizedDomain} IS NOT NULL`),
     uniqueIndex("known_universe_members_name_uidx")
       .on(t.snapshotId, sql`lower(${t.normalizedName})`)
@@ -1617,9 +1630,12 @@ export const goldenExamples = pgTable(
     companyId: uuid("company_id").references(() => companies.id, {
       onDelete: "set null",
     }),
-    snapshotId: uuid("snapshot_id").references(() => knownUniverseSnapshots.id, {
-      onDelete: "set null",
-    }),
+    snapshotId: uuid("snapshot_id").references(
+      () => knownUniverseSnapshots.id,
+      {
+        onDelete: "set null",
+      },
+    ),
     name: text("name").notNull(),
     domain: text("domain"),
     descriptionRaw: text("description_raw"),
@@ -1639,7 +1655,9 @@ export const goldenExamples = pgTable(
     goldenExampleType: goldenExampleType("golden_example_type"),
     buildToPrintRisk: buildToPrintRisk("build_to_print_risk"),
     reviewNotes: text("review_notes"),
-    reviewStatus: reviewStatus("review_status").notNull().default("unclassified"),
+    reviewStatus: reviewStatus("review_status")
+      .notNull()
+      .default("unclassified"),
     reviewedBy: uuid("reviewed_by").references(() => users.id, {
       onDelete: "set null",
     }),
@@ -1755,9 +1773,7 @@ export const scoringPrograms = pgTable(
     name: text("name").notNull(),
     version: integer("version").notNull(),
     axis: programAxis("axis").notNull(),
-    program: jsonb("program")
-      .$type<Record<string, unknown>>()
-      .notNull(),
+    program: jsonb("program").$type<Record<string, unknown>>().notNull(),
     status: programStatus("status").notNull().default("challenger"),
     complexity: numeric("complexity", { precision: 5, scale: 3 }).default("0"),
     createdBy: uuid("created_by").references(() => users.id, {
@@ -1847,7 +1863,9 @@ export const candidateScores = pgTable(
       () => scoringPrograms.id,
       { onDelete: "set null" },
     ),
-    featureSchemaVersion: text("feature_schema_version").notNull().default("v1"),
+    featureSchemaVersion: text("feature_schema_version")
+      .notNull()
+      .default("v1"),
     details: jsonb("details")
       .$type<Record<string, unknown>>()
       .notNull()
@@ -1874,9 +1892,7 @@ export const featureSnapshots = pgTable(
       .notNull()
       .references(() => companies.id, { onDelete: "cascade" }),
     schemaVersion: text("schema_version").notNull().default("v1"),
-    features: jsonb("features")
-      .$type<Record<string, unknown>>()
-      .notNull(),
+    features: jsonb("features").$type<Record<string, unknown>>().notNull(),
     contentSha256: char("content_sha256", { length: 64 }).notNull(),
     thesisVersion: text("thesis_version").notNull().default("thesis-v0"),
     createdAt: ct(),
@@ -2111,10 +2127,7 @@ export const frontierItems = pgTable(
     index("frontier_items_agent_idx").on(t.agentId),
     check("frontier_items_depth_chk", sql`${t.depth} >= 0`),
     check("frontier_items_attempt_count_chk", sql`${t.attemptCount} >= 0`),
-    check(
-      "frontier_items_estimated_cost_chk",
-      sql`${t.estimatedCostUsd} >= 0`,
-    ),
+    check("frontier_items_estimated_cost_chk", sql`${t.estimatedCostUsd} >= 0`),
     check(
       "frontier_owner_check",
       sql`${t.campaignId} IS NOT NULL OR ${t.agentId} IS NOT NULL`,
@@ -2268,10 +2281,7 @@ export const agentTicks = pgTable(
       .defaultNow(),
     finishedAt: timestamp("finished_at", { withTimezone: true }),
     outcome: tickOutcome("outcome").notNull(),
-    plan: jsonb("plan")
-      .$type<Record<string, unknown>>()
-      .notNull()
-      .default({}),
+    plan: jsonb("plan").$type<Record<string, unknown>>().notNull().default({}),
     actionsExecuted: integer("actions_executed").notNull().default(0),
     findings: jsonb("findings")
       .$type<Record<string, unknown>>()
@@ -2325,7 +2335,9 @@ export const sourceSignals = pgTable(
       .$type<Record<string, unknown>>()
       .notNull()
       .default({}),
-    leadId: uuid("lead_id").references(() => leads.id, { onDelete: "set null" }),
+    leadId: uuid("lead_id").references(() => leads.id, {
+      onDelete: "set null",
+    }),
     companyId: uuid("company_id").references(() => companies.id, {
       onDelete: "set null",
     }),
@@ -2377,7 +2389,9 @@ export const faaEnsembleEvaluations = pgTable(
       .notNull()
       .references(() => sourceSignals.id, { onDelete: "cascade" }),
     modelId: text("model_id").notNull(),
-    promptVersion: text("prompt_version").notNull().default("faa_qualification_v1"),
+    promptVersion: text("prompt_version")
+      .notNull()
+      .default("faa_qualification_v1"),
     rawResponse: text("raw_response"),
     parsed: jsonb("parsed").$type<Record<string, unknown>>(),
     decision: text("decision"),
@@ -2385,9 +2399,18 @@ export const faaEnsembleEvaluations = pgTable(
     companyType: text("company_type"),
     aerospaceDefenseRelevance: text("aerospace_defense_relevance"),
     manufacturingEvidence: text("manufacturing_evidence"),
-    thesisSignals: jsonb("thesis_signals").$type<string[]>().notNull().default([]),
-    disqualifiers: jsonb("disqualifiers").$type<string[]>().notNull().default([]),
-    missingEvidence: jsonb("missing_evidence").$type<string[]>().notNull().default([]),
+    thesisSignals: jsonb("thesis_signals")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
+    disqualifiers: jsonb("disqualifiers")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
+    missingEvidence: jsonb("missing_evidence")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
     falseNegativeRisk: text("false_negative_risk"),
     reason: text("reason"),
     tokens: jsonb("tokens").$type<Record<string, unknown>>(),
@@ -2433,7 +2456,8 @@ export const faaEnsembleResults = pgTable(
     agreed: boolean("agreed"),
     adjudicationRequired: boolean("adjudication_required"),
     adjudicatorModel: text("adjudicator_model"),
-    adjudicatorOutput: jsonb("adjudicator_output").$type<Record<string, unknown>>(),
+    adjudicatorOutput:
+      jsonb("adjudicator_output").$type<Record<string, unknown>>(),
     finalDecision: text("final_decision").notNull(),
     finalConfidence: integer("final_confidence"),
     reason: text("reason"),
@@ -2474,6 +2498,9 @@ export const unifiedTargets = pgTable(
     origins: jsonb("origins").$type<string[]>().notNull().default([]),
     goldenV1Member: boolean("golden_v1_member").notNull().default(false),
     tier: text("tier").notNull().default("needs_research"),
+    investorPriority: integer("investor_priority"),
+    oversizeFlag: boolean("oversize_flag").default(false),
+    proprietaryBasis: text("proprietary_basis").default("unknown"),
     pipelineStatus: text("pipeline_status"),
     fit: numeric("fit", { precision: 5, scale: 4 }),
     novelty: numeric("novelty", { precision: 5, scale: 4 }),
@@ -2484,7 +2511,10 @@ export const unifiedTargets = pgTable(
     whyInteresting: text("why_interesting"),
     risks: text("risks"),
     unknowns: text("unknowns"),
-    evidenceUrls: jsonb("evidence_urls").$type<string[]>().notNull().default([]),
+    evidenceUrls: jsonb("evidence_urls")
+      .$type<string[]>()
+      .notNull()
+      .default([]),
     companyId: uuid("company_id").references(() => companies.id, {
       onDelete: "set null",
     }),
@@ -2514,7 +2544,4 @@ export const unifiedTargets = pgTable(
 export type UnifiedTarget = SelectRow<typeof unifiedTargets>;
 export type NewUnifiedTarget = InsertRow<typeof unifiedTargets>;
 export type UnifiedTargetTier =
-  | "reference"
-  | "high_interest"
-  | "evaluate"
-  | "needs_research";
+  "reference" | "high_interest" | "evaluate" | "needs_research";

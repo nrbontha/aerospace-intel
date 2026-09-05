@@ -82,7 +82,10 @@ const snapshotKeySchema = z
   .trim()
   .min(1)
   .max(200)
-  .regex(/^[a-z0-9][a-z0-9._:-]*$/, "Lowercase key with dots, dashes, colons, or digits");
+  .regex(
+    /^[a-z0-9][a-z0-9._:-]*$/,
+    "Lowercase key with dots, dashes, colons, or digits",
+  );
 const displayName = z.string().trim().min(1).max(300);
 
 const nonEmptyUpdate = (value: object): boolean =>
@@ -118,11 +121,13 @@ export const knownUniverseSnapshotUpdateSchema =
     .partial()
     .refine(nonEmptyUpdate, "At least one field must be supplied");
 
-export const knownUniverseSnapshotListQuerySchema = paginatedQuerySchema.extend({
-  sourceType: snapshotSourceTypeSchema.optional(),
-  active: z.boolean().optional(),
-  query: z.string().trim().max(200).optional(),
-});
+export const knownUniverseSnapshotListQuerySchema = paginatedQuerySchema.extend(
+  {
+    sourceType: snapshotSourceTypeSchema.optional(),
+    active: z.boolean().optional(),
+    query: z.string().trim().max(200).optional(),
+  },
+);
 
 export const knownUniverseMemberSchema = z.strictObject({
   id: uuidSchema,
@@ -150,6 +155,25 @@ export const knownUniverseMemberListQuerySchema = paginatedQuerySchema.extend({
 // Golden examples
 // ---------------------------------------------------------------------------
 
+export const proprietaryProductSchema = z.enum([
+  "patented_product",
+  "demonstrated_product",
+  "claimed_product",
+  "process_only",
+  "none",
+  "unknown",
+]);
+export const websiteOfferingSchema = z.enum([
+  "products_menu",
+  "capabilities_only",
+  "unknown",
+]);
+export const sizeEvidenceSchema = z.enum([
+  "small_indicators",
+  "large_indicators",
+  "unknown",
+]);
+
 export const proposedLabelsSchema = z.strictObject({
   archetypeFit: labelScaleSchema.optional(),
   currentActionability: labelScaleSchema.optional(),
@@ -157,6 +181,9 @@ export const proposedLabelsSchema = z.strictObject({
   ownershipFit: labelScaleSchema.optional(),
   goldenExampleType: goldenExampleTypeSchema.optional(),
   buildToPrintRisk: buildToPrintRiskSchema.optional(),
+  proprietaryProduct: proprietaryProductSchema.optional(),
+  websiteOffering: websiteOfferingSchema.optional(),
+  sizeEvidence: sizeEvidenceSchema.optional(),
   rationale: z.string().trim().max(10_000).optional(),
 });
 
@@ -167,6 +194,9 @@ export const reviewedLabelsSchema = z.strictObject({
   ownershipFit: labelScaleSchema.optional(),
   goldenExampleType: goldenExampleTypeSchema.optional(),
   buildToPrintRisk: buildToPrintRiskSchema.optional(),
+  proprietaryProduct: proprietaryProductSchema.optional(),
+  websiteOffering: websiteOfferingSchema.optional(),
+  sizeEvidence: sizeEvidenceSchema.optional(),
 });
 
 /** Reviewer decision payload: labels plus a mandatory rationale. */
@@ -266,12 +296,20 @@ export const identityMatchCandidateSchema = z.strictObject({
 });
 
 export const identityMatchCandidateDecisionSchema = z.strictObject({
-  decision: z.enum(["merged", "rejected_merge", "alias", "parent_subsidiary", "acquired_into"]),
+  decision: z.enum([
+    "merged",
+    "rejected_merge",
+    "alias",
+    "parent_subsidiary",
+    "acquired_into",
+  ]),
   note: z.string().trim().max(10_000).optional(),
 });
 
 export type SnapshotSourceType = (typeof snapshotSourceTypeValues)[number];
-export type SnapshotMemberMatchStatus = z.infer<typeof snapshotMemberMatchStatusSchema>;
+export type SnapshotMemberMatchStatus = z.infer<
+  typeof snapshotMemberMatchStatusSchema
+>;
 export type GoldenExampleType = z.infer<typeof goldenExampleTypeSchema>;
 export type LabelScale = z.infer<typeof labelScaleSchema>;
 export type BuildToPrintRisk = z.infer<typeof buildToPrintRiskSchema>;
@@ -296,13 +334,17 @@ export type ProposedLabels = z.infer<typeof proposedLabelsSchema>;
 export type ReviewedLabels = z.infer<typeof reviewedLabelsSchema>;
 export type GoldenExampleReview = z.infer<typeof goldenExampleReviewSchema>;
 export type GoldenExample = z.infer<typeof goldenExampleSchema>;
-export type GoldenExampleListQuery = z.infer<typeof goldenExampleListQuerySchema>;
+export type GoldenExampleListQuery = z.infer<
+  typeof goldenExampleListQuerySchema
+>;
 export type LeadCreate = z.infer<typeof leadCreateSchema>;
 export type Lead = z.infer<typeof leadSchema>;
 export type LeadUpdate = z.infer<typeof leadUpdateSchema>;
 export type LeadResolveDecision = z.infer<typeof leadResolveDecisionSchema>;
 export type LeadListQuery = z.infer<typeof leadListQuerySchema>;
-export type IdentityMatchCandidate = z.infer<typeof identityMatchCandidateSchema>;
+export type IdentityMatchCandidate = z.infer<
+  typeof identityMatchCandidateSchema
+>;
 export type IdentityMatchCandidateDecision = z.infer<
   typeof identityMatchCandidateDecisionSchema
 >;
