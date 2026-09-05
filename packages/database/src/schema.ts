@@ -2459,3 +2459,62 @@ export type NewFaaEnsembleEvaluation = InsertRow<typeof faaEnsembleEvaluations>;
 export type FaaEnsembleResult = SelectRow<typeof faaEnsembleResults>;
 export type NewFaaEnsembleResult = InsertRow<typeof faaEnsembleResults>;
 export type FaaEnsembleDecision = "reject" | "research" | "high_priority";
+
+export const unifiedTargets = pgTable(
+  "unified_targets",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    companyName: text("company_name").notNull(),
+    normalizedName: text("normalized_name").notNull().unique(),
+    domain: text("domain"),
+    websiteUrl: text("website_url"),
+    city: text("city"),
+    stateCode: text("state_code"),
+    countryCode: text("country_code"),
+    origins: jsonb("origins").$type<string[]>().notNull().default([]),
+    goldenV1Member: boolean("golden_v1_member").notNull().default(false),
+    tier: text("tier").notNull().default("needs_research"),
+    pipelineStatus: text("pipeline_status"),
+    fit: numeric("fit", { precision: 5, scale: 4 }),
+    novelty: numeric("novelty", { precision: 5, scale: 4 }),
+    confidence: numeric("confidence", { precision: 5, scale: 4 }),
+    actionability: numeric("actionability", { precision: 5, scale: 4 }),
+    ensembleDecision: text("ensemble_decision"),
+    ensembleConfidence: integer("ensemble_confidence"),
+    whyInteresting: text("why_interesting"),
+    risks: text("risks"),
+    unknowns: text("unknowns"),
+    evidenceUrls: jsonb("evidence_urls").$type<string[]>().notNull().default([]),
+    companyId: uuid("company_id").references(() => companies.id, {
+      onDelete: "set null",
+    }),
+    signalId: uuid("signal_id").references(() => sourceSignals.id, {
+      onDelete: "set null",
+    }),
+    candidateId: uuid("candidate_id").references(() => candidates.id, {
+      onDelete: "set null",
+    }),
+    createdAt: ct(),
+    updatedAt: ut(),
+  },
+  (t) => [
+    index("unified_targets_domain_idx").on(t.domain),
+    index("unified_targets_tier_idx").on(t.tier),
+    check(
+      "unified_targets_tier_chk",
+      sql`${t.tier} IN ('reference', 'high_interest', 'evaluate', 'needs_research')`,
+    ),
+    check(
+      "unified_targets_ensemble_confidence_chk",
+      sql`${t.ensembleConfidence} IS NULL OR (${t.ensembleConfidence} >= 0 AND ${t.ensembleConfidence} <= 100)`,
+    ),
+  ],
+);
+
+export type UnifiedTarget = SelectRow<typeof unifiedTargets>;
+export type NewUnifiedTarget = InsertRow<typeof unifiedTargets>;
+export type UnifiedTargetTier =
+  | "reference"
+  | "high_interest"
+  | "evaluate"
+  | "needs_research";
