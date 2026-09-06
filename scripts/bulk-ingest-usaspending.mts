@@ -375,7 +375,11 @@ async function fetchMonth(
 
   return { rowCount, recipients: [...recipients.values()] };
 }
-): UsaspendingLeadCandidate {
+
+function mergeRecipient(
+  left: UsaspendingLeadCandidate,
+  right: UsaspendingLeadCandidate,
+ ): UsaspendingLeadCandidate {
   const naics = uniqueStrings(left.naics, right.naics);
   const pscCodes = uniqueStrings(left.pscCodes, right.pscCodes);
   const useRightQualification =
