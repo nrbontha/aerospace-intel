@@ -68,10 +68,18 @@ const ingestStateSchema = z.object({
     z.string().regex(/^\d{4}-\d{2}$/u),
     completedMonthStateSchema,
   ),
+  inProgress: z
+    .object({
+      month: z.string().regex(/^\d{4}-\d{2}$/u),
+      startPage: z.number().int().positive(),
+      cursor: z
+        .object({ sortValue: z.string(), uniqueId: z.number() })
+        .nullable(),
+      updatedAt: z.string(),
+    })
+    .nullable()
+    .default(null),
 });
-
-type IngestState = z.infer<typeof ingestStateSchema>;
-type CompletedMonth = z.infer<typeof completedMonthStateSchema>;
 
 /** Parse the bulk-ingestion CLI. --limit applies across the selected months. */
 export function parseBulkIngestUsaspendingArgs(
@@ -186,7 +194,37 @@ export async function runBulkIngestUsaspending(
       continue;
     }
 
-    const fetched = await fetchMonth(client, window, month, remaining);
+    const resumeFrom =
+      options.resume &&
+      !options.dryRun &&
+      state.inProgress?.month === month
+        ? {
+            startPage: state.inProgress.startPage,
+            cursor: state.inProgress.cursor,
+          }
+        : null;
+    if (resumeFrom !== null) {
+      console.log(
+        `month=${month} resuming at page=${resumeFrom.startPage}`,
+      );
+    }
+    const fetched = await fetchMonth(
+      client,
+      window,
+      month,
+      remaining,
+      resumeFrom,
+      async (progress) => {
+        if (options.dryRun) return;
+        state.inProgress = {
+          month,
+          startPage: progress.startPage,
+          cursor: progress.cursor,
+          updatedAt: new Date().toISOString(),
+        };
+        await writeState(options.stateFile, state);
+      },
+    );
     const filtered = fetched.recipients.length;
     const selected = fetched.recipients.slice(0, remaining);
     const limited = filtered - selected.length;
@@ -222,6 +260,7 @@ export async function runBulkIngestUsaspending(
         duplicates: summary.duplicates,
         completedAt: new Date().toISOString(),
       };
+      state.inProgress = null;
       await writeState(options.stateFile, state);
     }
   }
@@ -246,26 +285,56 @@ export async function runBulkIngestUsaspending(
   );
 }
 
+async function fetchMonthPageWithRetry(
+  client: UsaspendingClient,
+  args: {
+    readonly naicsCodes: readonly string[];
+    readonly timePeriod: { readonly startDate: string; readonly endDate: string };
+    readonly startPage: number;
+    readonly cursor: { readonly sortValue: string; readonly uniqueId: number } | null;
+  },
+): Promise<Awaited<ReturnType<UsaspendingClient["searchRecipientsPage"]>>> {
+  let delayMs = 2000;
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await client.searchRecipientsPage(args);
+    } catch (error) {
+      if (attempt >= 5) throw error;
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      delayMs = Math.min(30_000, delayMs * 2);
+    }
+  }
+}
+
 async function fetchMonth(
   client: UsaspendingClient,
   timePeriod: { readonly startDate: string; readonly endDate: string },
   month: string,
   collectCap: number,
+  resumeFrom: {
+    readonly startPage: number;
+    readonly cursor: { readonly sortValue: string; readonly uniqueId: number } | null;
+  } | null,
+  onProgress: (
+    progress: {
+      readonly startPage: number;
+      readonly cursor: { readonly sortValue: string; readonly uniqueId: number } | null;
+    },
+  ) => Promise<void>,
 ): Promise<{
   readonly rowCount: number;
   readonly recipients: UsaspendingLeadCandidate[];
 }> {
   const recipients = new Map<string, UsaspendingLeadCandidate>();
   let rowCount = 0;
-  let startPage = 1;
-  let cursor: { readonly sortValue: string; readonly uniqueId: number } | null =
-    null;
+  let startPage = resumeFrom?.startPage ?? 1;
+  let cursor = resumeFrom?.cursor ?? null;
   let pages = 0;
 
   while (true) {
     // UsaspendingClient owns response rowSchema parsing and the strict NAICS /
     // excluded-service qualification gate before any candidate reaches here.
-    const page = await client.searchRecipientsPage({
+    const page = await fetchMonthPageWithRetry(client, {
       naicsCodes: AEROSPACE_NAICS,
       timePeriod,
       startPage,
@@ -297,14 +366,15 @@ async function fetchMonth(
     if (page.nextPage === null) break;
     startPage = page.nextPage;
     cursor = page.cursor;
+    // Checkpoint traversal so --resume survives mid-month failures; inserts
+    // stay idempotent via fingerprint upserts, so re-walked pages just merge.
+    if (pages % 25 === 0) {
+      await onProgress({ startPage, cursor });
+    }
   }
 
   return { rowCount, recipients: [...recipients.values()] };
 }
-
-function mergeRecipient(
-  left: UsaspendingLeadCandidate,
-  right: UsaspendingLeadCandidate,
 ): UsaspendingLeadCandidate {
   const naics = uniqueStrings(left.naics, right.naics);
   const pscCodes = uniqueStrings(left.pscCodes, right.pscCodes);
