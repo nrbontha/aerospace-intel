@@ -1,5 +1,8 @@
-import { describe, expect, it } from "vitest";
+import { type SQL } from "drizzle-orm";
+import { PgDialect } from "drizzle-orm/pg-core";
+import { describe, expect, it, vi } from "vitest";
 
+import { type Database } from "../packages/database/src/index.js";
 import {
   adjudicatorResultSchema,
   buildEvidencePackage,
@@ -10,6 +13,7 @@ import {
   resolveEnsemble,
   resolveEnsembleConfig,
   runWithConcurrency,
+  selectCandidateSignals,
   summarizeEnsembleOutcomes,
   type EnsembleSignalOutcome,
   type FaaEvaluatorResult,
@@ -35,11 +39,11 @@ function evaluatorResult(
 }
 
 describe("parseEnsembleArgs", () => {
-  it("applies defaults", () => {
+  it("defaults to every queued source key", () => {
     expect(parseEnsembleArgs([])).toMatchObject({
       limit: 0,
       status: "queued_qualification",
-      sourceKey: "faa_pma_database",
+      sourceKeys: [],
       dryRun: false,
       sample: null,
       concurrency: 5,
@@ -47,6 +51,11 @@ describe("parseEnsembleArgs", () => {
       benchmarkNames: [],
       failedOnly: false,
     });
+  });
+
+  it("treats empty and all source-key values as every queued key", () => {
+    expect(parseEnsembleArgs(["--source-key", ""]).sourceKeys).toEqual([]);
+    expect(parseEnsembleArgs(["--source-key=all"]).sourceKeys).toEqual([]);
   });
 
   it("parses every CLI flag", () => {
@@ -70,13 +79,21 @@ describe("parseEnsembleArgs", () => {
     expect(options).toMatchObject({
       limit: 25,
       status: "qualifying",
-      sourceKey: "custom_key",
+      sourceKeys: ["custom_key"],
       dryRun: true,
       sample: 10,
       concurrency: 3,
       includeKnown: true,
       benchmarkNames: ["Zephyr", "RAM", "Zitec"],
       failedOnly: true,
+    });
+  });
+
+  it("parses comma-separated source keys", () => {
+    expect(
+      parseEnsembleArgs(["--source-key", "faa_pma_database, sam_entity"]),
+    ).toMatchObject({
+      sourceKeys: ["faa_pma_database", "sam_entity"],
     });
   });
 
@@ -89,6 +106,27 @@ describe("parseEnsembleArgs", () => {
 
   it("rejects negative limits", () => {
     expect(() => parseEnsembleArgs(["--limit", "-1"])).toThrow("--limit");
+  });
+});
+
+describe("selectCandidateSignals", () => {
+  it("filters multiple source keys and selects FIFO by creation time", async () => {
+    const execute = vi.fn(async (_query: unknown) => ({ rows: [] }));
+    await selectCandidateSignals(
+      { execute } as unknown as Database,
+      parseEnsembleArgs([
+        "--source-key",
+        "faa_pma_database,sam_entity",
+        "--include-known",
+      ]),
+    );
+
+    const query = new PgDialect().sqlToQuery(execute.mock.calls[0]![0] as SQL);
+    expect(query.params).toEqual(
+      expect.arrayContaining(["faa_pma_database", "sam_entity"]),
+    );
+    expect(query.sql).toMatch(/ss\.source_key IN \(\$\d+, \$\d+\)/);
+    expect(query.sql).toContain("ORDER BY ss.created_at ASC, ss.id ASC");
   });
 });
 

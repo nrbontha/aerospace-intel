@@ -1,8 +1,7 @@
 /**
- * FAA two-model ensemble qualification runner.
- *
- * High-recall filter over `source_signals` (default: FAA PMA holders awaiting
- * qualification). Each signal is evaluated independently by two models; the
+ * High-recall filter over queued source signals. By default it drains every
+ * queued source key; pass `--source-key faa_pma_database` to limit to FAA PMA
+ * holders. Each signal is evaluated independently by two models; the
  * deterministic ensemble rule accepts agreements, defaults research +
  * high_priority pairs to research, and adjudicates every other disagreement
  * (including malformed model output). API failures are recorded as errors
@@ -14,8 +13,11 @@
  *
  * Usage:
  *   npx tsx scripts/run-faa-ensemble.mts [--limit N] [--status S]
- *     [--source-key K] [--dry-run] [--sample N] [--concurrency N]
+ *     [--source-key K[,K...]] [--dry-run] [--sample N] [--concurrency N]
  *     [--include-known] [--benchmark-names a,b,c] [--failed-only]
+ *
+ * `--source-key` accepts a comma-separated list; omit it, use an empty value,
+ * or pass `all` to select every queued source key.
  */
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
@@ -57,7 +59,7 @@ export const FAA_ADJUDICATOR_PROMPT_VERSION = "faa_adjudicator_v1";
 
 export const DEFAULT_FAA_MODEL_A = "z-ai/glm-5.2:free";
 export const DEFAULT_FAA_MODEL_B = "z-ai/glm-5.2:free";
-export const DEFAULT_FAA_SOURCE_KEY = "faa_pma_database";
+export const FAA_PMA_SOURCE_KEY = "faa_pma_database";
 export const DEFAULT_FAA_STATUS = "queued_qualification";
 export const DEFAULT_FAA_CONCURRENCY = 5;
 export const DEFAULT_FAA_REQUEST_DELAY_MS = 8000;
@@ -189,7 +191,7 @@ export type FaaAdjudicatorResult = z.infer<typeof adjudicatorResultSchema>;
 export interface FaaEnsembleCliOptions {
   readonly limit: number;
   readonly status: string;
-  readonly sourceKey: string;
+  readonly sourceKeys: readonly string[];
   readonly dryRun: boolean;
   readonly sample: number | null;
   readonly concurrency: number;
@@ -228,7 +230,7 @@ export function parseEnsembleArgs(
 ): FaaEnsembleCliOptions {
   const limit = parseNonNegativeInt(flagValue(argv, "--limit"), "--limit") ?? 0;
   const status = flagValue(argv, "--status") ?? DEFAULT_FAA_STATUS;
-  const sourceKey = flagValue(argv, "--source-key") ?? DEFAULT_FAA_SOURCE_KEY;
+  const sourceKeys = parseSourceKeys(flagValue(argv, "--source-key"));
   const dryRun = hasFlag(argv, "--dry-run");
   const sample = parseNonNegativeInt(flagValue(argv, "--sample"), "--sample");
   const concurrencyOverride = parseNonNegativeInt(
@@ -253,7 +255,7 @@ export function parseEnsembleArgs(
   return {
     limit,
     status,
-    sourceKey,
+    sourceKeys,
     dryRun,
     sample,
     concurrency,
@@ -262,6 +264,16 @@ export function parseEnsembleArgs(
     benchmarkNames,
     failedOnly,
   };
+}
+
+function parseSourceKeys(raw: string | undefined): readonly string[] {
+  const sourceKeys = (raw ?? "")
+    .split(",")
+    .map((sourceKey) => sourceKey.trim())
+    .filter((sourceKey) => sourceKey.length > 0);
+  return sourceKeys.some((sourceKey) => sourceKey.toLowerCase() === "all")
+    ? []
+    : sourceKeys;
 }
 
 // ---------------------------------------------------------------------------
@@ -580,10 +592,17 @@ async function defaultAdjudicate(
 }
 
 // ---------------------------------------------------------------------------
-// Signal selection (resumable; deterministic id order)
+// Signal selection (resumable; FIFO by creation time)
 // ---------------------------------------------------------------------------
+function sourceKeyFilter(sourceKeys: readonly string[]) {
+  if (sourceKeys.length === 0) return sql``;
+  const values = sourceKeys.map((sourceKey) => sql`${sourceKey}`);
+  return sql`AND ss.source_key IN (${sql.join(values, sql`, `)})`;
+}
+
 export interface CandidateSignalRow extends SourceSignalRowLike {
   readonly id: string;
+  readonly created_at: Date | string;
 }
 
 export async function selectCandidateSignals(
@@ -604,10 +623,11 @@ export async function selectCandidateSignals(
       ss.country,
       ss.award_count,
       ss.freshest_award,
+      ss.created_at,
       ss.source_payload
     FROM source_signals ss
-    WHERE ss.source_key = ${options.sourceKey}
-      AND ss.status::text = ${options.status}
+    WHERE ss.status::text = ${options.status}
+      ${sourceKeyFilter(options.sourceKeys)}
       AND NOT EXISTS (
         SELECT 1 FROM faa_ensemble_results r WHERE r.signal_id = ss.id
       )
@@ -631,7 +651,7 @@ export async function selectCandidateSignals(
               WHERE lower(c.legal_name) = lower(ss.raw_name)
             )`
       }
-    ORDER BY ss.id ASC
+    ORDER BY ss.created_at ASC, ss.id ASC
     ${trancheCap === null ? sql`` : sql`LIMIT ${trancheCap}`}
   `);
   const rows = [...base.rows];
@@ -650,14 +670,15 @@ export async function selectCandidateSignals(
           ss.country,
           ss.award_count,
           ss.freshest_award,
+          ss.created_at,
           ss.source_payload
         FROM source_signals ss
-        WHERE ss.source_key = ${options.sourceKey}
-          AND position(lower(${name}) in lower(ss.raw_name)) > 0
+        WHERE position(lower(${name}) in lower(ss.raw_name)) > 0
+          ${sourceKeyFilter(options.sourceKeys)}
           AND NOT EXISTS (
             SELECT 1 FROM faa_ensemble_results r WHERE r.signal_id = ss.id
           )
-        ORDER BY ss.id ASC
+        ORDER BY ss.created_at ASC, ss.id ASC
       `);
       for (const row of matched.rows) {
         if (!seen.has(row.id)) {
@@ -666,7 +687,11 @@ export async function selectCandidateSignals(
         }
       }
     }
-    rows.sort((x, y) => (x.id < y.id ? -1 : x.id > y.id ? 1 : 0));
+    rows.sort((x, y) => {
+      const createdAt =
+        x.created_at < y.created_at ? -1 : x.created_at > y.created_at ? 1 : 0;
+      return createdAt === 0 ? x.id.localeCompare(y.id) : createdAt;
+    });
   }
   return rows;
 }
@@ -867,7 +892,40 @@ export function formatEnsembleMetrics(metrics: EnsembleMetrics): string {
     `final: reject=${metrics.finalDistribution.reject} research=${metrics.finalDistribution.research} high_priority=${metrics.finalDistribution.high_priority}`,
     `adjudications=${metrics.adjudications} api_calls=${metrics.apiCalls} failures=${metrics.failures}`,
   ];
+
   return lines.join("\n");
+}
+
+interface QueueDepthRow {
+  readonly source_key: string;
+  readonly status: string;
+  readonly depth: number | string;
+}
+
+async function logQueueDepth(
+  db: Database,
+  options: FaaEnsembleCliOptions,
+): Promise<void> {
+  const queueDepth = await db.execute<QueueDepthRow>(sql`
+    SELECT
+      ss.source_key,
+      ss.status::text AS status,
+      count(*)::integer AS depth
+    FROM source_signals ss
+    WHERE ss.status::text = ${options.status}
+      ${sourceKeyFilter(options.sourceKeys)}
+      AND NOT EXISTS (
+        SELECT 1 FROM faa_ensemble_results r WHERE r.signal_id = ss.id
+      )
+    GROUP BY ss.source_key, ss.status
+    ORDER BY ss.source_key ASC, ss.status ASC
+  `);
+  const sourceKeys =
+    options.sourceKeys.length === 0 ? "all" : options.sourceKeys.join(",");
+  const summary = queueDepth.rows
+    .map((row) => `${row.source_key}/${row.status}=${row.depth}`)
+    .join(" ");
+  console.log(`queue-depth: ${summary || "empty"} (source_keys=${sourceKeys})`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1007,7 +1065,7 @@ export async function runFaaEnsemble(
       ? baseConfig
       : { ...baseConfig, requestDelayMs: options.delayMs };
   const db = dependencies.db ?? getDatabase();
-
+  await logQueueDepth(db, options);
   const rows = await selectCandidateSignals(db, options);
 
   if (options.dryRun) {
@@ -1016,7 +1074,9 @@ export async function runFaaEnsemble(
       console.log(JSON.stringify(pkg, null, 2));
     }
     console.log(
-      `dry-run: signals=${rows.length} status=${options.status} source_key=${options.sourceKey}`,
+      `dry-run: signals=${rows.length} status=${options.status} source_keys=${
+        options.sourceKeys.length === 0 ? "all" : options.sourceKeys.join(",")
+      }`,
     );
     return {
       signals: rows.length,
