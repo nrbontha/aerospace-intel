@@ -43,6 +43,8 @@ export interface UsaspendingIngestMonthSummary {
   readonly duplicates: number;
   readonly limited: number;
   readonly skipped: boolean;
+  /** API pages stepped over after exhausting retries (coverage gaps). */
+  readonly skippedPages: number;
 }
 
 export interface UsaspendingIngestSummary {
@@ -188,6 +190,7 @@ export async function runBulkIngestUsaspending(
         duplicates: completed.duplicates,
         limited: 0,
         skipped: true,
+        skippedPages: 0,
       };
       printMonthSummary(summary, options.dryRun);
       summaries.push(summary);
@@ -195,18 +198,14 @@ export async function runBulkIngestUsaspending(
     }
 
     const resumeFrom =
-      options.resume &&
-      !options.dryRun &&
-      state.inProgress?.month === month
+      options.resume && !options.dryRun && state.inProgress?.month === month
         ? {
             startPage: state.inProgress.startPage,
             cursor: state.inProgress.cursor,
           }
         : null;
     if (resumeFrom !== null) {
-      console.log(
-        `month=${month} resuming at page=${resumeFrom.startPage}`,
-      );
+      console.log(`month=${month} resuming at page=${resumeFrom.startPage}`);
     }
     const fetched = await fetchMonth(
       client,
@@ -246,6 +245,7 @@ export async function runBulkIngestUsaspending(
       duplicates,
       limited,
       skipped: false,
+      skippedPages: fetched.skippedPages,
     };
     printMonthSummary(summary, options.dryRun);
     summaries.push(summary);
@@ -289,9 +289,15 @@ async function fetchMonthPageWithRetry(
   client: UsaspendingClient,
   args: {
     readonly naicsCodes: readonly string[];
-    readonly timePeriod: { readonly startDate: string; readonly endDate: string };
+    readonly timePeriod: {
+      readonly startDate: string;
+      readonly endDate: string;
+    };
     readonly startPage: number;
-    readonly cursor: { readonly sortValue: string; readonly uniqueId: number } | null;
+    readonly cursor: {
+      readonly sortValue: string;
+      readonly uniqueId: number;
+    } | null;
   },
 ): Promise<Awaited<ReturnType<UsaspendingClient["searchRecipientsPage"]>>> {
   let delayMs = 2000;
@@ -313,17 +319,22 @@ async function fetchMonth(
   collectCap: number,
   resumeFrom: {
     readonly startPage: number;
-    readonly cursor: { readonly sortValue: string; readonly uniqueId: number } | null;
+    readonly cursor: {
+      readonly sortValue: string;
+      readonly uniqueId: number;
+    } | null;
   } | null,
-  onProgress: (
-    progress: {
-      readonly startPage: number;
-      readonly cursor: { readonly sortValue: string; readonly uniqueId: number } | null;
-    },
-  ) => Promise<void>,
+  onProgress: (progress: {
+    readonly startPage: number;
+    readonly cursor: {
+      readonly sortValue: string;
+      readonly uniqueId: number;
+    } | null;
+  }) => Promise<void>,
 ): Promise<{
   readonly rowCount: number;
   readonly recipients: UsaspendingLeadCandidate[];
+  readonly skippedPages: number;
 }> {
   const recipients = new Map<string, UsaspendingLeadCandidate>();
   let rowCount = 0;
@@ -331,16 +342,32 @@ async function fetchMonth(
   let cursor = resumeFrom?.cursor ?? null;
   let pages = 0;
 
+  let skippedPages = 0;
+
   while (true) {
     // UsaspendingClient owns response rowSchema parsing and the strict NAICS /
     // excluded-service qualification gate before any candidate reaches here.
-    const page = await fetchMonthPageWithRetry(client, {
-      naicsCodes: AEROSPACE_NAICS,
-      timePeriod,
-      startPage,
-      cursor,
-    });
-    pages += 1;
+    let page;
+    try {
+      page = await fetchMonthPageWithRetry(client, {
+        naicsCodes: AEROSPACE_NAICS,
+        timePeriod,
+        startPage,
+        cursor,
+      });
+    } catch (error) {
+      // A persistently failing position must not hold the month hostage:
+      // log the gap, step past it, and continue. Re-walked rows merge by
+      // recipient key; fingerprint upserts keep inserts idempotent.
+      skippedPages += 1;
+      console.log(
+        `month=${month} skipping page=${startPage} after retries: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      startPage += 1;
+      cursor = null;
+      if (skippedPages > 10) throw error;
+      continue;
+    }
     rowCount += page.qualificationFindings.qualified;
     rowCount += Object.values(page.qualificationFindings.rejected).reduce(
       (total, count) => total + count,
@@ -373,13 +400,17 @@ async function fetchMonth(
     }
   }
 
-  return { rowCount, recipients: [...recipients.values()] };
+  return {
+    rowCount,
+    recipients: [...recipients.values()],
+    skippedPages,
+  };
 }
 
 function mergeRecipient(
   left: UsaspendingLeadCandidate,
   right: UsaspendingLeadCandidate,
- ): UsaspendingLeadCandidate {
+): UsaspendingLeadCandidate {
   const naics = uniqueStrings(left.naics, right.naics);
   const pscCodes = uniqueStrings(left.pscCodes, right.pscCodes);
   const useRightQualification =
@@ -588,6 +619,9 @@ function printMonthSummary(
       `inserted=${summary.inserted}`,
       `duplicates=${summary.duplicates}`,
       `limited=${summary.limited}`,
+      ...(summary.skippedPages > 0
+        ? [`skippedPages=${summary.skippedPages}`]
+        : []),
       ...(summary.skipped ? ["skipped=true"] : []),
       ...(dryRun ? ["dry_run=true"] : []),
     ].join(" "),
