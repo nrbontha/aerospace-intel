@@ -133,9 +133,9 @@ describe("selectCandidateSignals", () => {
 describe("resolveEnsembleConfig", () => {
   it("defaults to GLM single-model operation with adjudicator = model A", () => {
     expect(resolveEnsembleConfig({})).toMatchObject({
-      modelA: "z-ai/glm-5.2:free",
-      modelB: "z-ai/glm-5.2:free",
-      adjudicatorModel: "z-ai/glm-5.2:free",
+      modelA: "minimax/minimax-m3:free",
+      modelB: "minimax/minimax-m3:free",
+      adjudicatorModel: "minimax/minimax-m3:free",
       concurrency: 5,
     });
   });
