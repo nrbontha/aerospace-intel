@@ -133,9 +133,9 @@ describe("selectCandidateSignals", () => {
 describe("resolveEnsembleConfig", () => {
   it("defaults to GLM single-model operation with adjudicator = model A", () => {
     expect(resolveEnsembleConfig({})).toMatchObject({
-      modelA: "minimax/minimax-m3:free",
-      modelB: "minimax/minimax-m3:free",
-      adjudicatorModel: "minimax/minimax-m3:free",
+      modelA: "meta/muse-spark-1.3-contributor",
+      modelB: "meta/muse-spark-1.3-contributor",
+      adjudicatorModel: "meta/muse-spark-1.3-contributor",
       concurrency: 5,
     });
   });

@@ -57,8 +57,8 @@ for (const line of existsSync(".env.local")
 export const FAA_EVALUATOR_PROMPT_VERSION = "faa_qualification_v1";
 export const FAA_ADJUDICATOR_PROMPT_VERSION = "faa_adjudicator_v1";
 
-export const DEFAULT_FAA_MODEL_A = "minimax/minimax-m3:free";
-export const DEFAULT_FAA_MODEL_B = "minimax/minimax-m3:free";
+export const DEFAULT_FAA_MODEL_A = "meta/muse-spark-1.3-contributor";
+export const DEFAULT_FAA_MODEL_B = "meta/muse-spark-1.3-contributor";
 export const FAA_PMA_SOURCE_KEY = "faa_pma_database";
 export const DEFAULT_FAA_STATUS = "queued_qualification";
 export const DEFAULT_FAA_CONCURRENCY = 5;
