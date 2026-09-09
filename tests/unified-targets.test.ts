@@ -17,6 +17,7 @@ import {
   mapEnsembleTier,
   mergeBatchDuplicates,
   normalizeUnifiedName,
+  upsertBatch,
 } from "../scripts/populate-unified-targets.mts";
 
 describe("normalizeUnifiedName", () => {
@@ -252,5 +253,50 @@ describe("isSubsidiaryName", () => {
     expect(
       isSubsidiaryName("B/E Aerospace Inc, DBA, SMR Technologies Inc"),
     ).toBe(false);
+  });
+});
+
+describe("upsertBatch chunking", () => {
+  const row = (name: string) => ({
+    companyName: name,
+    domain: null,
+    websiteUrl: null,
+    city: null,
+    stateCode: null,
+    countryCode: null,
+    origin: "faa_ensemble",
+    goldenV1Member: false,
+    tier: "needs_research",
+    investorPriority: 3 as const,
+    oversizeFlag: false,
+    proprietaryBasis: "unknown" as const,
+    pipelineStatus: null,
+    fit: null,
+    novelty: null,
+    confidence: null,
+    actionability: null,
+    ensembleDecision: null,
+    ensembleConfidence: null,
+    whyInteresting: null,
+    risks: null,
+    unknowns: null,
+    evidenceUrls: [],
+    companyId: null,
+    signalId: null,
+    candidateId: null,
+  });
+
+  it("splits large batches so no INSERT exceeds the parameter ceiling", async () => {
+    const calls: { text: string; params: unknown[] }[] = [];
+    const rows = Array.from({ length: 600 }, (_, i) => row(`Chunk Co ${i}`));
+    const outcome = await upsertBatch(async (text, params) => {
+      calls.push({ text, params });
+      return { rows: rows.slice(0, 0).map(() => ({ inserted: false })) };
+    }, rows);
+    expect(calls).toHaveLength(3);
+    for (const call of calls) {
+      expect(call.params.length).toBeLessThanOrEqual(250 * 27);
+    }
+    expect(outcome).toEqual({ inserted: 0, merged: 0 });
   });
 });

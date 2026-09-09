@@ -617,8 +617,12 @@ const CONFLICT_CLAUSE = `ON CONFLICT (normalized_name) DO UPDATE SET
 
 /**
  * Bulk upsert one source batch. Returns per-source inserted/merged counts
- * (`xmax = 0` marks freshly inserted rows).
+ * (`xmax = 0` marks freshly inserted rows). Chunked at UPSERT_CHUNK_ROWS:
+ * 27 columns/row means 250 rows stay far under PostgreSQL's 65,535-parameter
+ * ceiling and keep bind payloads small.
  */
+export const UPSERT_CHUNK_ROWS = 250;
+
 export async function upsertBatch(
   query: PopulateQueryFn,
   rows: readonly UnifiedTargetRow[],
@@ -629,8 +633,23 @@ export async function upsertBatch(
   const deduped = mergeBatchDuplicates(
     rows.filter((r) => !isSyntheticTargetName(r.companyName)),
   );
+  let inserted = 0;
+  let merged = 0;
+  for (let start = 0; start < deduped.length; start += UPSERT_CHUNK_ROWS) {
+    const chunk = deduped.slice(start, start + UPSERT_CHUNK_ROWS);
+    const outcome = await upsertChunk(query, chunk);
+    inserted += outcome.inserted;
+    merged += outcome.merged;
+  }
+  return { inserted, merged };
+}
+
+async function upsertChunk(
+  query: PopulateQueryFn,
+  chunk: readonly UnifiedTargetRow[],
+): Promise<SourceCounts> {
   const params: unknown[] = [];
-  const tuples = deduped.map((r) => {
+  const tuples = chunk.map((r) => {
     const values: unknown[] = [
       r.companyName,
       normalizeUnifiedName(r.companyName),
