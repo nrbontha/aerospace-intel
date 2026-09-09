@@ -18,7 +18,8 @@
     "@asi/config": "*",
     "@asi/database": "*",
     "@asi/research": "*",
-    "pg-boss": "12.27.0"
+    "pg-boss": "12.27.0",
+    "zod": "4.4.3"
   },
   "devDependencies": {
     "@types/node": "22.20.1",

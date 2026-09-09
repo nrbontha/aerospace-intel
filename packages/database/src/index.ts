@@ -20,3 +20,7 @@ export * from "./agents/index.js";
 export * from "./source-signals/index.js";
 export * from "./experiments/index.js";
 export * from "./synthesis/index.js";
+export * from "./unified-targets/records.js";
+export * from "./unified-targets/populate.js";
+export * from "./unified-targets/promote.js";
+export * from "./unified-targets/export.js";

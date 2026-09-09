@@ -17,6 +17,10 @@ import {
   createSourceResearchHandler,
 } from "./handlers/index.js";
 import { startCampaignSweep, type CampaignSweepHandle } from "./campaign-sweep.js";
+import {
+  startEnsembleScheduler,
+  type EnsembleSchedulerHandle,
+} from "./ensemble-scheduler.js";
 import { getCampaignPublisher } from "./handlers/campaign-process.js";
 import {
   createWorkerQueue,
@@ -188,6 +192,7 @@ export async function startWorker(): Promise<WorkerRuntime> {
   let queue: WorkerQueue | undefined;
   let supervisor: SupervisorRuntime | undefined;
   let sweep: CampaignSweepHandle | undefined;
+  let ensembleScheduler: EnsembleSchedulerHandle | undefined;
 
   try {
     healthServer = await startHealthServer(env.PORT, {
@@ -289,6 +294,20 @@ export async function startWorker(): Promise<WorkerRuntime> {
       logger: log,
     });
     log("info", "campaign.sweep_started", {});
+
+    // Autonomous sourcing loop: ensemble screening + unified refresh +
+    // high-priority promotion on a fixed tick. Never throws: the scheduler
+    // logs and skips per step, and stays off without an API key.
+    if (env.OPENROUTER_API_KEY !== undefined) {
+      ensembleScheduler = startEnsembleScheduler({
+        logger: log,
+        apiKey: env.OPENROUTER_API_KEY,
+        model: env.FAA_MODEL_A,
+      });
+      log("info", "ensemble.scheduler_started", { model: env.FAA_MODEL_A });
+    } else {
+      log("warn", "ensemble.scheduler_disabled", { reason: "missing_api_key" });
+    }
   } catch (error) {
     try {
       await stopComponents(healthServer, queue, supervisor);
@@ -309,6 +328,7 @@ export async function startWorker(): Promise<WorkerRuntime> {
       stopPromise ??= (async () => {
         log("info", "worker.stopping");
         if (sweep !== undefined) sweep.stop();
+        if (ensembleScheduler !== undefined) ensembleScheduler.stop();
         await stopComponents(healthServer, queue, supervisor);
         log("info", "worker.stopped");
       })();
