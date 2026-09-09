@@ -179,6 +179,7 @@ export interface FaaEnsembleCliOptions {
 // ---------------------------------------------------------------------------
 export interface SourceSignalRowLike {
   readonly id: string;
+  readonly [key: string]: unknown;
   readonly raw_name?: unknown;
   readonly rawName?: unknown;
   readonly raw_domain?: unknown;
@@ -805,6 +806,7 @@ export function formatEnsembleMetrics(metrics: EnsembleMetrics): string {
 
 interface QueueDepthRow {
   readonly source_key: string;
+  readonly [key: string]: unknown;
   readonly status: string;
   readonly depth: number | string;
 }
