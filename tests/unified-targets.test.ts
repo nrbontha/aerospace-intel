@@ -19,6 +19,7 @@ import {
   normalizeUnifiedName,
   upsertBatch,
 } from "../scripts/populate-unified-targets.mts";
+import { ENSEMBLE_PROMOTION_CAMPAIGN_ID } from "../packages/database/src/unified-targets/promote.js";
 
 describe("normalizeUnifiedName", () => {
   it("lowercases, trims, collapses whitespace, strips legal suffix", () => {
@@ -298,5 +299,13 @@ describe("upsertBatch chunking", () => {
       expect(call.params.length).toBeLessThanOrEqual(250 * 27);
     }
     expect(outcome).toEqual({ inserted: 0, merged: 0 });
+  });
+});
+
+describe("ensemble promotion campaign", () => {
+  it("uses a valid UUID campaign id (invalid ids fail at the database)", () => {
+    expect(ENSEMBLE_PROMOTION_CAMPAIGN_ID).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+    );
   });
 });

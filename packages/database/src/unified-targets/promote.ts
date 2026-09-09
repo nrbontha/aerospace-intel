@@ -22,7 +22,7 @@ import { queryFnFor, type QueryableDb } from "./populate.js";
  * hit the ingestion dedupe key instead of creating duplicate leads.
  */
 export const ENSEMBLE_PROMOTION_CAMPAIGN_ID =
-  "7fa3c1e2-9b4d-4f6a-8c2e-1a5b9d3f7e6c0";
+  "a870d77a-d6b0-4f91-ac1e-f75e94d561ca";
 
 export interface PromoteEnsembleLeadsOptions {
   /** Max high-priority results to consider. Defaults to 25. */
@@ -89,9 +89,7 @@ function awardDateOrUndefined(value: unknown): string | undefined {
 function toLeadCandidate(candidate: PromotionCandidate): LeadCandidateInput {
   return {
     rawName: candidate.rawName,
-    ...(candidate.rawDomain === null
-      ? {}
-      : { domain: candidate.rawDomain }),
+    ...(candidate.rawDomain === null ? {} : { domain: candidate.rawDomain }),
     ...(candidate.uei === null ? {} : { uei: candidate.uei }),
     ...(candidate.cage === null ? {} : { cageCode: candidate.cage }),
     ...(candidate.city === null ? {} : { city: candidate.city }),
@@ -166,7 +164,9 @@ export async function promoteEnsembleLeads(
   const companyIds = candidates.flatMap((candidate) =>
     candidate.companyId === null ? [] : [candidate.companyId],
   );
-  const rawNames = [...new Set(candidates.map((candidate) => candidate.rawName))];
+  const rawNames = [
+    ...new Set(candidates.map((candidate) => candidate.rawName)),
+  ];
 
   // One lookup for every non-discarded lead already covering these signals,
   // companies, or raw names (e.g. created earlier by the live qualifier).
