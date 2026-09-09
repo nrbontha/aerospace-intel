@@ -40,10 +40,11 @@ const DEFAULT_DELAY_MS = 1_000;
 const UNHEALTHY_CACHE_MS = 15 * 60 * 1_000;
 const PROBE_TIMEOUT_MS = 30_000;
 /**
- * Tiny probe budget. 5 raw tokens cannot carry a JSON object through the
- * structured-output client, so the probe uses 32: still cents-fractions.
+ * Probe budget. Reasoning models burn hundreds of thinking tokens before
+ * emitting JSON; 32 tokens false-negatives them as unhealthy. 1200 covers
+ * the thought plus the object for ~$0.0003/probe.
  */
-const PROBE_MAX_OUTPUT_TOKENS = 32;
+const PROBE_MAX_OUTPUT_TOKENS = 1200;
 
 const probeSchema = z.object({ ok: z.boolean() });
 
@@ -61,19 +62,13 @@ export interface EnsembleSchedulerHandle {
   stop(): void;
 }
 
-function readPositiveInt(
-  raw: string | undefined,
-  fallback: number,
-): number {
+function readPositiveInt(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw.trim().length === 0) return fallback;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
 }
 
-function readNonNegativeInt(
-  raw: string | undefined,
-  fallback: number,
-): number {
+function readNonNegativeInt(raw: string | undefined, fallback: number): number {
   if (raw === undefined || raw.trim().length === 0) return fallback;
   const parsed = Number(raw);
   return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
@@ -88,13 +83,22 @@ export function resolveSchedulerConfig(options: EnsembleSchedulerOptions): {
   return {
     scheduleMinutes:
       options.scheduleMinutes ??
-      readPositiveInt(process.env[ENSEMBLE_SCHEDULE_ENV], DEFAULT_SCHEDULE_MINUTES),
+      readPositiveInt(
+        process.env[ENSEMBLE_SCHEDULE_ENV],
+        DEFAULT_SCHEDULE_MINUTES,
+      ),
     batchLimit:
       options.batchLimit ??
-      readNonNegativeInt(process.env[ENSEMBLE_BATCH_LIMIT_ENV], DEFAULT_BATCH_LIMIT),
+      readNonNegativeInt(
+        process.env[ENSEMBLE_BATCH_LIMIT_ENV],
+        DEFAULT_BATCH_LIMIT,
+      ),
     concurrency:
       options.concurrency ??
-      readPositiveInt(process.env[ENSEMBLE_CONCURRENCY_ENV], DEFAULT_CONCURRENCY),
+      readPositiveInt(
+        process.env[ENSEMBLE_CONCURRENCY_ENV],
+        DEFAULT_CONCURRENCY,
+      ),
     delayMs:
       options.delayMs ??
       readNonNegativeInt(process.env[ENSEMBLE_DELAY_MS_ENV], DEFAULT_DELAY_MS),
@@ -117,7 +121,8 @@ export function startEnsembleScheduler(
 
   async function tick(): Promise<void> {
     if (stopped || inFlight) {
-      if (inFlight) logger("warn", "ensemble.scheduler_tick_overlap_skipped", {});
+      if (inFlight)
+        logger("warn", "ensemble.scheduler_tick_overlap_skipped", {});
       return;
     }
     inFlight = true;
@@ -219,9 +224,12 @@ export function startEnsembleScheduler(
     }
   }
 
-  const timer = setInterval(() => {
-    void tick();
-  }, config.scheduleMinutes * 60 * 1_000);
+  const timer = setInterval(
+    () => {
+      void tick();
+    },
+    config.scheduleMinutes * 60 * 1_000,
+  );
   timer.unref();
   void tick();
 
