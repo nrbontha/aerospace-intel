@@ -463,11 +463,13 @@ async function main(): Promise<void> {
     else counts.unmatched += 1;
 
     const importKey = `investor-2026-09-09|${normalizeLegalName(row.name)}`;
-    const [existingFeedback] = await db.execute<{ id: string }>(sql`
-      SELECT id FROM feedback
-      WHERE company_id = ${companyId} AND payload->>'importKey' = ${importKey}
-      LIMIT 1
-    `);
+    const existingFeedback = (
+      await db.execute<{ id: string }>(sql`
+        SELECT id FROM feedback
+        WHERE company_id = ${companyId} AND payload->>'importKey' = ${importKey}
+        LIMIT 1
+      `)
+    ).rows[0];
     const ownerFact =
       decision === "pass_acquired"
         ? (ownerByName.get(normalizeLegalName(row.name)) ?? null)
