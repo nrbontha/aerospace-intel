@@ -342,7 +342,7 @@ async function main(): Promise<void> {
     let revenueFacts = 0;
     let employeeFacts = 0;
     let ownershipFacts = 0;
-    if (result.status === "created" && b.exact > 0) {
+    if (b.exact > 0) {
       // Evidence chain: one data_sources row + one source_document for the
       // CSV file; one evidence row per matched company covering its facts.
       const existingSource = await db
