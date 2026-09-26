@@ -25,6 +25,7 @@ import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import process from "node:process";
+import { and, eq } from "drizzle-orm";
 
 import {
   closeDatabase,
