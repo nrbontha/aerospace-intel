@@ -255,7 +255,7 @@ export const ROUND2_ACQUIRED_MAP: Round2AcquiredEntry[] = [
     ownership: "pe_owned",
   },
   {
-    keys: ["robertson fuel", "robertson"],
+    keys: ["robertson fuel"],
     owner: "HEICO",
     year: 2016,
     note: "Acquired by HEICO in 2016 for $255M.",
@@ -353,7 +353,14 @@ export interface Round2Verdict {
 }
 
 function includesKey(normalized: string, keys: readonly string[]): boolean {
-  return keys.some((k) => normalized.includes(k));
+  // Prefix match on word boundaries: "jet parts engineering, inc. (jpe)"
+  // matches, but "infinite electronics international" must not match
+  // "electronics international".
+  return keys.some(
+    (k) =>
+      normalized === k ||
+      (normalized.startsWith(k) && /^[\s,(]/.test(normalized.slice(k.length))),
+  );
 }
 
 /**

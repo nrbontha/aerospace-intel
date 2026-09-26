@@ -405,6 +405,26 @@ describe("round-2 investor verdicts", () => {
     });
   });
 
+  it("does not match longer different names sharing a tail", () => {
+    expect(
+      deriveRound2Verdict("INFINITE ELECTRONICS INTERNATIONAL, INC.")
+        .pipelineDecision,
+    ).not.toBe("add");
+    expect(
+      deriveRound2Verdict("Robertson Aviation LLC").pipelineDecision,
+    ).not.toBe("pass_acquired");
+  });
+
+  it("matches name variants with suffixes and qualifiers", () => {
+    expect(
+      deriveRound2Verdict("Jet Parts Engineering, Inc. (JPE)").pipelineDecision,
+    ).toBe("pass_acquired");
+    expect(
+      deriveRound2Verdict("Kirkhill Aircraft Parts Co, d/b/a KAPCO")
+        .pipelineDecision,
+    ).toBe("pass_acquired");
+  });
+
   it("flags subsidiary names as strategic-owned, leaves others unreviewed", () => {
     expect(deriveRound2Verdict("Acme, a Division of XYZ")).toMatchObject({
       ownershipStatus: "strategic_owned",
