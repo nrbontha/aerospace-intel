@@ -5,6 +5,8 @@ import {
   parseExportArgs,
 } from "../scripts/export-unified-targets.mts";
 import {
+  ROUND2_ACQUIRED_MAP,
+  deriveRound2Verdict,
   higherTier,
   isOffThesisName,
   isSubsidiaryName,
@@ -16,6 +18,8 @@ import {
   mapEnsembleInvestorAssessment,
   mapEnsembleTier,
   mergeBatchDuplicates,
+  mergeOwnershipStatus,
+  mergePipelineDecision,
   normalizeUnifiedName,
   upsertBatch,
 } from "../scripts/populate-unified-targets.mts";
@@ -121,6 +125,8 @@ describe("unified export", () => {
       "Origins",
       "Golden v1",
       "Pipeline Status",
+      "Ownership Status",
+      "Pipeline Decision",
       "Fit",
       "Novelty",
       "Confidence",
@@ -296,7 +302,7 @@ describe("upsertBatch chunking", () => {
     }, rows);
     expect(calls).toHaveLength(3);
     for (const call of calls) {
-      expect(call.params.length).toBeLessThanOrEqual(250 * 27);
+      expect(call.params.length).toBeLessThanOrEqual(250 * 29);
     }
     expect(outcome).toEqual({ inserted: 0, merged: 0 });
   });
@@ -307,5 +313,175 @@ describe("ensemble promotion campaign", () => {
     expect(ENSEMBLE_PROMOTION_CAMPAIGN_ID).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
     );
+  });
+});
+
+describe("round-2 investor verdicts", () => {
+  it("keeps the 19-entry acquired-owner map intact", () => {
+    expect(ROUND2_ACQUIRED_MAP).toHaveLength(19);
+  });
+
+  it("maps strategic acquisitions to pass_acquired/strategic_owned", () => {
+    expect(deriveRound2Verdict("Dart Aerospace")).toMatchObject({
+      ownershipStatus: "strategic_owned",
+      pipelineDecision: "pass_acquired",
+      owner: "TransDigm",
+    });
+    expect(
+      deriveRound2Verdict("Jet Parts Engineering, Inc. (JPE)"),
+    ).toMatchObject({
+      ownershipStatus: "strategic_owned",
+      pipelineDecision: "pass_acquired",
+    });
+    expect(
+      deriveRound2Verdict("Kirkhill Aircraft Parts Company").ownershipStatus,
+    ).toBe("strategic_owned");
+    expect(
+      deriveRound2Verdict("Turbine Kinetics Inc, Subsidiary of HEICO Corp"),
+    ).toMatchObject({
+      ownershipStatus: "strategic_owned",
+      pipelineDecision: "pass_acquired",
+    });
+    expect(deriveRound2Verdict("Robertson Fuel Systems LLC")).toMatchObject({
+      ownershipStatus: "strategic_owned",
+      pipelineDecision: "pass_acquired",
+    });
+  });
+
+  it("maps PE acquisitions to pe_owned and public companies to public", () => {
+    expect(deriveRound2Verdict("Raisbeck Engineering Inc")).toMatchObject({
+      ownershipStatus: "pe_owned",
+      pipelineDecision: "pass_acquired",
+    });
+    expect(deriveRound2Verdict("Shadin Avionics").ownershipStatus).toBe(
+      "pe_owned",
+    );
+    expect(
+      deriveRound2Verdict(
+        "Sirius Technologies, Inc., DBA Flight Display System",
+      ),
+    ).toMatchObject({
+      ownershipStatus: "pe_owned",
+      pipelineDecision: "pass_acquired",
+      owner: "Vance Street Partners",
+    });
+    expect(deriveRound2Verdict("VisionSafe Corporation")).toMatchObject({
+      ownershipStatus: "pe_owned",
+      pipelineDecision: "pass_acquired",
+    });
+    expect(deriveRound2Verdict("Butler National Corporation")).toMatchObject({
+      ownershipStatus: "public",
+      pipelineDecision: "pass_acquired",
+    });
+  });
+
+  it("maps Maybe verdicts to hold and the sole add to add", () => {
+    for (const name of [
+      "Alpha Aviation, Inc",
+      "Composite Specialties",
+      "Concorde Battery Corp",
+      "Middle Fork Mods, LLC.",
+      "M-20 Oil Separators LLC",
+    ]) {
+      expect(deriveRound2Verdict(name).pipelineDecision).toBe("hold");
+    }
+    expect(deriveRound2Verdict("Electronics International Inc")).toMatchObject({
+      ownershipStatus: "independent",
+      pipelineDecision: "add",
+    });
+  });
+
+  it("maps dead and wrong-sector verdicts", () => {
+    expect(deriveRound2Verdict("Keddeg Company")).toMatchObject({
+      ownershipStatus: "dead",
+      pipelineDecision: "pass_dead",
+    });
+    expect(
+      deriveRound2Verdict("Whelen Engineering Co Inc").pipelineDecision,
+    ).toBe("pass_sector");
+    expect(deriveRound2Verdict("Delta Flight Products")).toMatchObject({
+      ownershipStatus: "strategic_owned",
+      pipelineDecision: "pass_sector",
+    });
+  });
+
+  it("flags subsidiary names as strategic-owned, leaves others unreviewed", () => {
+    expect(deriveRound2Verdict("Acme, a Division of XYZ")).toMatchObject({
+      ownershipStatus: "strategic_owned",
+      pipelineDecision: "unreviewed",
+    });
+    expect(deriveRound2Verdict("Zephyr International LLC")).toMatchObject({
+      ownershipStatus: "unknown",
+      pipelineDecision: "unreviewed",
+    });
+  });
+});
+
+describe("ownership/decision merge precedence", () => {
+  it("prefers any non-unknown ownership, keeping existing on ties", () => {
+    expect(mergeOwnershipStatus("unknown", "strategic_owned")).toBe(
+      "strategic_owned",
+    );
+    expect(mergeOwnershipStatus("pe_owned", "unknown")).toBe("pe_owned");
+    expect(mergeOwnershipStatus("pe_owned", "strategic_owned")).toBe(
+      "pe_owned",
+    );
+    expect(mergeOwnershipStatus(null, undefined)).toBe("unknown");
+  });
+
+  it("keeps terminal passes over hold/unreviewed, add over hold", () => {
+    expect(mergePipelineDecision("hold", "pass_acquired")).toBe(
+      "pass_acquired",
+    );
+    expect(mergePipelineDecision("pass_dead", "add")).toBe("pass_dead");
+    expect(mergePipelineDecision("unreviewed", "add")).toBe("add");
+    expect(mergePipelineDecision("hold", "unreviewed")).toBe("hold");
+    expect(mergePipelineDecision(null, null)).toBe("unreviewed");
+  });
+
+  it("folds verdict fields when batch rows collide", () => {
+    const row = (
+      companyName: string,
+      ownershipStatus: string,
+      pipelineDecision: string,
+    ) => ({
+      companyName,
+      domain: null,
+      websiteUrl: null,
+      city: null,
+      stateCode: null,
+      countryCode: null,
+      origin: "faa_ensemble",
+      goldenV1Member: false,
+      tier: "needs_research",
+      investorPriority: 3 as const,
+      oversizeFlag: false,
+      proprietaryBasis: "unknown" as const,
+      ownershipStatus,
+      pipelineDecision,
+      pipelineStatus: null,
+      fit: null,
+      novelty: null,
+      confidence: null,
+      actionability: null,
+      ensembleDecision: null,
+      ensembleConfidence: null,
+      whyInteresting: null,
+      risks: null,
+      unknowns: null,
+      evidenceUrls: [],
+      companyId: null,
+      signalId: null,
+      candidateId: null,
+    });
+    const merged = mergeBatchDuplicates([
+      row("Dart Aerospace", "unknown", "unreviewed"),
+      row("DART AEROSPACE", "strategic_owned", "pass_acquired"),
+    ]);
+    expect(merged).toHaveLength(1);
+    expect(merged[0]).toMatchObject({
+      ownershipStatus: "strategic_owned",
+      pipelineDecision: "pass_acquired",
+    });
   });
 });

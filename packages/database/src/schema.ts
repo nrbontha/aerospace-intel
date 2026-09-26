@@ -2501,6 +2501,8 @@ export const unifiedTargets = pgTable(
     investorPriority: integer("investor_priority"),
     oversizeFlag: boolean("oversize_flag").default(false),
     proprietaryBasis: text("proprietary_basis").default("unknown"),
+    ownershipStatus: text("ownership_status").notNull().default("unknown"),
+    pipelineDecision: text("pipeline_decision").notNull().default("unreviewed"),
     pipelineStatus: text("pipeline_status"),
     fit: numeric("fit", { precision: 5, scale: 4 }),
     novelty: numeric("novelty", { precision: 5, scale: 4 }),
@@ -2538,6 +2540,14 @@ export const unifiedTargets = pgTable(
       "unified_targets_ensemble_confidence_chk",
       sql`${t.ensembleConfidence} IS NULL OR (${t.ensembleConfidence} >= 0 AND ${t.ensembleConfidence} <= 100)`,
     ),
+    check(
+      "unified_targets_ownership_status_chk",
+      sql`${t.ownershipStatus} IN ('independent', 'pe_owned', 'strategic_owned', 'public', 'dead', 'unknown')`,
+    ),
+    check(
+      "unified_targets_pipeline_decision_chk",
+      sql`${t.pipelineDecision} IN ('add', 'hold', 'pass_acquired', 'pass_scale', 'pass_dead', 'pass_sector', 'unreviewed')`,
+    ),
   ],
 );
 
@@ -2545,3 +2555,18 @@ export type UnifiedTarget = SelectRow<typeof unifiedTargets>;
 export type NewUnifiedTarget = InsertRow<typeof unifiedTargets>;
 export type UnifiedTargetTier =
   "reference" | "high_interest" | "evaluate" | "needs_research";
+export type UnifiedTargetOwnershipStatus =
+  | "independent"
+  | "pe_owned"
+  | "strategic_owned"
+  | "public"
+  | "dead"
+  | "unknown";
+export type UnifiedTargetPipelineDecision =
+  | "add"
+  | "hold"
+  | "pass_acquired"
+  | "pass_scale"
+  | "pass_dead"
+  | "pass_sector"
+  | "unreviewed";

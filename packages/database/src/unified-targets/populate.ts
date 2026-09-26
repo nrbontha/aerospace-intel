@@ -130,6 +130,371 @@ export function isOffThesisName(name: string): boolean {
 export function isSubsidiaryName(name: string): boolean {
   return /\b(subsidiary|division|unit)\s+of\b/i.test(name);
 }
+
+// ---------------------------------------------------------------------------
+// Round-2 investor verdicts (2026-09-09 Booie review of the Nikhil new-target
+// list). Ownership_observations cannot be joined here — populate rows carry
+// no company_id at load time — so the reviewed verdicts are encoded as a
+// documented constant keyed by normalized-name fragment, plus keyword rules
+// over each row's own evidence text. `add` is only ever produced from the
+// explicit add verdict below, never derived automatically.
+// ---------------------------------------------------------------------------
+
+export type OwnershipStatus =
+  | "independent"
+  | "pe_owned"
+  | "strategic_owned"
+  | "public"
+  | "dead"
+  | "unknown";
+
+export type PipelineDecision =
+  | "add"
+  | "hold"
+  | "pass_acquired"
+  | "pass_scale"
+  | "pass_dead"
+  | "pass_sector"
+  | "unreviewed";
+
+export interface Round2AcquiredEntry {
+  /** Normalized-name fragments identifying the target (first hit wins). */
+  keys: string[];
+  /** Acquiring owner, exactly as named in the Booie commentary. */
+  owner: string;
+  /** Acquisition year when stated, otherwise null (see note). */
+  year: number | null;
+  note: string;
+  ownership: OwnershipStatus;
+}
+
+/**
+ * Acquired-owner map: 19 entries. Relevant-but-acquired targets are retained
+ * as archetype references with decision pass_acquired. TransDigm / HEICO /
+ * Parker Hannifin / Ametek / Carlisle are strategics (strategic_owned);
+ * Loar / TJC / Acorn / Vance Street / Stephens and the unnamed PE firms are
+ * private equity (pe_owned); Butler National stays public (public).
+ * Subsidiaries Avcon Industries + BNC Tempe roll up to public Butler.
+ */
+export const ROUND2_ACQUIRED_MAP: Round2AcquiredEntry[] = [
+  {
+    keys: ["ametek ameron"],
+    owner: "Ametek",
+    year: 2009,
+    note: "Acquired by Ametek in 2009.",
+    ownership: "strategic_owned",
+  },
+  {
+    keys: ["smr technologies"],
+    owner: "Loar Group",
+    year: 2019,
+    note: "B/E Aerospace SMR acquired by Loar Group in 2019.",
+    ownership: "pe_owned",
+  },
+  {
+    keys: ["butler national"],
+    owner: "public (~$98M revenue, $38M EBITDA)",
+    year: null,
+    note: "Public company; stays public. Relevant via subsidiaries Avcon Industries + BNC Tempe.",
+    ownership: "public",
+  },
+  {
+    keys: ["avcon industries"],
+    owner: "Butler National Corporation (public)",
+    year: null,
+    note: "Subsidiary of public Butler National.",
+    ownership: "strategic_owned",
+  },
+  {
+    keys: ["bnc tempe"],
+    owner: "Butler National Corporation (public)",
+    year: null,
+    note: "Tempe subsidiary of public Butler National.",
+    ownership: "strategic_owned",
+  },
+  {
+    keys: ["cpi eimac", "eimac"],
+    owner: "TJC (via CPI add-on)",
+    year: null,
+    note: "Acquired as an add-on for CPI, a TJC portfolio company.",
+    ownership: "pe_owned",
+  },
+  {
+    keys: ["dart aerospace"],
+    owner: "TransDigm",
+    year: null,
+    note: "Acquired by TransDigm.",
+    ownership: "strategic_owned",
+  },
+  {
+    keys: ["jet parts engineering", "(jpe)"],
+    owner: "TransDigm",
+    year: null,
+    note: "JPE acquired by TransDigm.",
+    ownership: "strategic_owned",
+  },
+  {
+    keys: ["kirkhill"],
+    owner: "TransDigm (via Esterline)",
+    year: null,
+    note: "Acquired by TransDigm via the Esterline acquisition.",
+    ownership: "strategic_owned",
+  },
+  {
+    keys: ["precision airmotive"],
+    owner: "McFarlane Aviation (via Vance Street Capital)",
+    year: null,
+    note: "Add-on for McFarlane Aviation via Vance Street Capital.",
+    ownership: "pe_owned",
+  },
+  {
+    keys: ["raisbeck"],
+    owner: "Acorn Capital",
+    year: 2016,
+    note: "Acquired by Acorn Capital in 2016.",
+    ownership: "pe_owned",
+  },
+  {
+    keys: ["robertson fuel", "robertson"],
+    owner: "HEICO",
+    year: 2016,
+    note: "Acquired by HEICO in 2016 for $255M.",
+    ownership: "strategic_owned",
+  },
+  {
+    keys: ["shadin"],
+    owner: "two PE firms",
+    year: 2020,
+    note: "Acquired by two PE firms in 2020.",
+    ownership: "pe_owned",
+  },
+  {
+    keys: ["flight display", "sirius technologies"],
+    owner: "Vance Street Partners",
+    year: 2021,
+    note: "Sirius/Flight Display acquired by Vance Street Partners in 2021.",
+    ownership: "pe_owned",
+  },
+  {
+    keys: ["turbine kinetics"],
+    owner: "HEICO",
+    year: null,
+    note: "Subsidiary of / acquired by HEICO.",
+    ownership: "strategic_owned",
+  },
+  {
+    keys: ["vibro-meter", "vibro meter"],
+    owner: "Parker Hannifin (via Meggitt)",
+    year: null,
+    note: "Acquired by Parker Hannifin via Meggitt.",
+    ownership: "strategic_owned",
+  },
+  {
+    keys: ["wellman"],
+    owner: "Carlisle",
+    year: null,
+    note: "Acquired by Carlisle Companies.",
+    ownership: "strategic_owned",
+  },
+  {
+    keys: ["meggitt thermal"],
+    owner: "Parker Hannifin",
+    year: 2022,
+    note: "Acquired by Parker Hannifin in 2022.",
+    ownership: "strategic_owned",
+  },
+  {
+    keys: ["visionsafe"],
+    owner: "Stephens Group",
+    year: 2024,
+    note: "Acquired by The Stephens Group in 2024.",
+    ownership: "pe_owned",
+  },
+];
+
+/** Sole Add-to-Pipeline=Yes verdict: Electronics International. */
+const ROUND2_ADD_KEYS = ["electronics international"];
+/** Maybe verdicts (Relevant Maybe, or Relevant Yes with Add Maybe). */
+const ROUND2_HOLD_KEYS = [
+  "alpha aviation",
+  "composite specialties",
+  "concorde battery",
+  "middle fork",
+  "m-20 oil",
+  "m20 oil",
+];
+/** Dead: Keddeg (acquired 2008, no longer exists). */
+const ROUND2_DEAD_KEYS = ["keddeg"];
+/**
+ * Wrong-sector / too-large: Whelen (law-enforcement lighting + very large),
+ * Delta Flight Products (Delta Air Lines), Skydweller (platform OEM,
+ * already off-thesis by scale).
+ */
+const ROUND2_SECTOR_ENTRIES: Array<{
+  keys: string[];
+  ownership: OwnershipStatus;
+}> = [
+  { keys: ["whelen"], ownership: "independent" },
+  { keys: ["delta flight products"], ownership: "strategic_owned" },
+  { keys: ["skydweller"], ownership: "unknown" },
+];
+
+const PUBLIC_EVIDENCE = /\bnasdaq\b|\bnyse\b|\bpublicly traded\b/i;
+const PE_EVIDENCE =
+  /\bprivate equity\b|\bpe-backed\b|\bpe backed\b|\bportfolio company of\b/i;
+const ACQUIRED_EVIDENCE =
+  /\bacquired by\b|\bsubsidiary of\b|\bdivision of\b|\bowned by\b/i;
+
+export interface Round2Verdict {
+  ownershipStatus: OwnershipStatus;
+  pipelineDecision: PipelineDecision;
+  /** Acquiring owner from the map, when the target is a known acquisition. */
+  owner: string | null;
+}
+
+function includesKey(normalized: string, keys: readonly string[]): boolean {
+  return keys.some((k) => normalized.includes(k));
+}
+
+/**
+ * Derive round-2 ownership + pipeline decision for a target name, with
+ * optional evidence text (feedback/ownership facts when present).
+ * Precedence: acquired map → explicit add → hold → dead → sector →
+ * subsidiary-name → evidence keywords → unknown/unreviewed.
+ */
+export function deriveRound2Verdict(
+  name: string,
+  evidence?: string | null,
+): Round2Verdict {
+  const normalized = normalizeUnifiedName(name);
+  for (const entry of ROUND2_ACQUIRED_MAP) {
+    if (includesKey(normalized, entry.keys)) {
+      return {
+        ownershipStatus: entry.ownership,
+        pipelineDecision: "pass_acquired",
+        owner: entry.owner,
+      };
+    }
+  }
+  if (includesKey(normalized, ROUND2_ADD_KEYS)) {
+    return {
+      ownershipStatus: "independent",
+      pipelineDecision: "add",
+      owner: null,
+    };
+  }
+  if (includesKey(normalized, ROUND2_HOLD_KEYS)) {
+    return {
+      ownershipStatus: "unknown",
+      pipelineDecision: "hold",
+      owner: null,
+    };
+  }
+  if (includesKey(normalized, ROUND2_DEAD_KEYS)) {
+    return {
+      ownershipStatus: "dead",
+      pipelineDecision: "pass_dead",
+      owner: null,
+    };
+  }
+  for (const entry of ROUND2_SECTOR_ENTRIES) {
+    if (includesKey(normalized, entry.keys)) {
+      return {
+        ownershipStatus: entry.ownership,
+        pipelineDecision: "pass_sector",
+        owner: null,
+      };
+    }
+  }
+  if (isSubsidiaryName(name)) {
+    return {
+      ownershipStatus: "strategic_owned",
+      pipelineDecision: "unreviewed",
+      owner: null,
+    };
+  }
+  const text = (evidence ?? "").trim();
+  if (text !== "") {
+    if (PUBLIC_EVIDENCE.test(text)) {
+      return {
+        ownershipStatus: "public",
+        pipelineDecision: "unreviewed",
+        owner: null,
+      };
+    }
+    if (PE_EVIDENCE.test(text)) {
+      return {
+        ownershipStatus: "pe_owned",
+        pipelineDecision: "unreviewed",
+        owner: null,
+      };
+    }
+    if (ACQUIRED_EVIDENCE.test(text)) {
+      return {
+        ownershipStatus: "strategic_owned",
+        pipelineDecision: "unreviewed",
+        owner: null,
+      };
+    }
+  }
+  return {
+    ownershipStatus: "unknown",
+    pipelineDecision: "unreviewed",
+    owner: null,
+  };
+}
+
+/** Ownership merge: any non-unknown value wins; both known keeps existing. */
+export function mergeOwnershipStatus(
+  existing: OwnershipStatus | string | null | undefined,
+  incoming: OwnershipStatus | string | null | undefined,
+): OwnershipStatus {
+  const known = (v: string | null | undefined): v is OwnershipStatus =>
+    v === "independent" ||
+    v === "pe_owned" ||
+    v === "strategic_owned" ||
+    v === "public" ||
+    v === "dead";
+  if (known(existing)) return existing;
+  if (known(incoming)) return incoming;
+  return "unknown";
+}
+
+const PIPELINE_DECISION_RANK: Record<string, number> = {
+  pass_acquired: 4,
+  pass_scale: 4,
+  pass_dead: 4,
+  pass_sector: 4,
+  add: 3,
+  hold: 2,
+  unreviewed: 1,
+};
+
+/**
+ * Pipeline-decision merge: terminal passes outrank add, which outranks hold,
+ * which outranks unreviewed. Ties keep the existing value. `add` is only
+ * ever produced from an explicit investor verdict, never derived
+ * automatically, so letting it win over hold/unreviewed is safe.
+ */
+export function mergePipelineDecision(
+  existing: PipelineDecision | string | null | undefined,
+  incoming: PipelineDecision | string | null | undefined,
+): PipelineDecision {
+  const rank = (v: string | null | undefined): number =>
+    PIPELINE_DECISION_RANK[v ?? "unreviewed"] ?? 1;
+  const normalize = (v: string | null | undefined): PipelineDecision =>
+    v === "add" ||
+    v === "hold" ||
+    v === "pass_acquired" ||
+    v === "pass_scale" ||
+    v === "pass_dead" ||
+    v === "pass_sector"
+      ? v
+      : "unreviewed";
+  return rank(incoming) > rank(existing)
+    ? normalize(incoming)
+    : normalize(existing);
+}
 export function higherTier(a: string, b: string): string {
   return (TIER_RANK[a] ?? 0) >= (TIER_RANK[b] ?? 0) ? a : b;
 }
@@ -452,6 +817,8 @@ export interface UnifiedTargetRow {
   investorPriority: InvestorPriority;
   oversizeFlag: boolean;
   proprietaryBasis: ProprietaryBasis;
+  ownershipStatus: OwnershipStatus;
+  pipelineDecision: PipelineDecision;
   pipelineStatus: string | null;
   fit: number | null;
   novelty: number | null;
@@ -483,6 +850,8 @@ const UPSERT_COLUMNS = [
   "oversize_flag",
   "proprietary_basis",
   "pipeline_status",
+  "ownership_status",
+  "pipeline_decision",
   "fit",
   "novelty",
   "confidence",
@@ -519,7 +888,12 @@ export function mergeBatchDuplicates(
     const key = normalizeUnifiedName(row.companyName);
     const existing = byName.get(key);
     if (existing === undefined) {
-      byName.set(key, { ...row, evidenceUrls: [...row.evidenceUrls] });
+      byName.set(key, {
+        ...row,
+        ownershipStatus: row.ownershipStatus ?? "unknown",
+        pipelineDecision: row.pipelineDecision ?? "unreviewed",
+        evidenceUrls: [...row.evidenceUrls],
+      });
       continue;
     }
     const rank = (t: string): number => TIER_RANK[t] ?? 0;
@@ -533,7 +907,14 @@ export function mergeBatchDuplicates(
       goldenV1Member: existing.goldenV1Member || row.goldenV1Member,
       tier: rank(row.tier) > rank(existing.tier) ? row.tier : existing.tier,
       pipelineStatus: firstNonNull(existing.pipelineStatus, row.pipelineStatus),
-      fit: firstNonNull(existing.fit, row.fit),
+      ownershipStatus: mergeOwnershipStatus(
+        existing.ownershipStatus,
+        row.ownershipStatus,
+      ),
+      pipelineDecision: mergePipelineDecision(
+        existing.pipelineDecision,
+        row.pipelineDecision,
+      ),
       investorPriority:
         row.investorPriority < existing.investorPriority
           ? row.investorPriority
@@ -573,6 +954,10 @@ const EXISTING_RANK_SQL =
   "CASE unified_targets.tier WHEN 'reference' THEN 4 WHEN 'high_interest' THEN 3 WHEN 'evaluate' THEN 2 ELSE 1 END";
 const EXCLUDED_RANK_SQL =
   "CASE EXCLUDED.tier WHEN 'reference' THEN 4 WHEN 'high_interest' THEN 3 WHEN 'evaluate' THEN 2 ELSE 1 END";
+const PIPELINE_DECISION_EXISTING_RANK_SQL =
+  "CASE unified_targets.pipeline_decision WHEN 'pass_acquired' THEN 4 WHEN 'pass_scale' THEN 4 WHEN 'pass_dead' THEN 4 WHEN 'pass_sector' THEN 4 WHEN 'add' THEN 3 WHEN 'hold' THEN 2 ELSE 1 END";
+const PIPELINE_DECISION_EXCLUDED_RANK_SQL =
+  "CASE EXCLUDED.pipeline_decision WHEN 'pass_acquired' THEN 4 WHEN 'pass_scale' THEN 4 WHEN 'pass_dead' THEN 4 WHEN 'pass_sector' THEN 4 WHEN 'add' THEN 3 WHEN 'hold' THEN 2 ELSE 1 END";
 
 const CONFLICT_CLAUSE = `ON CONFLICT (normalized_name) DO UPDATE SET
   domain = COALESCE(unified_targets.domain, EXCLUDED.domain),
@@ -599,6 +984,13 @@ const CONFLICT_CLAUSE = `ON CONFLICT (normalized_name) DO UPDATE SET
     ELSE COALESCE(unified_targets.proprietary_basis, EXCLUDED.proprietary_basis)
   END,
   pipeline_status = COALESCE(unified_targets.pipeline_status, EXCLUDED.pipeline_status),
+  ownership_status = CASE
+    WHEN unified_targets.ownership_status IS NULL OR unified_targets.ownership_status = 'unknown' THEN COALESCE(EXCLUDED.ownership_status, unified_targets.ownership_status)
+    WHEN EXCLUDED.ownership_status IS NULL OR EXCLUDED.ownership_status = 'unknown' THEN unified_targets.ownership_status
+    ELSE unified_targets.ownership_status
+  END,
+  pipeline_decision = CASE WHEN (${PIPELINE_DECISION_EXCLUDED_RANK_SQL}) > (${PIPELINE_DECISION_EXISTING_RANK_SQL})
+              THEN EXCLUDED.pipeline_decision ELSE unified_targets.pipeline_decision END,
   fit = COALESCE(unified_targets.fit, EXCLUDED.fit),
   novelty = COALESCE(unified_targets.novelty, EXCLUDED.novelty),
   confidence = COALESCE(unified_targets.confidence, EXCLUDED.confidence),
@@ -618,7 +1010,7 @@ const CONFLICT_CLAUSE = `ON CONFLICT (normalized_name) DO UPDATE SET
 /**
  * Bulk upsert one source batch. Returns per-source inserted/merged counts
  * (`xmax = 0` marks freshly inserted rows). Chunked at UPSERT_CHUNK_ROWS:
- * 27 columns/row means 250 rows stay far under PostgreSQL's 65,535-parameter
+ * 29 columns/row means 250 rows stay far under PostgreSQL's 65,535-parameter
  * ceiling and keep bind payloads small.
  */
 export const UPSERT_CHUNK_ROWS = 250;
@@ -665,6 +1057,8 @@ async function upsertChunk(
       r.oversizeFlag,
       r.proprietaryBasis,
       r.pipelineStatus,
+      r.ownershipStatus ?? "unknown",
+      r.pipelineDecision ?? "unreviewed",
       r.fit,
       r.novelty,
       r.confidence,
@@ -685,7 +1079,7 @@ async function upsertChunk(
     });
     // origins / evidence_urls ride as JSON text cast to jsonb.
     placeholders[7] += "::jsonb";
-    placeholders[23] += "::jsonb";
+    placeholders[25] += "::jsonb";
     return `(${placeholders.join(", ")})`;
   });
   const text =
@@ -736,6 +1130,12 @@ async function loadGolden(
         ? (r["why_interesting"] as string)
         : null,
     );
+    const verdict = deriveRound2Verdict(
+      name,
+      typeof r["why_interesting"] === "string"
+        ? (r["why_interesting"] as string)
+        : null,
+    );
     return [
       {
         companyName: name,
@@ -755,6 +1155,8 @@ async function loadGolden(
         tier: "reference",
         ...investorAssessment,
         oversizeFlag: false,
+        ownershipStatus: verdict.ownershipStatus,
+        pipelineDecision: verdict.pipelineDecision,
         pipelineStatus: null,
         fit: null,
         novelty: null,
@@ -801,6 +1203,10 @@ function loadCurated(csvPath: string): UnifiedTargetRow[] {
       r["screen_status"] ?? "",
       [r["fit_summary"], r["key_risk"]].join(" "),
     );
+    const verdict = deriveRound2Verdict(
+      name,
+      [r["fit_summary"], r["key_risk"]].join(" "),
+    );
     return [
       {
         companyName: name,
@@ -815,6 +1221,8 @@ function loadCurated(csvPath: string): UnifiedTargetRow[] {
         ...investorAssessment,
         oversizeFlag: false,
         pipelineStatus: null,
+        ownershipStatus: verdict.ownershipStatus,
+        pipelineDecision: verdict.pipelineDecision,
         fit: null,
         novelty: null,
         confidence: null,
@@ -873,6 +1281,14 @@ async function loadDiscovery(
         rationaleText(rationale["unknowns"]),
       ].join(" "),
     );
+    const verdict = deriveRound2Verdict(
+      name,
+      [
+        rationaleText(rationale["whyInteresting"]),
+        rationaleText(rationale["risks"]),
+        rationaleText(rationale["unknowns"]),
+      ].join(" "),
+    );
     return [
       {
         companyName: name,
@@ -896,6 +1312,8 @@ async function loadDiscovery(
         actionability: scoreNumber(scores["actionability"]),
         ensembleDecision: null,
         ensembleConfidence: null,
+        ownershipStatus: verdict.ownershipStatus,
+        pipelineDecision: verdict.pipelineDecision,
         whyInteresting: rationaleText(rationale["whyInteresting"]),
         risks: rationaleText(rationale["risks"]),
         unknowns: rationaleText(rationale["unknowns"]),
@@ -992,6 +1410,7 @@ async function loadEnsemble(
       typeof r["final_confidence"] === "number"
         ? (r["final_confidence"] as number)
         : Number(r["final_confidence"]);
+    const verdict = deriveRound2Verdict(name, whyInteresting);
     return [
       {
         companyName: name,
@@ -1014,6 +1433,8 @@ async function loadEnsemble(
         actionability: null,
         ensembleDecision: decision,
         ensembleConfidence: Number.isFinite(conf) ? conf : null,
+        ownershipStatus: verdict.ownershipStatus,
+        pipelineDecision: verdict.pipelineDecision,
         whyInteresting,
         risks: null,
         unknowns: null,

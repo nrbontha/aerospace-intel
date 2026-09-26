@@ -55,6 +55,21 @@ function jsonbArrayUnionExpr(column: string): JsonbArrayUnionExpr {
 }
 
 /**
+ * Ownership merge: any non-unknown value wins over unknown. When both sides
+ * are known the existing row wins (first writer retains precision).
+ * Pipeline-decision merge: terminal passes (pass_acquired, pass_scale,
+ * pass_dead, pass_sector) outrank add, which outranks hold, which outranks
+ * unreviewed. `add` is only ever written from an explicit investor verdict,
+ * never derived automatically, so it can safely outrank hold/unreviewed here.
+ */
+/** SQL fragment ranking a pipeline_decision: terminal passes > add > hold > unreviewed. */
+function pipelineDecisionRankExpr(columnRef: string): SQL {
+  return sql.raw(
+    `(CASE ${columnRef} WHEN 'pass_acquired' THEN 4 WHEN 'pass_scale' THEN 4 WHEN 'pass_dead' THEN 4 WHEN 'pass_sector' THEN 4 WHEN 'add' THEN 3 WHEN 'hold' THEN 2 ELSE 1 END)`,
+  );
+}
+
+/**
  * Insert one unified target, merging into the existing row when
  * `normalized_name` already exists. Origins and evidence URLs are
  * array-unioned, nullable scalars keep the existing value unless the new row
@@ -100,6 +115,12 @@ export async function upsertUnifiedTarget(
           ELSE COALESCE("unified_targets"."proprietary_basis", excluded."proprietary_basis")
         END`,
         pipelineStatus: sql`COALESCE(excluded."pipeline_status", "unified_targets"."pipeline_status")`,
+        ownershipStatus: sql`CASE
+          WHEN "unified_targets"."ownership_status" IS NULL OR "unified_targets"."ownership_status" = 'unknown' THEN COALESCE(excluded."ownership_status", "unified_targets"."ownership_status")
+          WHEN excluded."ownership_status" IS NULL OR excluded."ownership_status" = 'unknown' THEN "unified_targets"."ownership_status"
+          ELSE "unified_targets"."ownership_status"
+        END`,
+        pipelineDecision: sql`CASE WHEN ${pipelineDecisionRankExpr('excluded."pipeline_decision"')} > ${pipelineDecisionRankExpr('"unified_targets"."pipeline_decision"')} THEN excluded."pipeline_decision" ELSE "unified_targets"."pipeline_decision" END`,
         fit: sql`COALESCE(excluded."fit", "unified_targets"."fit")`,
         novelty: sql`COALESCE(excluded."novelty", "unified_targets"."novelty")`,
         confidence: sql`COALESCE(excluded."confidence", "unified_targets"."confidence")`,
