@@ -461,9 +461,10 @@ function asStringList(value: unknown, cap: number): readonly string[] {
 function buildProductEvidence(
   makes: readonly string[],
   modelsSample: readonly string[],
+  siteHints: readonly string[] = [],
 ): readonly string[] {
   const out: string[] = [];
-  for (const phrase of [...makes, ...modelsSample]) {
+  for (const phrase of [...makes, ...modelsSample, ...siteHints]) {
     const sliced = phrase.slice(0, PRODUCT_EVIDENCE_MAX_CHARS).trim();
     if (sliced === "" || out.includes(sliced)) continue;
     out.push(sliced);
@@ -525,7 +526,11 @@ export function buildEvidencePackage(
       typeof ownershipYear === "number" && Number.isFinite(ownershipYear)
         ? ownershipYear
         : null,
-    productEvidence: buildProductEvidence(makes, modelsSample),
+    productEvidence: buildProductEvidence(
+      makes,
+      modelsSample,
+      website.productHints ?? [],
+    ),
   };
 }
 
@@ -591,6 +596,10 @@ function websiteEvidenceFromRow(
     ),
     sizeHints: metadataStringList(
       meta[WEBSITE_EVIDENCE_METADATA_KEYS.sizeHints],
+      6,
+    ),
+    productHints: metadataStringList(
+      meta[WEBSITE_EVIDENCE_METADATA_KEYS.productHints],
       6,
     ),
   };

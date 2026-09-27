@@ -137,6 +137,7 @@ async function runVariant(
               excerptsTrimmedTo500Chars?: string;
               ownershipHints?: string[];
               sizeHints?: string[];
+              productHints?: string[];
               error?: boolean;
             }
           | undefined)
@@ -157,6 +158,7 @@ async function runVariant(
             excerpts: frozen.excerptsTrimmedTo500Chars ?? "",
             ownershipHints: frozen.ownershipHints ?? [],
             sizeHints: frozen.sizeHints ?? [],
+            productHints: frozen.productHints ?? [],
           }
         : undefined;
   const pkg = buildEvidencePackage(

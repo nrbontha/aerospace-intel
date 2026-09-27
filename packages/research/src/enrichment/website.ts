@@ -49,6 +49,7 @@ export const WEBSITE_EVIDENCE_METADATA_KEYS = {
   excerpts: "website_excerpts",
   ownershipHints: "ownership_hints",
   sizeHints: "size_hints",
+  productHints: "product_hints",
 } as const;
 
 /** Total excerpt budget: excerpts are capped to 2,000 chars combined. */
@@ -65,6 +66,7 @@ export interface WebsiteEvidence {
   readonly excerpts: string;
   readonly ownershipHints: readonly string[];
   readonly sizeHints: readonly string[];
+  readonly productHints: readonly string[];
 }
 export interface WebsiteFetchResult extends WebsiteEvidence {
   /** Conservative accounting: EXA_CONTENTS_COST_USD per page returned. */
@@ -86,6 +88,7 @@ export const EMPTY_WEBSITE_EVIDENCE: WebsiteEvidence = {
   excerpts: "",
   ownershipHints: [],
   sizeHints: [],
+  productHints: [],
 };
 
 export interface FetchWebsiteEvidenceOptions {
@@ -133,11 +136,13 @@ const OWNERSHIP_SENTENCE_PATTERN =
   /founded|family.owned|privately held|subsidiary|division of|acquired by|acquisition|parent compan|a\s+\S+\s+compan(y|ies)\b|owned by|holding compan|private equit|portfolio compan/iu;
 const SIZE_SENTENCE_PATTERN =
   /\d[\d,]*\s*(employees|associates|team members|staff|people)|square\s+feet|sq\.?\s*ft\.?|\d+\s*acre|manufacturing (plant|facilit)|facilit(ies|y)\s+(in|across|totaling)|headcount|employees\s+(in|across|worldwide)/iu;
+const PRODUCT_SENTENCE_PATTERN =
+  /patented|patent\s+(pending|no\.)|FAA.PMA(\s+approved)?|FAA.APPROVED|\bPMA\b|\bSTC\b|\bTSO\b|product\s+(line|catalog|family|series|finder)|trademark|part\s+number|\bSKU\b|introduces?\s+(the|our|new)|new\s+\w+\s+(series|system|actuator|valve|sensor|controller)|annunciator|transducer|\b[A-Z]{2,4}-?\d{1,4}[A-Z]?\b/iu;
 
 function splitSentences(text: string): string[] {
   return text
-    .replace(/\s+/gu, " ")
-    .split(/(?<=[.!?])\s+(?=[A-Z0-9(])/gu)
+    .replace(/[ \t]+/gu, " ")
+    .split(/(?<=[.!?])\s+(?=[A-Z0-9(])|\s*#{1,6}\s*|\n+/gu)
     .map((s) => s.trim())
     .filter((s) => s.length >= 24 && s.length <= 600);
 }
@@ -186,10 +191,11 @@ export function classifyWebsiteEvidence(
     OWNERSHIP_SENTENCE_PATTERN,
   );
   const sizeHints = pickHintSentences(combined, SIZE_SENTENCE_PATTERN);
-  const excerpts = [...ownershipHints, ...sizeHints]
+  const productHints = pickHintSentences(combined, PRODUCT_SENTENCE_PATTERN);
+  const excerpts = [...productHints, ...ownershipHints, ...sizeHints]
     .join(" ")
     .slice(0, WEBSITE_EXCERPTS_MAX_CHARS);
-  return { websiteOffering, excerpts, ownershipHints, sizeHints };
+  return { websiteOffering, excerpts, ownershipHints, sizeHints, productHints };
 }
 
 /**
@@ -310,6 +316,7 @@ async function persistWebsiteEvidence(
       [WEBSITE_EVIDENCE_METADATA_KEYS.excerpts]: result.excerpts,
       [WEBSITE_EVIDENCE_METADATA_KEYS.ownershipHints]: result.ownershipHints,
       [WEBSITE_EVIDENCE_METADATA_KEYS.sizeHints]: result.sizeHints,
+      [WEBSITE_EVIDENCE_METADATA_KEYS.productHints]: result.productHints,
     });
     const pageUrls: string[] = [];
     for (const page of result.pages) {
