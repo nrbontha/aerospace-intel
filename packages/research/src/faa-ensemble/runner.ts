@@ -2269,22 +2269,23 @@ export async function runLadderSignal(
     costs.push(r2.costUsd);
     const r2Choice = r2.answers["product_vs_process"]?.choice;
     if (r2Choice === "process") {
-      const outcome: JevScreenOutcome = {
-        decision: "research",
-        confidence: clampConfidence(
-          r2.answers["product_vs_process"]?.confidence,
-        ),
-        costUsd: r2.costUsd,
-      };
+      // Bakeoff winner: a process verdict routes onward (not final) so
+      // oversize/disposition plus Muse review get a hearing; the r2 row is
+      // preserved as signal, not verdict. Verify caps bound the cost.
       await persistJevEvaluation(
         db,
         signalId,
         model,
-        outcome,
+        {
+          decision: null,
+          confidence: clampConfidence(
+            r2.answers["product_vs_process"]?.confidence,
+          ),
+          costUsd: r2.costUsd,
+        },
         JEV_LADDER_PROMPT_VERSIONS.r2,
-        "jev-ladder-r2-product-vs-process",
+        "jev-ladder-r2-product-vs-process-continue",
       );
-      return { ...outcome, costUsd: totalCost(), exitRung: "r2" };
     }
     await persistJevEvaluation(
       db,
