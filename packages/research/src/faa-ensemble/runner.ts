@@ -22,7 +22,12 @@ import { z } from "zod";
 
 import { ensembleDecisionSchema, type EnsembleDecision } from "./schemas.js";
 
-import { getDatabase, type Database } from "@asi/database";
+import {
+  getDatabase,
+  normalizeUnifiedName,
+  type Database,
+  type UnifiedTargetOwnershipStatus,
+} from "@asi/database";
 import { sql } from "drizzle-orm";
 import { OpenRouterClient } from "../openrouter.js";
 import { callJev, JEV_MODEL } from "./jev.js";
@@ -204,9 +209,9 @@ export const JEV_DISPOSITION_QUESTION = {
     "Which pipeline disposition fits this aerospace/defense company as a potential sub-$50M acquisition target?",
   criteria: {
     high_priority:
-      "Niche aerospace/defense manufacturer with proprietary manufactured products (patented or branded components, parts, systems; PMA/STC/TSO articles; product catalog) and small private indicators.",
+      "Small independent aerospace/defense manufacturer that looks like a golden-set company: proprietary-PRODUCT signal REQUIRED (websiteOffering products_menu, non-empty productEvidence with named products/catalog/PMA phrases, or PMA/STC part evidence in partCount/makes/modelsSample) AND no large/public/acquired markers (ownershipStatus independent or unknown-never-acquired; no public, strategic_owned, or pe_owned buyer; no major-prime or Fortune-scale parent; no platform-OEM whole-aircraft business).",
     research:
-      "Plausibly relevant aerospace manufacturer, or proprietary PROCESS only (kitting, assembly, repair, services), or key facts missing (ownership, size, website).",
+      "Plausibly relevant aerospace/defense manufacturer missing the discriminating facts (websiteOffering capabilities_only or unknown, empty productEvidence, thin or no part/award evidence, ownershipStatus unknown), or proprietary PROCESS only (kitting, assembly, repair, services) rather than a proprietary product.",
     reject:
       "Clearly outside the thesis: airline, airport, government, university, major prime, obviously large strategic company or its named subsidiary, platform aircraft OEM, pure consultancy/software, distributor without manufacturing, unrelated industry, or dead company.",
   },
@@ -269,6 +274,8 @@ export async function defaultScreenJev(
         website_excerpts: pkg.websiteExcerpts,
         ownership_hints: pkg.ownershipHints,
         size_hints: pkg.sizeHints,
+        ownership_status: pkg.ownershipStatus ?? "unknown",
+        product_evidence: pkg.productEvidence ?? [],
       },
       {
         disposition: JEV_DISPOSITION_QUESTION,
@@ -352,9 +359,23 @@ export interface FaaEvidencePackage {
   readonly ownershipHints: readonly string[];
   /** Size-hint excerpts from the official site (headcount/facility). */
   readonly sizeHints: readonly string[];
+  /** Ownership class (unified_targets.ownership_status; absent = unknown). */
+  readonly ownershipStatus?: UnifiedTargetOwnershipStatus;
+  /** Short product/catalog/PMA phrases from the PMA payload (max 6, each ≤120 chars; absent = []). */
+  readonly productEvidence?: readonly string[];
 }
 const MAKES_MAX = 12;
 const MODELS_SAMPLE_MAX = 10;
+const PRODUCT_EVIDENCE_MAX = 6;
+const PRODUCT_EVIDENCE_MAX_CHARS = 120;
+const OWNERSHIP_STATUSES: readonly UnifiedTargetOwnershipStatus[] = [
+  "independent",
+  "pe_owned",
+  "strategic_owned",
+  "public",
+  "dead",
+  "unknown",
+];
 
 function asText(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -375,9 +396,24 @@ function asStringList(value: unknown, cap: number): readonly string[] {
   return out;
 }
 
+function buildProductEvidence(
+  makes: readonly string[],
+  modelsSample: readonly string[],
+): readonly string[] {
+  const out: string[] = [];
+  for (const phrase of [...makes, ...modelsSample]) {
+    const sliced = phrase.slice(0, PRODUCT_EVIDENCE_MAX_CHARS).trim();
+    if (sliced === "" || out.includes(sliced)) continue;
+    out.push(sliced);
+    if (out.length >= PRODUCT_EVIDENCE_MAX) break;
+  }
+  return out;
+}
+
 export function buildEvidencePackage(
   row: SourceSignalRowLike,
   website: WebsiteEvidence = EMPTY_WEBSITE_EVIDENCE,
+  ownership: UnifiedTargetOwnershipStatus = "unknown",
 ): FaaEvidencePackage {
   const payload =
     typeof row.source_payload === "object" && row.source_payload !== null
@@ -393,6 +429,11 @@ export function buildEvidencePackage(
         : null;
   const freshest =
     asText(row.freshest_award) ?? asText(row.freshestAward) ?? null;
+  const makes = asStringList(payload["makes"], MAKES_MAX);
+  const modelsSample = asStringList(
+    payload["models_sample"] ?? payload["modelsSample"],
+    MODELS_SAMPLE_MAX,
+  );
   return {
     signalId: row.id,
     name: asText(row.raw_name) ?? asText(row.rawName) ?? "",
@@ -404,17 +445,20 @@ export function buildEvidencePackage(
     state: asText(row.state),
     country: asText(row.country),
     partCount: awardCount,
-    makes: asStringList(payload["makes"], MAKES_MAX),
-    modelsSample: asStringList(
-      payload["models_sample"] ?? payload["modelsSample"],
-      MODELS_SAMPLE_MAX,
-    ),
+    makes,
+    modelsSample,
     supplementDate: asText(payload["latest_supplement_date"]) ?? freshest,
     guidUrl: asText(payload["guid_url"]) ?? asText(payload["guidUrl"]),
     websiteOffering: website.websiteOffering,
     websiteExcerpts: website.excerpts === "" ? null : website.excerpts,
     ownershipHints: website.ownershipHints,
     sizeHints: website.sizeHints,
+    ownershipStatus: (OWNERSHIP_STATUSES as readonly string[]).includes(
+      ownership,
+    )
+      ? ownership
+      : "unknown",
+    productEvidence: buildProductEvidence(makes, modelsSample),
   };
 }
 
@@ -531,6 +575,58 @@ export async function loadWebsiteEvidence(
     return EMPTY_WEBSITE_EVIDENCE;
   }
 }
+/**
+ * Load the ownership class for one signal from unified_targets.ownership_status
+ * (company_id, then normalized name, then domain; most recently touched row
+ * wins). The status column is the loader output: the ownership sweep updates it
+ * on every affirmative finding (including dead), with ownership_observations as
+ * the provenance behind it — observation rows alone carry no independent class
+ * (type is always subsidiary, truth in owner_name), so they never override an
+ * unknown here. Never throws: missing/ambiguous evidence resolves to "unknown"
+ * so screens degrade instead of failing.
+ */
+export async function loadOwnershipStatus(
+  db: Database,
+  name: string | null,
+  domain: string | null,
+  companyId?: string | null,
+): Promise<UnifiedTargetOwnershipStatus> {
+  try {
+    const cleanName = metadataText(name);
+    const normalized =
+      cleanName === null ? null : normalizeUnifiedName(cleanName);
+    const normalizedDomain = metadataText(domain)?.toLowerCase() ?? null;
+    const normalizedCompany = metadataText(companyId ?? null);
+    if (
+      normalized === null &&
+      normalizedDomain === null &&
+      normalizedCompany === null
+    ) {
+      return "unknown";
+    }
+    const result = await db.execute<{ ownership_status: unknown }>(sql`
+      SELECT ownership_status
+      FROM unified_targets
+      WHERE (${normalizedCompany} IS NOT NULL AND company_id = ${normalizedCompany}::uuid)
+        OR (${normalized} IS NOT NULL AND normalized_name = ${normalized})
+        OR (${normalizedDomain} IS NOT NULL AND lower(domain) = ${normalizedDomain})
+      ORDER BY updated_at DESC
+      LIMIT 4
+    `);
+    for (const row of result.rows) {
+      const raw = row.ownership_status;
+      const status: UnifiedTargetOwnershipStatus =
+        typeof raw === "string" &&
+        (OWNERSHIP_STATUSES as readonly string[]).includes(raw)
+          ? (raw as UnifiedTargetOwnershipStatus)
+          : "unknown";
+      if (status !== "unknown") return status;
+    }
+    return "unknown";
+  } catch {
+    return "unknown";
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Prompts (high-recall filter: reject ONLY on affirmative negative evidence;
@@ -539,6 +635,17 @@ export async function loadWebsiteEvidence(
 const HIGH_RECALL_POLICY = `You are a high-recall FAA PMA supplier filter. Reject ONLY on affirmative negative evidence (e.g. the holder is verifiably a distributor with no manufacturing, a foreign shell with no US presence, or the PMA record demonstrably belongs to a different company). Missing ownership, size, or revenue information MUST route to research, NEVER to reject. When in doubt, choose research.`;
 const INVESTOR_RULES = `Investor rules: (1) Proprietary PRODUCT (patented/branded manufactured components, parts, systems, PMA/STC/TSO articles) is P1-grade evidence; proprietary PROCESS alone (kitting, assembly methods, repair processes, services) is never product evidence — Priority 2 at best. (2) A Products catalog/menu on the website is a strong fit signal; capabilities/services-only pages with no products lean build-to-print (Priority 3 hopper). No website fetched means research, never reject. (3) Scale from public knowledge: you MAY use widely-known public facts ONLY to recognize obviously large strategics (major primes, Fortune-scale aerospace groups, and their named subsidiaries) — mark likely_oversize, never high_priority on fame, and name the basis; never invent revenue, ownership, or customer facts beyond this. (4) Platform OEMs building whole aircraft are outside the thesis (reject). (5) Suggested priority: 1 = proprietary product + qualification + small/private indicators; 2 = capable manufacturer, no clear proprietary product; 3 = possible surprise or thin evidence.`;
 
+function buildEnrichmentContext(pkg: FaaEvidencePackage): string {
+  const offering = pkg.websiteOffering ?? "unknown";
+  const ownership = pkg.ownershipStatus ?? "unknown";
+  const products = pkg.productEvidence ?? [];
+  return [
+    "Enrichment signals (missing evidence renders as unknown/[] and MUST NOT count against the holder):",
+    `- websiteOffering: ${offering}`,
+    `- ownershipStatus: ${ownership}`,
+    `- productEvidence: ${JSON.stringify(products)}`,
+  ].join("\n");
+}
 export function buildEvaluatorPrompt(pkg: FaaEvidencePackage): string {
   return `${HIGH_RECALL_POLICY}
 
@@ -546,6 +653,8 @@ ${INVESTOR_RULES}
 
 Evidence for one FAA PMA holder (compact JSON):
 ${JSON.stringify(pkg)}
+
+${buildEnrichmentContext(pkg)}
 
 Decide: is this holder plausibly an aerospace/defense manufacturer worth deeper research (high_priority), a possible manufacturer needing more evidence (research), or affirmatively disqualified (reject)? Reply with exactly one JSON object matching the evaluator schema.`;
 }
@@ -565,6 +674,8 @@ Two independent evaluators disagreed (or one produced malformed output) for this
 
 Evidence (compact JSON):
 ${JSON.stringify(pkg)}
+
+${buildEnrichmentContext(pkg)}
 
 Model A verdict: ${a === null ? "MALFORMED/UNAVAILABLE" : JSON.stringify(a)}
 Model B verdict: ${b === null ? "MALFORMED/UNAVAILABLE" : JSON.stringify(b)}
@@ -1353,12 +1464,16 @@ async function qualifySignal(
   db: Database,
   client: OpenRouterClient | null,
 ): Promise<EnsembleSignalOutcome> {
+  const domain = asText(row.raw_domain) ?? asText(row.rawDomain);
+  const companyId = typeof row.company_id === "string" ? row.company_id : null;
   const pkg = buildEvidencePackage(
     row,
-    await loadWebsiteEvidence(
+    await loadWebsiteEvidence(db, domain, companyId),
+    await loadOwnershipStatus(
       db,
-      asText(row.raw_domain) ?? asText(row.rawDomain),
-      typeof row.company_id === "string" ? row.company_id : null,
+      asText(row.raw_name) ?? asText(row.rawName),
+      domain,
+      companyId,
     ),
   );
   const evaluate =
@@ -1794,12 +1909,17 @@ export async function runJevSweep(
     rows,
     opts.concurrency ?? config.concurrency,
     async (row) => {
+      const domain = asText(row.raw_domain) ?? asText(row.rawDomain);
+      const companyId =
+        typeof row.company_id === "string" ? row.company_id : null;
       const pkg = buildEvidencePackage(
         row,
-        await loadWebsiteEvidence(
+        await loadWebsiteEvidence(db, domain, companyId),
+        await loadOwnershipStatus(
           db,
-          asText(row.raw_domain) ?? asText(row.rawDomain),
-          typeof row.company_id === "string" ? row.company_id : null,
+          asText(row.raw_name) ?? asText(row.rawName),
+          domain,
+          companyId,
         ),
       );
       let verdict: JevScreenOutcome | null;
@@ -1893,12 +2013,17 @@ export async function runMuseVerification(
     candidates,
     opts.concurrency ?? config.concurrency,
     async (row) => {
+      const domain = asText(row.raw_domain) ?? asText(row.rawDomain);
+      const companyId =
+        typeof row.company_id === "string" ? row.company_id : null;
       const pkg = buildEvidencePackage(
         row,
-        await loadWebsiteEvidence(
+        await loadWebsiteEvidence(db, domain, companyId),
+        await loadOwnershipStatus(
           db,
-          asText(row.raw_domain) ?? asText(row.rawDomain),
-          typeof row.company_id === "string" ? row.company_id : null,
+          asText(row.raw_name) ?? asText(row.rawName),
+          domain,
+          companyId,
         ),
       );
       const outcome = await verifyJevFlagWithMuse(

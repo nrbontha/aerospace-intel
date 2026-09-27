@@ -639,7 +639,9 @@ describe("runJevSweep", () => {
       { screenJev: async () => null, config: sweepConfig },
     );
     expect(summary).toEqual({ screened: 0, flagged: 0, errors: 1 });
-    expect(execute).toHaveBeenCalledTimes(1);
+    expect(statementsOf(execute).some((s) => s.sql.startsWith("INSERT"))).toBe(
+      false,
+    );
   });
 });
 
