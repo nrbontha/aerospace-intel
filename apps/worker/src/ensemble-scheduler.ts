@@ -3,11 +3,18 @@ import { z } from "zod";
 import { populateUnifiedTargets, promoteEnsembleLeads } from "@asi/database";
 import { getDatabase } from "@asi/database/client";
 import {
+  canSpendExa,
   dailyBudgetCapUsd,
+  EXA_CONTENTS_COST_USD,
+  EXA_SEARCH_COST_USD,
   getDailySpendUsd,
+  getExaDailySpendUsd,
   OpenRouterClient,
+  OWNERSHIP_CHECK_TICK_CAP,
   runJevSweep,
   runMuseVerification,
+  runOwnershipChecks,
+  runWebsiteEnrichment,
 } from "@asi/research";
 
 import type { QueueLogger } from "./queue.js";
@@ -17,10 +24,12 @@ import type { QueueLogger } from "./queue.js";
  *
  * Every tick: probe the ensemble model (skip while unhealthy) -> enforce the
  * daily spend cap -> JEv sweep of the full queue (no Muse calls) ->
- * independent Muse verification of flagged items + audit sample -> refresh
- * unified targets -> promote high-priority results to leads. Every step is
- * individually guarded; this module never throws so the worker process
- * always survives.
+ * independent Muse verification of flagged items + audit sample -> Exa
+ * ownership checks (HP names lacking ownership evidence, cap 10/tick) ->
+ * Exa website enrichment (unvetted HP/P1 names without website evidence,
+ * cap 10/tick) -> refresh unified targets -> promote high-priority results
+ * to leads. Every step is individually guarded; this module never throws so
+ * the worker process always survives.
  *
  * Dependency note: `runJevSweep` / `runMuseVerification` (Agent RunnerLib,
  * packages/research/src/faa-ensemble/runner.ts) and
@@ -44,6 +53,8 @@ const DEFAULT_DELAY_MS = 1_000;
 const DEFAULT_JEV_SWEEP_LIMIT = 0;
 const DEFAULT_JEV_SWEEP_CONCURRENCY = 8;
 const DEFAULT_VERIFY_BATCH_LIMIT = 120;
+/** Max website enrichments per tick (unvetted HP/P1 without website evidence). */
+const WEBSITE_ENRICHMENT_TICK_CAP = 10;
 
 /** While unhealthy, skip runs for this long (prevents hollow-row eras). */
 const UNHEALTHY_CACHE_MS = 15 * 60 * 1_000;
@@ -241,7 +252,55 @@ export function startEnsembleScheduler(
         });
       }
 
-      // 5. Nightly-style unified refresh (runs every tick; populate is
+      // 5. Ownership news checks for HP-unified names lacking ownership
+      // evidence (cap 10/tick), gated by EXA_DAILY_BUDGET_USD.
+      try {
+        if (!canSpendExa(EXA_SEARCH_COST_USD)) {
+          logger("warn", "ensemble.scheduler_ownership_budget_skipped", {
+            spendUsd: getExaDailySpendUsd(),
+          });
+        } else {
+          const ownership = await runOwnershipChecks(getDatabase(), {
+            limit: OWNERSHIP_CHECK_TICK_CAP,
+          });
+          logger("info", "ensemble.scheduler_ownership_completed", {
+            checked: ownership.checked,
+            affirmed: ownership.affirmed,
+            skipped: ownership.skipped,
+            costUsd: ownership.costUsd,
+          });
+        }
+      } catch (error) {
+        logger("error", "ensemble.scheduler_ownership_failed", {
+          reason: toLogReason(error),
+        });
+      }
+
+      // 6. Website enrichment for unvetted HP/P1 names without website
+      // evidence (cap 10/tick), gated by EXA_DAILY_BUDGET_USD.
+      try {
+        if (!canSpendExa(EXA_CONTENTS_COST_USD)) {
+          logger("warn", "ensemble.scheduler_enrichment_budget_skipped", {
+            spendUsd: getExaDailySpendUsd(),
+          });
+        } else {
+          const enrichment = await runWebsiteEnrichment(getDatabase(), {
+            limit: WEBSITE_ENRICHMENT_TICK_CAP,
+          });
+          logger("info", "ensemble.scheduler_enrichment_completed", {
+            checked: enrichment.checked,
+            enriched: enrichment.enriched,
+            skipped: enrichment.skipped,
+            costUsd: enrichment.costUsd,
+          });
+        }
+      } catch (error) {
+        logger("error", "ensemble.scheduler_enrichment_failed", {
+          reason: toLogReason(error),
+        });
+      }
+
+      // 7. Nightly-style unified refresh (runs every tick; populate is
       // idempotent per-source upsert, so this is safe).
       try {
         const refreshed = await populateUnifiedTargets(getDatabase());
@@ -254,7 +313,7 @@ export function startEnsembleScheduler(
         });
       }
 
-      // 6. High-priority to lead promotion.
+      // 8. High-priority to lead promotion.
       try {
         const promotion = await promoteEnsembleLeads(getDatabase());
         logger("info", "ensemble.scheduler_promotion_completed", {

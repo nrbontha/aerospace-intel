@@ -1,10 +1,15 @@
 import { z } from "zod";
 
 const EXA_SEARCH_ENDPOINT = "https://api.exa.ai/search";
+const EXA_CONTENTS_ENDPOINT = "https://api.exa.ai/contents";
 export const EXA_SEARCH_TIMEOUT_MS = 15_000;
 export const EXA_SEARCH_RESULT_LIMIT = 5;
 export const EXA_SEARCH_QUERY_MAX_LENGTH = 512;
 export const EXA_SEARCH_TEXT_MAX_CHARACTERS = 1_000;
+/** Max characters of extracted text requested per page from /contents. */
+export const EXA_CONTENTS_TEXT_MAX_CHARACTERS = 8_000;
+/** Max page URLs per /contents call (homepage + products + about). */
+export const EXA_CONTENTS_URL_LIMIT = 3;
 
 const exaResultSchema = z.object({
   title: z.string().trim().min(1),
@@ -13,7 +18,15 @@ const exaResultSchema = z.object({
   score: z.number().finite().optional().default(0),
 });
 const exaResponseSchema = z.object({
-  results: z.array(exaResultSchema).max(EXA_SEARCH_RESULT_LIMIT),
+  results: z.array(exaResultSchema),
+});
+const exaContentsResultSchema = z.object({
+  url: z.string().trim().url(),
+  title: z.string().optional().default(""),
+  text: z.string().optional().default(""),
+});
+const exaContentsResponseSchema = z.object({
+  results: z.array(exaContentsResultSchema).max(EXA_CONTENTS_URL_LIMIT),
 });
 
 const officialDomainIdentitySchema = z.object({
@@ -24,41 +37,42 @@ const officialDomainIdentitySchema = z.object({
   cage: z.string().trim().min(1).max(32).optional(),
 });
 
-export const OFFICIAL_CANDIDATE_BLOCKED_DOMAIN_SUFFIXES: ReadonlySet<string> = new Set([
-  "highergov.com",
-  "govtribe.com",
-  "cage.report",
-  "sam.gov",
-  "usaspending.gov",
-  "dnb.com",
-  "dunandbradstreet.com",
-  "zoominfo.com",
-  "rocketreach.co",
-  "opencorporates.com",
-  "linkedin.com",
-  "crunchbase.com",
-  "bloomberg.com",
-  "pitchbook.com",
-  "manta.com",
-  "bbb.org",
-  "chamberofcommerce.com",
-  "mapquest.com",
-  "lead411.com",
-  "signalhire.com",
-  "inknowvation.com",
-  "facebook.com",
-  "instagram.com",
-  "twitter.com",
-  "x.com",
-  "youtube.com",
-  "tiktok.com",
-  "yellowpages.com",
-  "yelp.com",
-  "bizapedia.com",
-  "glassdoor.com",
-  "indeed.com",
-  "wikipedia.org",
-]);
+export const OFFICIAL_CANDIDATE_BLOCKED_DOMAIN_SUFFIXES: ReadonlySet<string> =
+  new Set([
+    "highergov.com",
+    "govtribe.com",
+    "cage.report",
+    "sam.gov",
+    "usaspending.gov",
+    "dnb.com",
+    "dunandbradstreet.com",
+    "zoominfo.com",
+    "rocketreach.co",
+    "opencorporates.com",
+    "linkedin.com",
+    "crunchbase.com",
+    "bloomberg.com",
+    "pitchbook.com",
+    "manta.com",
+    "bbb.org",
+    "chamberofcommerce.com",
+    "mapquest.com",
+    "lead411.com",
+    "signalhire.com",
+    "inknowvation.com",
+    "facebook.com",
+    "instagram.com",
+    "twitter.com",
+    "x.com",
+    "youtube.com",
+    "tiktok.com",
+    "yellowpages.com",
+    "yelp.com",
+    "bizapedia.com",
+    "glassdoor.com",
+    "indeed.com",
+    "wikipedia.org",
+  ]);
 
 export type ExaSearchErrorCode =
   | "invalid_request"
@@ -103,6 +117,12 @@ export interface ExaSearchResult {
   readonly url: string;
   readonly text: string;
   readonly score: number;
+}
+
+export interface ExaContentsResult {
+  readonly url: string;
+  readonly title: string;
+  readonly text: string;
 }
 
 export interface ExaOfficialDomainIdentity {
@@ -209,6 +229,80 @@ export class ExaSearchClient {
     }
     return parsed.data.results;
   }
+  /**
+   * Fetch extracted text for up to EXA_CONTENTS_URL_LIMIT page URLs via
+   * POST /contents. Returns one entry per page Exa could extract; pages
+   * Exa cannot fetch are omitted (never an error). Throws ExaSearchError
+   * on transport/provider failures and ExaApiKeyMissingError without a key.
+   */
+  async fetchContents(
+    urls: readonly string[],
+  ): Promise<readonly ExaContentsResult[]> {
+    const apiKey = this.#apiKey;
+    if (apiKey === undefined) throw new ExaApiKeyMissingError();
+    const targets = urls
+      .map((url) => url.trim())
+      .filter((url) => url.startsWith("http://") || url.startsWith("https://"))
+      .slice(0, EXA_CONTENTS_URL_LIMIT);
+    if (targets.length === 0)
+      throw new ExaSearchError("invalid_request", false);
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), EXA_SEARCH_TIMEOUT_MS);
+    let response: Response;
+    try {
+      response = await this.#fetch(EXA_CONTENTS_ENDPOINT, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-api-key": apiKey,
+        },
+        body: JSON.stringify({
+          urls: targets,
+          text: { maxCharacters: EXA_CONTENTS_TEXT_MAX_CHARACTERS },
+        }),
+        signal: controller.signal,
+      });
+    } catch {
+      throw new ExaSearchError(
+        controller.signal.aborted ? "timeout" : "network_error",
+        true,
+      );
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!response.ok) {
+      await response.body?.cancel().catch(() => undefined);
+      const code =
+        response.status === 429
+          ? "rate_limited"
+          : response.status >= 500
+            ? "provider_unavailable"
+            : "request_rejected";
+      throw new ExaSearchError(
+        code,
+        response.status === 408 ||
+          response.status === 425 ||
+          response.status === 429 ||
+          response.status >= 500,
+        response.status,
+      );
+    }
+
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch {
+      throw new ExaSearchError("invalid_response", false, response.status);
+    }
+
+    const parsed = exaContentsResponseSchema.safeParse(payload);
+    if (!parsed.success) {
+      throw new ExaSearchError("invalid_response", false, response.status);
+    }
+    return parsed.data.results;
+  }
 
   async searchOfficialDomainCandidates(
     identity: ExaOfficialDomainIdentity,
@@ -258,7 +352,10 @@ export async function searchOfficialDomainCandidates(
 
 function normalizeQuery(query: string): string {
   const normalized = query.trim().replace(/\s+/gu, " ");
-  if (normalized.length === 0 || normalized.length > EXA_SEARCH_QUERY_MAX_LENGTH) {
+  if (
+    normalized.length === 0 ||
+    normalized.length > EXA_SEARCH_QUERY_MAX_LENGTH
+  ) {
     throw new ExaSearchError("invalid_request", false);
   }
   return normalized;
@@ -294,7 +391,9 @@ export function normalizeExaOfficialCandidate(
 
 function normalizeDomain(hostname: string): string | null {
   const normalized = hostname.toLowerCase().replace(/\.$/u, "");
-  const domain = normalized.startsWith("www.") ? normalized.slice(4) : normalized;
+  const domain = normalized.startsWith("www.")
+    ? normalized.slice(4)
+    : normalized;
   return domain.length === 0 ? null : domain;
 }
 
@@ -302,7 +401,8 @@ export function isSuppressedDirectoryDomain(domain: string): boolean {
   const normalized = normalizeDomain(domain);
   if (normalized === null) return false;
   for (const blocked of OFFICIAL_CANDIDATE_BLOCKED_DOMAIN_SUFFIXES) {
-    if (normalized === blocked || normalized.endsWith(`.${blocked}`)) return true;
+    if (normalized === blocked || normalized.endsWith(`.${blocked}`))
+      return true;
   }
   return false;
 }

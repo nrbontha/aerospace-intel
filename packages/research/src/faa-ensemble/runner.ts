@@ -26,6 +26,13 @@ import { getDatabase, type Database } from "@asi/database";
 import { sql } from "drizzle-orm";
 import { OpenRouterClient } from "../openrouter.js";
 import { callJev, JEV_MODEL } from "./jev.js";
+import {
+  EMPTY_WEBSITE_EVIDENCE,
+  WEBSITE_EVIDENCE_EXTRACTION_METHOD,
+  WEBSITE_EVIDENCE_METADATA_KEYS,
+  type WebsiteEvidence,
+  type WebsiteOffering,
+} from "../enrichment/website.js";
 
 export { ensembleDecisionSchema, type EnsembleDecision };
 import {
@@ -258,6 +265,10 @@ export async function defaultScreenJev(
         models_sample: pkg.modelsSample,
         latest_supplement_date: pkg.supplementDate,
         guid_url: pkg.guidUrl,
+        website_offering: pkg.websiteOffering,
+        website_excerpts: pkg.websiteExcerpts,
+        ownership_hints: pkg.ownershipHints,
+        size_hints: pkg.sizeHints,
       },
       {
         disposition: JEV_DISPOSITION_QUESTION,
@@ -333,8 +344,15 @@ export interface FaaEvidencePackage {
   readonly modelsSample: readonly string[];
   readonly supplementDate: string | null;
   readonly guidUrl: string | null;
+  /** Official-site offering class (Exa website enrichment; null = unfetched). */
+  readonly websiteOffering: WebsiteOffering | null;
+  /** Combined website excerpts, capped at 2,000 chars (null = unfetched). */
+  readonly websiteExcerpts: string | null;
+  /** Ownership-hint excerpts from the official site (about page). */
+  readonly ownershipHints: readonly string[];
+  /** Size-hint excerpts from the official site (headcount/facility). */
+  readonly sizeHints: readonly string[];
 }
-
 const MAKES_MAX = 12;
 const MODELS_SAMPLE_MAX = 10;
 
@@ -359,6 +377,7 @@ function asStringList(value: unknown, cap: number): readonly string[] {
 
 export function buildEvidencePackage(
   row: SourceSignalRowLike,
+  website: WebsiteEvidence = EMPTY_WEBSITE_EVIDENCE,
 ): FaaEvidencePackage {
   const payload =
     typeof row.source_payload === "object" && row.source_payload !== null
@@ -392,7 +411,125 @@ export function buildEvidencePackage(
     ),
     supplementDate: asText(payload["latest_supplement_date"]) ?? freshest,
     guidUrl: asText(payload["guid_url"]) ?? asText(payload["guidUrl"]),
+    websiteOffering: website.websiteOffering,
+    websiteExcerpts: website.excerpts === "" ? null : website.excerpts,
+    ownershipHints: website.ownershipHints,
+    sizeHints: website.sizeHints,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Website-evidence lookup (per-signal; no schema changes)
+// ---------------------------------------------------------------------------
+interface WebsiteEvidenceRow {
+  readonly quote: string | null;
+  readonly metadata: unknown;
+  readonly [key: string]: unknown;
+}
+
+function metadataText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed === "" ? null : trimmed;
+}
+
+function metadataStringList(value: unknown, cap: number): readonly string[] {
+  if (!Array.isArray(value)) return [];
+  const out: string[] = [];
+  for (const item of value) {
+    if (typeof item !== "string") continue;
+    const trimmed = item.trim();
+    if (trimmed === "" || out.includes(trimmed)) continue;
+    out.push(trimmed);
+    if (out.length >= cap) break;
+  }
+  return out;
+}
+
+function websiteEvidenceFromRow(
+  row: WebsiteEvidenceRow,
+): WebsiteEvidence | null {
+  if (typeof row.metadata !== "object" || row.metadata === null) {
+    const quote = metadataText(row.quote);
+    return quote === null
+      ? null
+      : { ...EMPTY_WEBSITE_EVIDENCE, excerpts: quote.slice(0, 2000) };
+  }
+  const meta = row.metadata as Record<string, unknown>;
+  const offering = metadataText(meta[WEBSITE_EVIDENCE_METADATA_KEYS.offering]);
+  const excerpts =
+    metadataText(meta[WEBSITE_EVIDENCE_METADATA_KEYS.excerpts]) ??
+    metadataText(row.quote);
+  if (
+    offering === null &&
+    excerpts === null &&
+    !Array.isArray(meta[WEBSITE_EVIDENCE_METADATA_KEYS.ownershipHints]) &&
+    !Array.isArray(meta[WEBSITE_EVIDENCE_METADATA_KEYS.sizeHints])
+  ) {
+    return null;
+  }
+  return {
+    websiteOffering:
+      offering === "products_menu" || offering === "capabilities_only"
+        ? offering
+        : "unknown",
+    excerpts: (excerpts ?? "").slice(0, 2000),
+    ownershipHints: metadataStringList(
+      meta[WEBSITE_EVIDENCE_METADATA_KEYS.ownershipHints],
+      6,
+    ),
+    sizeHints: metadataStringList(
+      meta[WEBSITE_EVIDENCE_METADATA_KEYS.sizeHints],
+      6,
+    ),
+  };
+}
+
+/**
+ * Load the latest website-enrichment evidence for one signal. Matches rows
+ * the scheduler website step wrote (extraction_method =
+ * WEBSITE_EVIDENCE_EXTRACTION_METHOD) by official domain in the document
+ * URL, or by linked company when a companyId is known. Never throws:
+ * missing/ambiguous evidence resolves to EMPTY_WEBSITE_EVIDENCE so screens
+ * degrade to "unfetched" instead of failing.
+ */
+export async function loadWebsiteEvidence(
+  db: Database,
+  domain: string | null,
+  companyId?: string | null,
+): Promise<WebsiteEvidence> {
+  try {
+    const normalizedDomain = metadataText(domain)?.toLowerCase() ?? null;
+    const normalizedCompany = metadataText(companyId ?? null);
+    if (normalizedDomain === null && normalizedCompany === null) {
+      return EMPTY_WEBSITE_EVIDENCE;
+    }
+    const result = await db.execute<WebsiteEvidenceRow>(sql`
+      SELECT e.quote, e.metadata
+      FROM evidence e
+      JOIN source_documents sd ON sd.id = e.source_document_id
+      WHERE e.extraction_method = ${WEBSITE_EVIDENCE_EXTRACTION_METHOD}
+        AND (
+          (${normalizedDomain} IS NOT NULL
+            AND position(${normalizedDomain} in lower(sd.canonical_url)) > 0)
+          OR (${normalizedCompany} IS NOT NULL
+            AND EXISTS (
+              SELECT 1 FROM source_document_links sdl
+              WHERE sdl.source_document_id = sd.id
+                AND sdl.company_id = ${normalizedCompany}::uuid
+            ))
+        )
+      ORDER BY e.created_at DESC
+      LIMIT 8
+    `);
+    for (const row of result.rows) {
+      const parsed = websiteEvidenceFromRow(row);
+      if (parsed !== null) return parsed;
+    }
+    return EMPTY_WEBSITE_EVIDENCE;
+  } catch {
+    return EMPTY_WEBSITE_EVIDENCE;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -1216,7 +1353,14 @@ async function qualifySignal(
   db: Database,
   client: OpenRouterClient | null,
 ): Promise<EnsembleSignalOutcome> {
-  const pkg = buildEvidencePackage(row);
+  const pkg = buildEvidencePackage(
+    row,
+    await loadWebsiteEvidence(
+      db,
+      asText(row.raw_domain) ?? asText(row.rawDomain),
+      typeof row.company_id === "string" ? row.company_id : null,
+    ),
+  );
   const evaluate =
     deps.evaluateModel ??
     (client === null
@@ -1650,7 +1794,14 @@ export async function runJevSweep(
     rows,
     opts.concurrency ?? config.concurrency,
     async (row) => {
-      const pkg = buildEvidencePackage(row);
+      const pkg = buildEvidencePackage(
+        row,
+        await loadWebsiteEvidence(
+          db,
+          asText(row.raw_domain) ?? asText(row.rawDomain),
+          typeof row.company_id === "string" ? row.company_id : null,
+        ),
+      );
       let verdict: JevScreenOutcome | null;
       try {
         verdict = await screen(pkg);
@@ -1742,7 +1893,14 @@ export async function runMuseVerification(
     candidates,
     opts.concurrency ?? config.concurrency,
     async (row) => {
-      const pkg = buildEvidencePackage(row);
+      const pkg = buildEvidencePackage(
+        row,
+        await loadWebsiteEvidence(
+          db,
+          asText(row.raw_domain) ?? asText(row.rawDomain),
+          typeof row.company_id === "string" ? row.company_id : null,
+        ),
+      );
       const outcome = await verifyJevFlagWithMuse(
         db,
         row.id,

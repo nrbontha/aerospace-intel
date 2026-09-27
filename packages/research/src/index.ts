@@ -15,3 +15,6 @@ export * from "./campaigns/index.js";
 export * from "./search/index.js";
 export * from "./signals/index.js";
 export * from "./faa-ensemble/runner.js";
+export * from "./enrichment/exa-budget.js";
+export * from "./enrichment/ownership.js";
+export * from "./enrichment/website.js";
