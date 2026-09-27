@@ -37,6 +37,7 @@ interface Variant {
   enriched: boolean;
   r2Continue: boolean;
   flipRule: boolean;
+  flipYears?: number;
 }
 const evidenceByName: Record<string, unknown> = JSON.parse(
   readFileSync(new URL("./jev-bakeoff-evidence.json", import.meta.url), "utf8"),
@@ -205,11 +206,12 @@ async function runVariant(
     return r;
   };
   const flipYear = typeof year === "number" ? year : null;
+  const flipYears = variant.flipYears ?? 5;
   const isFlip =
     variant.flipRule === true &&
     pkg.ownershipStatus === "pe_owned" &&
     flipYear !== null &&
-    flipYear <= new Date().getFullYear() - 5;
+    flipYear <= new Date().getFullYear() - flipYears;
   if (
     variant.vetoFirst &&
     !isFlip &&
