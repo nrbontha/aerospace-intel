@@ -1,6 +1,6 @@
 import { type SQL } from "drizzle-orm";
 import { PgDialect } from "drizzle-orm/pg-core";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi, type Mock } from "vitest";
 
 import { type Database } from "../packages/database/src/index.js";
 import {
@@ -13,6 +13,8 @@ import {
   resolveEnsemble,
   resolveEnsembleConfig,
   runJevCascade,
+  runJevSweep,
+  runMuseVerification,
   runWithConcurrency,
   selectCandidateSignals,
   summarizeEnsembleOutcomes,
@@ -576,5 +578,227 @@ describe("runJevCascade", () => {
         museOk("research"),
       ),
     ).toBeNull();
+  });
+});
+
+describe("runJevSweep", () => {
+  const sweepConfig = { ...resolveEnsembleConfig({}), requestDelayMs: 0 };
+  const candidate = (id: string) => ({
+    id,
+    raw_name: `Supplier ${id}`,
+    raw_domain: null,
+    uei: null,
+    cage: null,
+    city: null,
+    state: null,
+    country: null,
+    award_count: 3,
+    freshest_award: null,
+    created_at: new Date("2026-01-01T00:00:00Z"),
+    source_payload: {},
+  });
+  const statementsOf = (execute: Mock) =>
+    execute.mock.calls.map(([query]) => {
+      const rendered = new PgDialect().sqlToQuery(query as SQL);
+      return { ...rendered, sql: rendered.sql.trimStart() };
+    });
+
+  it("persists jev evals with zero Muse calls and no result rows", async () => {
+    const execute = vi.fn(async () => ({ rows: [] }));
+    execute.mockResolvedValueOnce({ rows: [candidate("s1"), candidate("s2")] });
+    const screenJev = vi.fn(async (pkg: { signalId: string }) =>
+      pkg.signalId === "s1"
+        ? { decision: "high_priority" as const, confidence: 0.9, costUsd: null }
+        : { decision: "research" as const, confidence: 0.7, costUsd: null },
+    );
+    const summary = await runJevSweep(
+      { execute } as unknown as Database,
+      { status: "queued_qualification", concurrency: 2 },
+      { screenJev: screenJev as never, config: sweepConfig },
+    );
+    expect(summary).toEqual({ screened: 2, flagged: 1, errors: 0 });
+    expect(screenJev).toHaveBeenCalledTimes(2);
+    const inserts = statementsOf(execute).filter((s) =>
+      s.sql.startsWith("INSERT"),
+    );
+    expect(inserts).toHaveLength(2);
+    expect(
+      inserts.every((s) => s.sql.includes("faa_ensemble_evaluations")),
+    ).toBe(true);
+    expect(inserts.some((s) => s.sql.includes("faa_ensemble_results"))).toBe(
+      false,
+    );
+  });
+
+  it("counts screen misses as errors without persisting", async () => {
+    const execute = vi.fn(async () => ({ rows: [] }));
+    execute.mockResolvedValueOnce({ rows: [candidate("s1")] });
+    const summary = await runJevSweep(
+      { execute } as unknown as Database,
+      {},
+      { screenJev: async () => null, config: sweepConfig },
+    );
+    expect(summary).toEqual({ screened: 0, flagged: 0, errors: 1 });
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("runMuseVerification", () => {
+  const verifyConfig = {
+    ...resolveEnsembleConfig({}),
+    requestDelayMs: 0,
+    jevRejectConfirmThreshold: 0.85,
+    jevAuditSampleRate: 0.05,
+  };
+  const stored = (
+    id: string,
+    jev_decision: "high_priority" | "reject" | "research",
+    jev_confidence: number,
+  ) => ({
+    id,
+    raw_name: `Supplier ${id}`,
+    raw_domain: null,
+    uei: null,
+    cage: null,
+    city: null,
+    state: null,
+    country: null,
+    award_count: 3,
+    freshest_award: null,
+    created_at: new Date("2026-01-01T00:00:00Z"),
+    source_payload: {},
+    jev_decision,
+    jev_confidence,
+    jev_cost: null,
+  });
+  const museOk = (decision: "reject" | "research" | "high_priority") =>
+    vi.fn(async () => ({
+      ok: true as const,
+      result: evaluatorResult({ decision }),
+      rawResponse: "{}",
+      tokens: { input: 1, output: 1, total: 2 },
+      costUsd: null,
+    }));
+  const flaggedThenAudit = (
+    execute: Mock,
+    flagged: unknown[],
+    audit: unknown[],
+  ) => {
+    execute.mockResolvedValueOnce({ rows: flagged });
+    execute.mockResolvedValueOnce({ rows: audit });
+  };
+
+  it("confirms a JEv high_priority with one Muse call", async () => {
+    const execute = vi.fn(async () => ({ rows: [] }));
+    flaggedThenAudit(execute, [stored("hp1", "high_priority", 90)], []);
+    const evaluateModel = museOk("high_priority");
+    const summary = await runMuseVerification(
+      { execute } as unknown as Database,
+      { limit: 10, concurrency: 1 },
+      { evaluateModel: evaluateModel as never, config: verifyConfig },
+    );
+    expect(summary).toEqual({
+      verified: 1,
+      confirmed: 1,
+      overruled: 0,
+      errors: 0,
+    });
+    expect(evaluateModel).toHaveBeenCalledTimes(1);
+  });
+
+  it("overrules a JEv reject the second opinion does not confirm", async () => {
+    const execute = vi.fn(async () => ({ rows: [] }));
+    flaggedThenAudit(execute, [stored("rj1", "reject", 95)], []);
+    const evaluateModel = museOk("research");
+    const summary = await runMuseVerification(
+      { execute } as unknown as Database,
+      { limit: 10, concurrency: 1 },
+      { evaluateModel: evaluateModel as never, config: verifyConfig },
+    );
+    expect(summary).toEqual({
+      verified: 1,
+      confirmed: 0,
+      overruled: 1,
+      errors: 0,
+    });
+  });
+
+  it("skips signals that already have Muse evals", async () => {
+    const pool = [
+      stored("hp1", "high_priority", 90),
+      stored("hp2", "high_priority", 88),
+    ];
+    const museEvals = new Set(["hp1"]);
+    const execute = vi.fn(async () => ({ rows: [] }));
+    execute.mockImplementationOnce(async () => ({
+      rows: pool.filter((row) => !museEvals.has(row.id)),
+    }));
+    execute.mockResolvedValueOnce({ rows: [] });
+    const evaluateModel = museOk("high_priority");
+    const summary = await runMuseVerification(
+      { execute } as unknown as Database,
+      { limit: 10, concurrency: 1 },
+      { evaluateModel: evaluateModel as never, config: verifyConfig },
+    );
+    expect(summary).toEqual({
+      verified: 1,
+      confirmed: 1,
+      overruled: 0,
+      errors: 0,
+    });
+    expect(evaluateModel).toHaveBeenCalledTimes(1);
+    expect(evaluateModel.mock.calls[0]![1]).toMatchObject({
+      signalId: "hp2",
+    });
+  });
+
+  it("verifies the audit sample of JEv-research signals", async () => {
+    const execute = vi.fn(async () => ({ rows: [] }));
+    flaggedThenAudit(execute, [], [stored("r1", "research", 70)]);
+    const evaluateModel = museOk("research");
+    const summary = await runMuseVerification(
+      { execute } as unknown as Database,
+      { limit: 20, concurrency: 1 },
+      { evaluateModel: evaluateModel as never, config: verifyConfig },
+    );
+    expect(summary).toEqual({
+      verified: 1,
+      confirmed: 1,
+      overruled: 0,
+      errors: 0,
+    });
+    expect(evaluateModel).toHaveBeenCalledTimes(1);
+    const auditQuery = new PgDialect().sqlToQuery(
+      execute.mock.calls[1]![0] as SQL,
+    );
+    expect(auditQuery.sql).toContain("jev.decision = 'research'");
+    expect(auditQuery.sql).toMatch(/LIMIT/);
+  });
+
+  it("records Muse failures without writing result rows", async () => {
+    const execute = vi.fn(async () => ({ rows: [] }));
+    flaggedThenAudit(execute, [stored("hp1", "high_priority", 90)], []);
+    const evaluateModel = vi.fn(async () => ({
+      ok: false as const,
+      error: "boom",
+      rawResponse: null,
+    }));
+    const summary = await runMuseVerification(
+      { execute } as unknown as Database,
+      { limit: 10, concurrency: 1 },
+      { evaluateModel: evaluateModel as never, config: verifyConfig },
+    );
+    expect(summary).toEqual({
+      verified: 0,
+      confirmed: 0,
+      overruled: 0,
+      errors: 1,
+    });
+    const inserts = execute.mock.calls
+      .map(([query]) => new PgDialect().sqlToQuery(query as SQL))
+      .filter((s) => s.sql.startsWith("INSERT"));
+    expect(inserts.some((s) => s.sql.includes("faa_ensemble_results"))).toBe(
+      false,
+    );
   });
 });

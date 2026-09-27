@@ -6,7 +6,8 @@ import {
   dailyBudgetCapUsd,
   getDailySpendUsd,
   OpenRouterClient,
-  runEnsembleBatch,
+  runJevSweep,
+  runMuseVerification,
 } from "@asi/research";
 
 import type { QueueLogger } from "./queue.js";
@@ -15,11 +16,13 @@ import type { QueueLogger } from "./queue.js";
  * Autonomous ensemble screening loop for Railway.
  *
  * Every tick: probe the ensemble model (skip while unhealthy) -> enforce the
- * daily spend cap -> run the ensemble batch -> refresh unified targets ->
- * promote high-priority results to leads. Every step is individually guarded;
- * this module never throws so the worker process always survives.
+ * daily spend cap -> JEv sweep of the full queue (no Muse calls) ->
+ * independent Muse verification of flagged items + audit sample -> refresh
+ * unified targets -> promote high-priority results to leads. Every step is
+ * individually guarded; this module never throws so the worker process
+ * always survives.
  *
- * Dependency note: `runEnsembleBatch` (Agent RunnerLib,
+ * Dependency note: `runJevSweep` / `runMuseVerification` (Agent RunnerLib,
  * packages/research/src/faa-ensemble/runner.ts) and
  * `populateUnifiedTargets` / `promoteEnsembleLeads` (Agent PopulateLib,
  * packages/database/src/unified-targets/) are imported from the package
@@ -30,11 +33,17 @@ export const ENSEMBLE_SCHEDULE_ENV = "ENSEMBLE_SCHEDULE_MINUTES";
 export const ENSEMBLE_BATCH_LIMIT_ENV = "ENSEMBLE_BATCH_LIMIT";
 export const ENSEMBLE_CONCURRENCY_ENV = "ENSEMBLE_CONCURRENCY";
 export const ENSEMBLE_DELAY_MS_ENV = "ENSEMBLE_DELAY_MS";
+export const JEV_SWEEP_LIMIT_ENV = "JEV_SWEEP_LIMIT";
+export const JEV_SWEEP_CONCURRENCY_ENV = "JEV_SWEEP_CONCURRENCY";
+export const VERIFY_BATCH_LIMIT_ENV = "VERIFY_BATCH_LIMIT";
 
 const DEFAULT_SCHEDULE_MINUTES = 30;
 const DEFAULT_BATCH_LIMIT = 0;
 const DEFAULT_CONCURRENCY = 2;
 const DEFAULT_DELAY_MS = 1_000;
+const DEFAULT_JEV_SWEEP_LIMIT = 0;
+const DEFAULT_JEV_SWEEP_CONCURRENCY = 8;
+const DEFAULT_VERIFY_BATCH_LIMIT = 120;
 
 /** While unhealthy, skip runs for this long (prevents hollow-row eras). */
 const UNHEALTHY_CACHE_MS = 15 * 60 * 1_000;
@@ -56,6 +65,9 @@ export interface EnsembleSchedulerOptions {
   batchLimit?: number;
   concurrency?: number;
   delayMs?: number;
+  sweepLimit?: number;
+  sweepConcurrency?: number;
+  verifyLimit?: number;
 }
 
 export interface EnsembleSchedulerHandle {
@@ -79,6 +91,9 @@ export function resolveSchedulerConfig(options: EnsembleSchedulerOptions): {
   batchLimit: number;
   concurrency: number;
   delayMs: number;
+  sweepLimit: number;
+  sweepConcurrency: number;
+  verifyLimit: number;
 } {
   return {
     scheduleMinutes:
@@ -102,6 +117,24 @@ export function resolveSchedulerConfig(options: EnsembleSchedulerOptions): {
     delayMs:
       options.delayMs ??
       readNonNegativeInt(process.env[ENSEMBLE_DELAY_MS_ENV], DEFAULT_DELAY_MS),
+    sweepLimit:
+      options.sweepLimit ??
+      readNonNegativeInt(
+        process.env[JEV_SWEEP_LIMIT_ENV],
+        DEFAULT_JEV_SWEEP_LIMIT,
+      ),
+    sweepConcurrency:
+      options.sweepConcurrency ??
+      readPositiveInt(
+        process.env[JEV_SWEEP_CONCURRENCY_ENV],
+        DEFAULT_JEV_SWEEP_CONCURRENCY,
+      ),
+    verifyLimit:
+      options.verifyLimit ??
+      readNonNegativeInt(
+        process.env[VERIFY_BATCH_LIMIT_ENV],
+        DEFAULT_VERIFY_BATCH_LIMIT,
+      ),
   };
 }
 
@@ -173,24 +206,42 @@ export function startEnsembleScheduler(
         return;
       }
 
-      // 3. Ensemble screening batch.
+      // 3. Stage 1: JEv sweep of the queue at full speed (zero Muse calls).
       try {
-        const result = await runEnsembleBatch({
-          limit: config.batchLimit,
-          concurrency: config.concurrency,
-          delayMs: config.delayMs,
+        const sweep = await runJevSweep(getDatabase(), {
+          limit: config.sweepLimit,
+          concurrency: config.sweepConcurrency,
         });
-        logger("info", "ensemble.scheduler_batch_completed", {
-          signals: result.signals,
-          metrics: result.metrics,
+        logger("info", "ensemble.scheduler_jev_sweep_completed", {
+          screened: sweep.screened,
+          flagged: sweep.flagged,
+          errors: sweep.errors,
         });
       } catch (error) {
-        logger("error", "ensemble.scheduler_batch_failed", {
+        logger("error", "ensemble.scheduler_jev_sweep_failed", {
           reason: toLogReason(error),
         });
       }
 
-      // 4. Nightly-style unified refresh (runs every tick; populate is
+      // 4. Stage 2: independent Muse verification of flagged items + audit sample.
+      try {
+        const verification = await runMuseVerification(getDatabase(), {
+          limit: config.verifyLimit,
+          concurrency: config.concurrency,
+        });
+        logger("info", "ensemble.scheduler_verification_completed", {
+          verified: verification.verified,
+          confirmed: verification.confirmed,
+          overruled: verification.overruled,
+          errors: verification.errors,
+        });
+      } catch (error) {
+        logger("error", "ensemble.scheduler_verification_failed", {
+          reason: toLogReason(error),
+        });
+      }
+
+      // 5. Nightly-style unified refresh (runs every tick; populate is
       // idempotent per-source upsert, so this is safe).
       try {
         const refreshed = await populateUnifiedTargets(getDatabase());
@@ -203,7 +254,7 @@ export function startEnsembleScheduler(
         });
       }
 
-      // 5. High-priority to lead promotion.
+      // 6. High-priority to lead promotion.
       try {
         const promotion = await promoteEnsembleLeads(getDatabase());
         logger("info", "ensemble.scheduler_promotion_completed", {

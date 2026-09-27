@@ -1039,6 +1039,78 @@ export interface FaaEnsembleSummary {
 }
 
 /**
+ * Single-Muse second opinion for a JEv-flagged signal. Shared by the inline
+ * cascade (runJevCascade) and the decoupled verification stage
+ * (runMuseVerification): exactly one model-A call; a confirming verdict
+ * retains the JEv decision, anything else falls back to research. A failed
+ * Muse call persists the error evaluation and returns a research outcome
+ * WITHOUT writing a result row (the signal stays retryable).
+ */
+export async function verifyJevFlagWithMuse(
+  db: Database,
+  signalId: string,
+  pkg: FaaEvidencePackage,
+  config: FaaEnsembleConfig,
+  screened: JevScreenOutcome,
+  evaluate: (
+    modelId: string,
+    evidence: FaaEvidencePackage,
+  ) => Promise<ModelEvalOutcome>,
+): Promise<EnsembleSignalOutcome> {
+  await sleep(config.requestDelayMs);
+  const outcome = await evaluate(config.modelA, pkg);
+  if (!outcome.ok) {
+    await persistEvaluation(db, signalId, config.modelA, outcome);
+    return {
+      modelADecision: null,
+      modelBDecision: screened.decision,
+      agreed: false,
+      adjudicationRequired: true,
+      adjudicated: false,
+      finalDecision: "research",
+      apiCalls: 1,
+      failures: 1,
+      jevDecision: screened.decision,
+      jevFastPath: false,
+    };
+  }
+  await persistEvaluation(db, signalId, config.modelA, outcome);
+  const confirmed = outcome.result.decision === screened.decision;
+  const finalDecision: EnsembleDecision = confirmed
+    ? screened.decision
+    : "research";
+  await persistResult(db, {
+    signalId,
+    modelAId: config.jevModel,
+    modelBId: config.modelA,
+    modelADecision: screened.decision,
+    modelBDecision: outcome.result.decision,
+    agreed: confirmed,
+    adjudicationRequired: false,
+    adjudicatorModel: null,
+    adjudicatorOutput: null,
+    finalDecision,
+    finalConfidence: outcome.result.confidence,
+    reason: confirmed
+      ? `jev-flagged ${screened.decision} confirmed by second opinion`
+      : "jev flag overruled by second opinion; retained as research",
+    falseNegativeRisk: outcome.result.false_negative_risk,
+  });
+  return {
+    modelADecision: screened.decision,
+    modelBDecision: outcome.result.decision,
+    agreed: confirmed,
+    adjudicationRequired: false,
+    adjudicated: false,
+    finalDecision,
+    apiCalls: 1,
+    failures: 0,
+    jevDecision: screened.decision,
+    jevFastPath: false,
+  };
+}
+
+/**
  * JEv verified cascade for one signal. Returns an outcome when JEv resolves
  * it, or null to fall through to full two-model Muse screening (screen
  * error, or random audit sample).
@@ -1134,55 +1206,7 @@ export async function runJevCascade(
       jevFastPath: true,
     };
   }
-  await sleep(config.requestDelayMs);
-  const outcome = await evaluate(config.modelA, pkg);
-  if (!outcome.ok) {
-    await persistEvaluation(db, row.id, config.modelA, outcome);
-    return {
-      modelADecision: null,
-      modelBDecision: screened.decision,
-      agreed: false,
-      adjudicationRequired: true,
-      adjudicated: false,
-      finalDecision: "research",
-      apiCalls: 1,
-      failures: 1,
-      ...base,
-    };
-  }
-  await persistEvaluation(db, row.id, config.modelA, outcome);
-  const confirmed = outcome.result.decision === screened.decision;
-  const finalDecision: EnsembleDecision = confirmed
-    ? screened.decision
-    : "research";
-  await persistResult(db, {
-    signalId: row.id,
-    modelAId: config.jevModel,
-    modelBId: config.modelA,
-    modelADecision: screened.decision,
-    modelBDecision: outcome.result.decision,
-    agreed: confirmed,
-    adjudicationRequired: false,
-    adjudicatorModel: null,
-    adjudicatorOutput: null,
-    finalDecision,
-    finalConfidence: outcome.result.confidence,
-    reason: confirmed
-      ? `jev-flagged ${screened.decision} confirmed by second opinion`
-      : "jev flag overruled by second opinion; retained as research",
-    falseNegativeRisk: outcome.result.false_negative_risk,
-  });
-  return {
-    modelADecision: screened.decision,
-    modelBDecision: outcome.result.decision,
-    agreed: confirmed,
-    adjudicationRequired: false,
-    adjudicated: false,
-    finalDecision,
-    apiCalls: 1,
-    failures: 0,
-    ...base,
-  };
+  return verifyJevFlagWithMuse(db, row.id, pkg, config, screened, evaluate);
 }
 
 async function qualifySignal(
@@ -1408,4 +1432,343 @@ export async function runEnsembleBatch(
     },
     dependencies,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Decoupled two-stage ensemble (JEv sweep → Muse verification)
+//
+// Stage 1 (runJevSweep) screens the queue with JEv at full speed: zero Muse
+// calls, no faa_ensemble_results rows — only JEv evaluation rows. Stage 2
+// (runMuseVerification) independently spends one Muse call per JEv-flagged
+// signal (high_priority, or reject at/above the confirm threshold) plus a
+// small audit sample of JEv-research signals, writing the result row with
+// the same confirmed→JEv-decision-else-research shape as the inline cascade
+// second opinion. Selection mirrors selectCandidateSignals (status,
+// source-key, and known-name exclusion filters, FIFO) plus the JEv-presence
+// conditions each stage requires.
+// ---------------------------------------------------------------------------
+export interface JevSweepOptions {
+  /** 0 (or omitted) = sweep the entire queue. */
+  readonly limit?: number;
+  readonly status?: string;
+  readonly sourceKeys?: readonly string[];
+  readonly concurrency?: number;
+}
+
+export interface JevSweepDependencies {
+  /** JEv screen override (tests/staging); defaults to defaultScreenJev. */
+  readonly screenJev?: (
+    pkg: FaaEvidencePackage,
+  ) => Promise<JevScreenOutcome | null>;
+  readonly apiKey?: string;
+  readonly config?: FaaEnsembleConfig;
+}
+
+export interface JevSweepSummary {
+  /** Signals where JEv returned a verdict (evaluation row persisted). */
+  readonly screened: number;
+  /** Screened signals needing Muse confirmation. */
+  readonly flagged: number;
+  /** Screen misses (null verdict or throw); nothing persisted. */
+  readonly errors: number;
+}
+
+export interface MuseVerificationOptions {
+  /** Max flagged signals to verify; the audit sample is additional. */
+  readonly limit?: number;
+  readonly concurrency?: number;
+  readonly status?: string;
+  readonly sourceKeys?: readonly string[];
+}
+
+export interface MuseVerificationDependencies {
+  /** Single-Muse evaluator override (tests/staging). */
+  readonly evaluateModel?: (
+    modelId: string,
+    pkg: FaaEvidencePackage,
+  ) => Promise<ModelEvalOutcome>;
+  readonly apiKey?: string;
+  readonly config?: FaaEnsembleConfig;
+}
+
+export interface MuseVerificationSummary {
+  /** Signals where the Muse call succeeded (result row written). */
+  readonly verified: number;
+  /** Muse agreed with the stored JEv verdict. */
+  readonly confirmed: number;
+  /** Muse disagreed; retained as research. */
+  readonly overruled: number;
+  /** Failed Muse calls (error evaluation persisted, no result row). */
+  readonly errors: number;
+}
+
+/**
+ * Verification candidate carrying its stored JEv verdict. jev_confidence is
+ * on the evaluation-table scale (0–100, see persistJevEvaluation) and may
+ * arrive as a string from numeric columns.
+ */
+export interface VerificationCandidateRow extends CandidateSignalRow {
+  readonly jev_decision: EnsembleDecision;
+  readonly jev_confidence: number | string;
+  readonly jev_cost: number | null;
+}
+
+async function selectSweepCandidates(
+  db: Database,
+  args: {
+    status: string;
+    sourceKeys: readonly string[];
+    jevModel: string;
+    /** 0 = all. */
+    limit: number;
+  },
+): Promise<CandidateSignalRow[]> {
+  const base = await db.execute<CandidateSignalRow>(sql`
+    SELECT
+      ss.id,
+      ss.raw_name,
+      ss.raw_domain,
+      ss.uei,
+      ss.cage,
+      ss.city,
+      ss.state,
+      ss.country,
+      ss.award_count,
+      ss.freshest_award,
+      ss.created_at,
+      ss.source_payload
+    FROM source_signals ss
+    WHERE ss.status::text = ${args.status}
+      ${sourceKeyFilter(args.sourceKeys)}
+      AND NOT EXISTS (
+        SELECT 1 FROM faa_ensemble_results r WHERE r.signal_id = ss.id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM faa_ensemble_evaluations e
+        WHERE e.signal_id = ss.id AND e.model_id = ${args.jevModel}
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM golden_examples g
+        WHERE lower(g.name) = lower(ss.raw_name)
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM companies c
+        WHERE lower(c.legal_name) = lower(ss.raw_name)
+      )
+    ORDER BY ss.created_at ASC, ss.id ASC
+    ${args.limit <= 0 ? sql`` : sql`LIMIT ${args.limit}`}
+  `);
+  return [...base.rows];
+}
+
+async function selectVerificationCandidates(
+  db: Database,
+  args: {
+    status: string;
+    sourceKeys: readonly string[];
+    jevModel: string;
+    modelA: string;
+    /** Confirm threshold on the evaluation-table confidence scale (0–100). */
+    rejectThresholdDb: number;
+    kind: "flagged" | "research";
+    limit: number;
+  },
+): Promise<VerificationCandidateRow[]> {
+  const base = await db.execute<VerificationCandidateRow>(sql`
+    SELECT
+      ss.id,
+      ss.raw_name,
+      ss.raw_domain,
+      ss.uei,
+      ss.cage,
+      ss.city,
+      ss.state,
+      ss.country,
+      ss.award_count,
+      ss.freshest_award,
+      ss.created_at,
+      ss.source_payload,
+      jev.decision AS jev_decision,
+      jev.confidence AS jev_confidence,
+      jev.cost_usd AS jev_cost
+    FROM source_signals ss
+    JOIN faa_ensemble_evaluations jev
+      ON jev.signal_id = ss.id AND jev.model_id = ${args.jevModel}
+      ${
+        args.kind === "flagged"
+          ? sql`AND (jev.decision = 'high_priority' OR (jev.decision = 'reject' AND jev.confidence >= ${args.rejectThresholdDb}))`
+          : sql`AND jev.decision = 'research'`
+      }
+    WHERE ss.status::text = ${args.status}
+      ${sourceKeyFilter(args.sourceKeys)}
+      AND NOT EXISTS (
+        SELECT 1 FROM faa_ensemble_evaluations e
+        WHERE e.signal_id = ss.id AND e.model_id = ${args.modelA}
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM faa_ensemble_results r WHERE r.signal_id = ss.id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM golden_examples g
+        WHERE lower(g.name) = lower(ss.raw_name)
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM companies c
+        WHERE lower(c.legal_name) = lower(ss.raw_name)
+      )
+    ORDER BY ss.created_at ASC, ss.id ASC
+    LIMIT ${args.limit}
+  `);
+  return [...base.rows];
+}
+
+/**
+ * Stage 1: sweep queued signals with JEv at full speed. Never calls Muse
+ * and never writes faa_ensemble_results rows — only JEv evaluation rows.
+ */
+export async function runJevSweep(
+  db: Database = getDatabase(),
+  opts: JevSweepOptions = {},
+  deps: JevSweepDependencies = {},
+): Promise<JevSweepSummary> {
+  const config = deps.config ?? resolveEnsembleConfig();
+  const rows = await selectSweepCandidates(db, {
+    status: opts.status ?? DEFAULT_FAA_STATUS,
+    sourceKeys: opts.sourceKeys ?? [],
+    jevModel: config.jevModel,
+    limit: opts.limit ?? 0,
+  });
+  const apiKey = deps.apiKey ?? process.env["OPENROUTER_API_KEY"] ?? "";
+  const screen =
+    deps.screenJev ??
+    ((pkg: FaaEvidencePackage) =>
+      defaultScreenJev(apiKey, config.jevModel, pkg));
+  let screened = 0;
+  let flagged = 0;
+  let errors = 0;
+  await runWithConcurrency(
+    rows,
+    opts.concurrency ?? config.concurrency,
+    async (row) => {
+      const pkg = buildEvidencePackage(row);
+      let verdict: JevScreenOutcome | null;
+      try {
+        verdict = await screen(pkg);
+      } catch {
+        errors += 1;
+        return;
+      }
+      if (verdict === null) {
+        errors += 1;
+        return;
+      }
+      await persistJevEvaluation(db, row.id, config.jevModel, verdict);
+      screened += 1;
+      if (
+        verdict.decision === "high_priority" ||
+        (verdict.decision === "reject" &&
+          verdict.confidence >= config.jevRejectConfirmThreshold)
+      ) {
+        flagged += 1;
+      }
+    },
+  );
+  return { screened, flagged, errors };
+}
+
+/**
+ * Stage 2: verify JEv-flagged signals with one Muse call each (model A),
+ * plus an audit sample of JEv-research signals. Outcomes carry jevDecision
+ * from the stored JEv eval with jevFastPath false, so EnsembleMetrics
+ * (jevScreened, jevFastPath) summarize them like cascade outcomes.
+ */
+export async function runMuseVerification(
+  db: Database = getDatabase(),
+  opts: MuseVerificationOptions = {},
+  deps: MuseVerificationDependencies = {},
+): Promise<MuseVerificationSummary> {
+  const config = deps.config ?? resolveEnsembleConfig();
+  const limit = opts.limit ?? 120;
+  const status = opts.status ?? DEFAULT_FAA_STATUS;
+  const sourceKeys = opts.sourceKeys ?? [];
+  const flagged = await selectVerificationCandidates(db, {
+    status,
+    sourceKeys,
+    jevModel: config.jevModel,
+    modelA: config.modelA,
+    rejectThresholdDb: Math.round(config.jevRejectConfirmThreshold * 100),
+    kind: "flagged",
+    limit,
+  });
+  const auditCap = Math.max(1, Math.floor(limit * config.jevAuditSampleRate));
+  const audit = await selectVerificationCandidates(db, {
+    status,
+    sourceKeys,
+    jevModel: config.jevModel,
+    modelA: config.modelA,
+    rejectThresholdDb: Math.round(config.jevRejectConfirmThreshold * 100),
+    kind: "research",
+    limit: auditCap,
+  });
+  const seen = new Set(flagged.map((row) => row.id));
+  const candidates = [...flagged];
+  for (const row of audit) {
+    if (!seen.has(row.id)) {
+      seen.add(row.id);
+      candidates.push(row);
+    }
+  }
+  const apiKey = deps.apiKey ?? process.env["OPENROUTER_API_KEY"] ?? "";
+  const client: OpenRouterClient | null =
+    deps.evaluateModel === undefined ? new OpenRouterClient(apiKey) : null;
+  const evaluate: (
+    modelId: string,
+    evidence: FaaEvidencePackage,
+  ) => Promise<ModelEvalOutcome> =
+    deps.evaluateModel ??
+    ((modelId, evidence) => {
+      if (client === null) {
+        throw new Error(
+          "OPENROUTER_API_KEY is required (no evaluate override)",
+        );
+      }
+      return defaultEvaluateModel(client, modelId, evidence);
+    });
+  let verified = 0;
+  let confirmed = 0;
+  let overruled = 0;
+  let errors = 0;
+  await runWithConcurrency(
+    candidates,
+    opts.concurrency ?? config.concurrency,
+    async (row) => {
+      const pkg = buildEvidencePackage(row);
+      const outcome = await verifyJevFlagWithMuse(
+        db,
+        row.id,
+        pkg,
+        config,
+        {
+          decision: row.jev_decision,
+          confidence: Math.max(
+            0,
+            Math.min(1, Number(row.jev_confidence) / 100),
+          ),
+          costUsd: typeof row.jev_cost === "number" ? row.jev_cost : null,
+        },
+        evaluate,
+      );
+      if (outcome.failures > 0) {
+        errors += 1;
+        return;
+      }
+      verified += 1;
+      if (outcome.agreed) {
+        confirmed += 1;
+      } else {
+        overruled += 1;
+      }
+    },
+  );
+  return { verified, confirmed, overruled, errors };
 }
