@@ -12,6 +12,7 @@ import {
   parseEnsembleArgs,
   resolveEnsemble,
   resolveEnsembleConfig,
+  runJevCascade,
   runWithConcurrency,
   selectCandidateSignals,
   summarizeEnsembleOutcomes,
@@ -432,5 +433,148 @@ describe("withRateLimitPatience", () => {
       }),
     ).rejects.toThrow("validation_failed");
     expect(calls).toBe(1);
+  });
+});
+
+describe("runJevCascade", () => {
+  const row = { id: "signal-1" };
+  const pkg = {
+    signalId: "signal-1",
+    name: "Acme Aero",
+    domain: null,
+    cage: null,
+    uei: null,
+    address: null,
+    city: null,
+    state: null,
+    country: null,
+    partCount: 10,
+    makes: ["Boeing"],
+    modelsSample: [],
+    supplementDate: null,
+    guidUrl: null,
+  };
+  const mockDb = () => ({ execute: vi.fn(async () => ({ rows: [] })) });
+  const baseConfig = {
+    ...resolveEnsembleConfig({}),
+    jevAuditSampleRate: 0,
+    jevRejectConfirmThreshold: 0.85,
+    requestDelayMs: 0,
+  };
+  const museOk = (decision: "reject" | "research" | "high_priority") =>
+    vi.fn(async () => ({
+      ok: true as const,
+      result: evaluatorResult({ decision }),
+      rawResponse: "{}",
+      tokens: { input: 1, output: 1, total: 2 },
+      costUsd: null,
+    }));
+
+  it("accepts JEv research with zero Muse calls", async () => {
+    const evaluate = museOk("research");
+    const outcome = await runJevCascade(
+      mockDb() as never,
+      row as never,
+      pkg,
+      baseConfig,
+      async () => ({ decision: "research", confidence: 0.7, costUsd: null }),
+      evaluate,
+    );
+    expect(outcome).toMatchObject({
+      finalDecision: "research",
+      jevFastPath: true,
+      jevDecision: "research",
+      apiCalls: 0,
+    });
+    expect(evaluate).not.toHaveBeenCalled();
+  });
+
+  it("confirms JEv high_priority with one Muse call", async () => {
+    const evaluate = museOk("high_priority");
+    const outcome = await runJevCascade(
+      mockDb() as never,
+      row as never,
+      pkg,
+      baseConfig,
+      async () => ({
+        decision: "high_priority",
+        confidence: 0.9,
+        costUsd: null,
+      }),
+      evaluate,
+    );
+    expect(outcome).toMatchObject({
+      finalDecision: "high_priority",
+      apiCalls: 1,
+    });
+    expect(evaluate).toHaveBeenCalledTimes(1);
+  });
+
+  it("overrules unconfirmed high_priority to research", async () => {
+    const outcome = await runJevCascade(
+      mockDb() as never,
+      row as never,
+      pkg,
+      baseConfig,
+      async () => ({
+        decision: "high_priority",
+        confidence: 0.9,
+        costUsd: null,
+      }),
+      museOk("research"),
+    );
+    expect(outcome).toMatchObject({ finalDecision: "research" });
+  });
+
+  it("confirms high-confidence JEv reject with one Muse call", async () => {
+    const outcome = await runJevCascade(
+      mockDb() as never,
+      row as never,
+      pkg,
+      baseConfig,
+      async () => ({ decision: "reject", confidence: 0.95, costUsd: null }),
+      museOk("reject"),
+    );
+    expect(outcome).toMatchObject({ finalDecision: "reject", apiCalls: 1 });
+  });
+
+  it("retains low-confidence reject without Muse calls", async () => {
+    const evaluate = museOk("reject");
+    const outcome = await runJevCascade(
+      mockDb() as never,
+      row as never,
+      pkg,
+      baseConfig,
+      async () => ({ decision: "reject", confidence: 0.4, costUsd: null }),
+      evaluate,
+    );
+    expect(outcome).toMatchObject({
+      finalDecision: "research",
+      jevFastPath: true,
+    });
+    expect(evaluate).not.toHaveBeenCalled();
+  });
+
+  it("falls through on screen error and on audit sample", async () => {
+    expect(
+      await runJevCascade(
+        mockDb() as never,
+        row as never,
+        pkg,
+        baseConfig,
+        async () => null,
+        museOk("research"),
+      ),
+    ).toBeNull();
+    expect(
+      await runJevCascade(
+        mockDb() as never,
+        row as never,
+        pkg,
+        { ...baseConfig, jevAuditSampleRate: 1 },
+        async () => ({ decision: "research", confidence: 0.9, costUsd: null }),
+        museOk("research"),
+      ),
+    ).toBeNull();
   });
 });

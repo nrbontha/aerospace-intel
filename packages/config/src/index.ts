@@ -110,7 +110,16 @@ const serverEnvSchema = z
     FAA_MODEL_A: modelId.default("meta/muse-spark-1.3-contributor"),
     FAA_MODEL_B: modelId.default("meta/muse-spark-1.3-contributor"),
     FAA_ADJUDICATOR_MODEL: modelId.optional(),
-    FAA_QUALIFICATION_CONCURRENCY: positiveIntegerWithDefault(5, 100),
+    FAA_JEV_MODEL: modelId.default("typesafe/jev-1.13"),
+    JEV_PRESCREEN: optionalBoolean.transform((value) => value ?? true),
+    JEV_REJECT_CONFIRM_THRESHOLD: z.preprocess(
+      blankToUndefined,
+      z.coerce.number().finite().min(0).max(1).default(0.85),
+    ),
+    JEV_AUDIT_SAMPLE_RATE: z.preprocess(
+      blankToUndefined,
+      z.coerce.number().finite().min(0).max(1).default(0.05),
+    ),
     OPENROUTER_MAX_COST_PER_RUN_USD: positiveNumberWithDefault(2),
     OPENROUTER_MAX_COST_PER_DAY_USD: positiveNumberWithDefault(15),
     RESEARCH_MAX_TOOL_CALLS: positiveIntegerWithDefault(50, 10_000),

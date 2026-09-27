@@ -25,6 +25,7 @@ import { ensembleDecisionSchema, type EnsembleDecision } from "./schemas.js";
 import { getDatabase, type Database } from "@asi/database";
 import { sql } from "drizzle-orm";
 import { OpenRouterClient } from "../openrouter.js";
+import { callJev, JEV_MODEL } from "./jev.js";
 
 export { ensembleDecisionSchema, type EnsembleDecision };
 import {
@@ -87,6 +88,14 @@ export interface FaaEnsembleConfig {
   readonly adjudicatorModel: string;
   readonly concurrency: number;
   readonly requestDelayMs: number;
+  /** JEv cheap pre-screen before any Muse call. Env JEV_PRESCREEN, default on. */
+  readonly jevPrescreen: boolean;
+  /** JEv model id. Env FAA_JEV_MODEL, default typesafe/jev-1.13. */
+  readonly jevModel: string;
+  /** JEv reject confidence at/above which one Muse call confirms. Default 0.85. */
+  readonly jevRejectConfirmThreshold: number;
+  /** Fraction of JEv-fast-path signals routed to full Muse screening anyway. Default 0.05. */
+  readonly jevAuditSampleRate: number;
 }
 
 export function resolveEnsembleConfig(
@@ -115,7 +124,28 @@ export function resolveEnsembleConfig(
     Number.isInteger(parsedDelay) && parsedDelay >= 0
       ? parsedDelay
       : DEFAULT_FAA_REQUEST_DELAY_MS;
-  return { modelA, modelB, adjudicatorModel, concurrency, requestDelayMs };
+  const jevPrescreen = (env["JEV_PRESCREEN"] ?? "true").trim() !== "false";
+  const jevModel =
+    (env["FAA_JEV_MODEL"] ?? "").trim() === ""
+      ? JEV_MODEL
+      : (env["FAA_JEV_MODEL"] ?? "").trim();
+  const rejectThreshold = Number(env["JEV_REJECT_CONFIRM_THRESHOLD"] ?? "");
+  const jevRejectConfirmThreshold =
+    rejectThreshold >= 0 && rejectThreshold <= 1 ? rejectThreshold : 0.85;
+  const auditRate = Number(env["JEV_AUDIT_SAMPLE_RATE"] ?? "");
+  const jevAuditSampleRate =
+    auditRate >= 0 && auditRate <= 1 ? auditRate : 0.05;
+  return {
+    modelA,
+    modelB,
+    adjudicatorModel,
+    concurrency,
+    requestDelayMs,
+    jevPrescreen,
+    jevModel,
+    jevRejectConfirmThreshold,
+    jevAuditSampleRate,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -157,6 +187,97 @@ export const adjudicatorResultSchema = z.object({
 });
 export type FaaAdjudicatorResult = z.infer<typeof adjudicatorResultSchema>;
 
+// ---------------------------------------------------------------------------
+// JEv cheap pre-screen (verified cascade: JEv judges everything at ~$0.00002;
+// Muse spends only on JEv-flagged cases plus a random audit sample)
+// ---------------------------------------------------------------------------
+export const JEV_DISPOSITION_QUESTION = {
+  type: "choice",
+  instructions:
+    "Which pipeline disposition fits this aerospace/defense company as a potential sub-$50M acquisition target?",
+  criteria: {
+    high_priority:
+      "Niche aerospace/defense manufacturer with proprietary manufactured products (patented or branded components, parts, systems; PMA/STC/TSO articles; product catalog) and small private indicators.",
+    research:
+      "Plausibly relevant aerospace manufacturer, or proprietary PROCESS only (kitting, assembly, repair, services), or key facts missing (ownership, size, website).",
+    reject:
+      "Clearly outside the thesis: airline, airport, government, university, major prime, obviously large strategic company or its named subsidiary, platform aircraft OEM, pure consultancy/software, distributor without manufacturing, unrelated industry, or dead company.",
+  },
+} as const;
+
+export const JEV_MANUFACTURER_QUESTION = {
+  type: "noul",
+  instructions:
+    "Does this company manufacture physical aerospace/defense products?",
+  criteria: {
+    true: "Designs or builds components, assemblies, parts, or systems.",
+    false: "Services, distribution, software, or unrelated business only.",
+  },
+} as const;
+
+export const JEV_OVERSIZE_QUESTION = {
+  type: "noul",
+  instructions:
+    "Is there affirmative evidence this is a major prime, Fortune-scale aerospace group, named subsidiary thereof, or platform aircraft OEM?",
+  criteria: {
+    true: "Widely-known large strategic, prime, or subsidiary; or whole-aircraft OEM.",
+    false: "Small or mid-size supplier, or size unknown.",
+  },
+} as const;
+
+export interface JevScreenOutcome {
+  readonly decision: EnsembleDecision;
+  readonly confidence: number;
+  readonly costUsd: number | null;
+}
+
+function jevChoiceToDecision(choice: unknown): EnsembleDecision | null {
+  return choice === "reject" ||
+    choice === "research" ||
+    choice === "high_priority"
+    ? choice
+    : null;
+}
+
+export async function defaultScreenJev(
+  apiKey: string,
+  model: string,
+  pkg: FaaEvidencePackage,
+): Promise<JevScreenOutcome | null> {
+  try {
+    const result = await callJev(
+      apiKey,
+      {
+        company_name: pkg.name,
+        domain: pkg.domain,
+        identifiers: { cage: pkg.cage, uei: pkg.uei },
+        location: { city: pkg.city, state: pkg.state, country: pkg.country },
+        address: pkg.address,
+        part_count: pkg.partCount,
+        makes: pkg.makes,
+        models_sample: pkg.modelsSample,
+        latest_supplement_date: pkg.supplementDate,
+        guid_url: pkg.guidUrl,
+      },
+      {
+        disposition: JEV_DISPOSITION_QUESTION,
+        manufacturer: JEV_MANUFACTURER_QUESTION,
+        oversize: JEV_OVERSIZE_QUESTION,
+      },
+      { model },
+    );
+    const answer = result.answers["disposition"];
+    const decision = jevChoiceToDecision(answer?.choice);
+    if (decision === null) return null;
+    const confidence =
+      typeof answer?.confidence === "number"
+        ? Math.max(0, Math.min(1, answer.confidence))
+        : 0.5;
+    return { decision, confidence, costUsd: result.costUsd };
+  } catch {
+    return null;
+  }
+}
 // ---------------------------------------------------------------------------
 // CLI options (parsed by the thin script wrapper; the batch entrypoint below
 // maps the shared-contract options onto this shape)
@@ -660,6 +781,43 @@ async function persistEvaluation(
   `);
 }
 
+/**
+ * Persist a JEv screen verdict as an evaluation row (model_id is the JEv
+ * model). Other claim columns stay NULL: JEv returns no prose evidence.
+ */
+async function persistJevEvaluation(
+  db: Database,
+  signalId: string,
+  modelId: string,
+  outcome: JevScreenOutcome,
+): Promise<void> {
+  await db.execute(sql`
+    INSERT INTO faa_ensemble_evaluations (
+      signal_id, model_id, prompt_version, raw_response, parsed,
+      decision, confidence, company_type, aerospace_defense_relevance,
+      manufacturing_evidence, thesis_signals, disqualifiers,
+      missing_evidence, false_negative_risk, reason, tokens, cost_usd,
+      error, retry_count, updated_at
+    ) VALUES (
+      ${signalId}, ${modelId}, ${FAA_EVALUATOR_PROMPT_VERSION},
+      ${JSON.stringify({ decision: outcome.decision, confidence: outcome.confidence })},
+      ${JSON.stringify({ decision: outcome.decision, confidence: outcome.confidence })},
+      ${outcome.decision}, ${Math.round(outcome.confidence * 100)},
+      null, null, null, '[]', '[]', '[]', null, 'jev-prescreen', null,
+      ${outcome.costUsd}, null, 0, now()
+    )
+    ON CONFLICT (signal_id, model_id, prompt_version) DO UPDATE SET
+      raw_response = EXCLUDED.raw_response,
+      parsed = EXCLUDED.parsed,
+      decision = EXCLUDED.decision,
+      confidence = EXCLUDED.confidence,
+      reason = EXCLUDED.reason,
+      cost_usd = EXCLUDED.cost_usd,
+      error = EXCLUDED.error,
+      updated_at = now()
+  `);
+}
+
 async function persistResult(
   db: Database,
   input: {
@@ -728,6 +886,10 @@ export interface EnsembleSignalOutcome {
   readonly failures: number;
   /** NO-DEFAULT RULE: no result row was written; the signal stays retryable. */
   readonly skippedNoJudgment?: boolean;
+  /** JEv pre-screen verdict driving this outcome (null when prescreen off/failed). */
+  readonly jevDecision?: EnsembleDecision | null;
+  /** True when JEv resolved the signal with zero Muse calls. */
+  readonly jevFastPath?: boolean;
 }
 
 export interface EnsembleMetrics {
@@ -744,6 +906,10 @@ export interface EnsembleMetrics {
   readonly failures: number;
   readonly finalDistribution: Record<EnsembleDecision, number>;
   readonly skippedNoJudgment: number;
+  /** Signals where JEv ran (any verdict, including errors→null screen). */
+  readonly jevScreened: number;
+  /** Signals resolved with zero Muse calls (JEv research fast path). */
+  readonly jevFastPath: number;
 }
 
 function emptyDecisionCount(): Record<EnsembleDecision | "error", number> {
@@ -764,11 +930,17 @@ export function summarizeEnsembleOutcomes(
   let apiCalls = 0;
   let failures = 0;
   let skippedNoJudgment = 0;
+  let jevScreened = 0;
+  let jevFastPath = 0;
   for (const outcome of outcomes) {
     if (outcome.agreed) agreed += 1;
     if (outcome.adjudicated) adjudications += 1;
     apiCalls += outcome.apiCalls;
     failures += outcome.failures;
+    if (outcome.jevDecision !== undefined && outcome.jevDecision !== null) {
+      jevScreened += 1;
+    }
+    if (outcome.jevFastPath === true) jevFastPath += 1;
     perModel.a[outcome.modelADecision ?? "error"] += 1;
     perModel.b[outcome.modelBDecision ?? "error"] += 1;
     if (outcome.skippedNoJudgment === true) {
@@ -789,6 +961,8 @@ export function summarizeEnsembleOutcomes(
     failures,
     finalDistribution,
     skippedNoJudgment,
+    jevScreened,
+    jevFastPath,
   };
 }
 
@@ -800,6 +974,7 @@ export function formatEnsembleMetrics(metrics: EnsembleMetrics): string {
     `model_b: reject=${metrics.perModel.b.reject} research=${metrics.perModel.b.research} high_priority=${metrics.perModel.b.high_priority} error=${metrics.perModel.b.error}`,
     `final: reject=${metrics.finalDistribution.reject} research=${metrics.finalDistribution.research} high_priority=${metrics.finalDistribution.high_priority}`,
     `adjudications=${metrics.adjudications} api_calls=${metrics.apiCalls} failures=${metrics.failures} skipped_no_judgment=${metrics.skippedNoJudgment}`,
+    `jev: screened=${metrics.jevScreened} fast_path=${metrics.jevFastPath}`,
   ];
 
   return lines.join("\n");
@@ -852,11 +1027,162 @@ export interface FaaEnsembleDependencies {
     a: FaaEvaluatorResult | null,
     b: FaaEvaluatorResult | null,
   ) => Promise<AdjudicatorOutcome>;
+  /** JEv pre-screen override (tests/staging). Null result falls through to Muse. */
+  readonly screenJev?: (
+    pkg: FaaEvidencePackage,
+  ) => Promise<JevScreenOutcome | null>;
 }
 
 export interface FaaEnsembleSummary {
   readonly signals: number;
   readonly metrics: EnsembleMetrics;
+}
+
+/**
+ * JEv verified cascade for one signal. Returns an outcome when JEv resolves
+ * it, or null to fall through to full two-model Muse screening (screen
+ * error, or random audit sample).
+ */
+export async function runJevCascade(
+  db: Database,
+  row: CandidateSignalRow,
+  pkg: FaaEvidencePackage,
+  config: FaaEnsembleConfig,
+  screen: (pkg: FaaEvidencePackage) => Promise<JevScreenOutcome | null>,
+  evaluate: (
+    modelId: string,
+    evidence: FaaEvidencePackage,
+  ) => Promise<ModelEvalOutcome>,
+): Promise<EnsembleSignalOutcome | null> {
+  let screened: JevScreenOutcome | null;
+  try {
+    screened = await screen(pkg);
+  } catch {
+    return null;
+  }
+  if (screened === null) return null;
+  await persistJevEvaluation(db, row.id, config.jevModel, screened);
+  const base = {
+    jevDecision: screened.decision as EnsembleDecision,
+    jevFastPath: false,
+  };
+  const audit = Math.random() < config.jevAuditSampleRate;
+  if (audit) return null;
+  if (screened.decision === "research") {
+    const finalConfidence = Math.round(screened.confidence * 100);
+    await persistResult(db, {
+      signalId: row.id,
+      modelAId: config.jevModel,
+      modelBId: config.jevModel,
+      modelADecision: "research",
+      modelBDecision: "research",
+      agreed: true,
+      adjudicationRequired: false,
+      adjudicatorModel: null,
+      adjudicatorOutput: null,
+      finalDecision: "research",
+      finalConfidence,
+      reason: "jev-fast-path: research accepted without Muse calls",
+      falseNegativeRisk: "low",
+    });
+    return {
+      modelADecision: "research",
+      modelBDecision: "research",
+      agreed: true,
+      adjudicationRequired: false,
+      adjudicated: false,
+      finalDecision: "research",
+      apiCalls: 0,
+      failures: 0,
+      ...base,
+      jevFastPath: true,
+    };
+  }
+  // Flagged cases get exactly one Muse second opinion (model A). Muse wins
+  // ties toward retention: only a confirming verdict promotes/rejects.
+  const needsConfirm =
+    screened.decision === "high_priority" ||
+    (screened.decision === "reject" &&
+      screened.confidence >= config.jevRejectConfirmThreshold);
+  if (!needsConfirm) {
+    // Low-confidence reject: retain as research without spending Muse.
+    await persistResult(db, {
+      signalId: row.id,
+      modelAId: config.jevModel,
+      modelBId: config.jevModel,
+      modelADecision: screened.decision,
+      modelBDecision: "research",
+      agreed: false,
+      adjudicationRequired: false,
+      adjudicatorModel: null,
+      adjudicatorOutput: null,
+      finalDecision: "research",
+      finalConfidence: Math.round(screened.confidence * 100),
+      reason: "jev-fast-path: low-confidence reject retained as research",
+      falseNegativeRisk: "medium",
+    });
+    return {
+      modelADecision: screened.decision,
+      modelBDecision: "research",
+      agreed: false,
+      adjudicationRequired: false,
+      adjudicated: false,
+      finalDecision: "research",
+      apiCalls: 0,
+      failures: 0,
+      ...base,
+      jevFastPath: true,
+    };
+  }
+  await sleep(config.requestDelayMs);
+  const outcome = await evaluate(config.modelA, pkg);
+  if (!outcome.ok) {
+    await persistEvaluation(db, row.id, config.modelA, outcome);
+    return {
+      modelADecision: null,
+      modelBDecision: screened.decision,
+      agreed: false,
+      adjudicationRequired: true,
+      adjudicated: false,
+      finalDecision: "research",
+      apiCalls: 1,
+      failures: 1,
+      ...base,
+    };
+  }
+  await persistEvaluation(db, row.id, config.modelA, outcome);
+  const confirmed = outcome.result.decision === screened.decision;
+  const finalDecision: EnsembleDecision = confirmed
+    ? screened.decision
+    : "research";
+  await persistResult(db, {
+    signalId: row.id,
+    modelAId: config.jevModel,
+    modelBId: config.modelA,
+    modelADecision: screened.decision,
+    modelBDecision: outcome.result.decision,
+    agreed: confirmed,
+    adjudicationRequired: false,
+    adjudicatorModel: null,
+    adjudicatorOutput: null,
+    finalDecision,
+    finalConfidence: outcome.result.confidence,
+    reason: confirmed
+      ? `jev-flagged ${screened.decision} confirmed by second opinion`
+      : "jev flag overruled by second opinion; retained as research",
+    falseNegativeRisk: outcome.result.false_negative_risk,
+  });
+  return {
+    modelADecision: screened.decision,
+    modelBDecision: outcome.result.decision,
+    agreed: confirmed,
+    adjudicationRequired: false,
+    adjudicated: false,
+    finalDecision,
+    apiCalls: 1,
+    failures: 0,
+    ...base,
+  };
 }
 
 async function qualifySignal(
@@ -890,9 +1216,24 @@ async function qualifySignal(
     throw new Error("OPENROUTER_API_KEY is required (no adjudicate override)");
   }
 
+  // JEv verified cascade: a $0.00002 screen runs first. Muse spends only on
+  // JEv-flagged cases (reject confirm / high_priority verify) plus a random
+  // audit sample. JEv research accepts outright with zero Muse calls.
+  if (config.jevPrescreen && deps.screenJev !== undefined) {
+    const fastPath = await runJevCascade(
+      db,
+      row,
+      pkg,
+      config,
+      deps.screenJev,
+      evaluate,
+    );
+    if (fastPath !== null) return fastPath;
+    // Fall through: screen errored, or the audit sample demands full Muse.
+  }
+
   let apiCalls = 0;
   let failures = 0;
-
   // Persist Model A even if Model B fails: sequential, each persisted.
   await sleep(config.requestDelayMs);
   const outcomeA = await evaluate(config.modelA, pkg);
@@ -1017,9 +1358,17 @@ export async function runFaaEnsemble(
     dependencies.adjudicate !== undefined
       ? null
       : new OpenRouterClient(apiKey);
+  const effectiveDependencies =
+    dependencies.screenJev !== undefined || client === null
+      ? dependencies
+      : {
+          ...dependencies,
+          screenJev: (pkg: FaaEvidencePackage) =>
+            defaultScreenJev(apiKey, config.jevModel, pkg),
+        };
 
   const outcomes = await runWithConcurrency(rows, options.concurrency, (row) =>
-    qualifySignal(row, config, dependencies, db, client),
+    qualifySignal(row, config, effectiveDependencies, db, client),
   );
   const metrics = summarizeEnsembleOutcomes(outcomes);
   console.log(formatEnsembleMetrics(metrics));
