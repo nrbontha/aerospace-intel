@@ -213,7 +213,7 @@ export const JEV_DISPOSITION_QUESTION = {
     research:
       "Plausibly relevant aerospace/defense manufacturer missing the discriminating facts (websiteOffering capabilities_only or unknown, empty productEvidence, thin or no part/award evidence, ownershipStatus unknown), or proprietary PROCESS only (kitting, assembly, repair, services) rather than a proprietary product.",
     reject:
-      "Clearly outside the thesis: airline, airport, government, university, major prime, obviously large strategic company or its named subsidiary, platform aircraft OEM, pure consultancy/software, distributor without manufacturing, unrelated industry, or dead company.",
+      "Clearly outside the thesis: airline, airport, government, university, major prime, obviously large strategic company or its named subsidiary, platform aircraft OEM, pure consultancy/software, distributor without manufacturing, unrelated industry, or dead company. Manufacturers whose end markets are primarily non-aerospace (emergency vehicles, automotive, marine, industrial) are reject even when they make physical products.",
   },
 } as const;
 

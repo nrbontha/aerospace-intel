@@ -29,9 +29,17 @@ interface Variant {
   r1Threshold: number;
   vetoStatuses: string[];
   r2Mode: "choice" | "strict-product" | "lenient";
-  order: "ladder" | "disposition-first";
+  r3Mode?: "default" | "scale";
+  r4Mode?: "default" | "sector-sharp";
+  order: "ladder" | "disposition-first" | "screen-then-disposition" | "vet-then-disposition";
   vetoFirst: boolean;
+  enriched: boolean;
+  r2Continue: boolean;
 }
+
+const evidenceByName: Record<string, unknown> = JSON.parse(
+  readFileSync(new URL("./jev-bakeoff-evidence.json", import.meta.url), "utf8"),
+);
 
 const variant: Variant = JSON.parse(
   readFileSync(
@@ -39,48 +47,116 @@ const variant: Variant = JSON.parse(
     "utf8",
   ),
 );
-const apiKey = process.env.OPENROUTER_API_KEY ?? "";
-if (!apiKey) throw new Error("OPENROUTER_API_KEY is required");
-const model = process.env.JEV_MODEL ?? "typesafe/jev-1.13";
-const repeats = Number(process.env.BAKEOFF_REPEATS ?? "1");
-
 const r2Questions = {
   choice: JEV_PRODUCT_PROCESS_QUESTION,
   "strict-product": {
     type: "choice",
     instructions:
       "Does this company sell a proprietary manufactured PRODUCT with a name, brand, catalog SKU, PMA/STC article, or patent? Answer product ONLY on a named article; marketing capabilities alone are process.",
-    criteria: (JEV_PRODUCT_PROCESS_QUESTION.criteria as Record<string, string>),
+    criteria: JEV_PRODUCT_PROCESS_QUESTION.criteria as Record<string, string>,
   },
   lenient: {
     type: "choice",
     instructions:
       "Might this company sell any proprietary manufactured product, even on thin evidence?",
-    criteria: (JEV_PRODUCT_PROCESS_QUESTION.criteria as Record<string, string>),
+    criteria: JEV_PRODUCT_PROCESS_QUESTION.criteria as Record<string, string>,
   },
 } as const;
+const r4Questions = {
+  default: JEV_DISPOSITION_QUESTION,
+  "sector-sharp": {
+    type: "choice",
+    instructions: JEV_DISPOSITION_QUESTION.instructions as string,
+    criteria: {
+      ...(JEV_DISPOSITION_QUESTION.criteria as Record<string, string>),
+      reject:
+        (JEV_DISPOSITION_QUESTION.criteria as Record<string, string>).reject +
+        " Manufacturers whose end markets are primarily non-aerospace (emergency vehicles, automotive, marine, industrial) are reject even when they make physical products.",
+    },
+  },
+} as const;
+const r3Questions = {
+  default: JEV_OVERSIZE_QUESTION,
+  scale: {
+    type: "noul",
+    instructions:
+      "Is there affirmative evidence this company operates at large-company scale (multi-state facilities, 100+ employees, Fortune-scale parent) or is a major prime, named subsidiary thereof, or platform aircraft OEM?",
+    criteria: {
+      true: "Large-scale operator, prime, subsidiary, or whole-aircraft OEM.",
+      false: "Small single-site supplier, or scale unknown.",
+    },
+  },
+} as const;
+
+const apiKey = process.env.OPENROUTER_API_KEY ?? "";
+if (!apiKey) throw new Error("OPENROUTER_API_KEY is required");
+const model = process.env.JEV_MODEL ?? "typesafe/jev-1.13";
+const repeats = Number(process.env.BAKEOFF_REPEATS ?? "1");
 
 async function runVariant(
   name: string,
   domain: string | null,
   ownership: string,
+  synthetic?: {
+    makes?: string[];
+    modelsSample?: string[];
+    excerpts?: string;
+    websiteOffering?: string;
+  },
 ): Promise<{ final: string; exit: string; cost: number }> {
+  const frozen =
+    variant.enriched === true
+      ? (evidenceByName[name] as
+          | {
+              domain?: string;
+              websiteOffering?: string;
+              excerptsTrimmedTo500Chars?: string;
+              ownershipHints?: string[];
+              sizeHints?: string[];
+              error?: boolean;
+            }
+          | undefined)
+      : undefined;
+  const website =
+    synthetic?.excerpts !== undefined || synthetic?.websiteOffering !== undefined
+      ? {
+          websiteOffering: synthetic?.websiteOffering ?? "products_menu",
+          excerpts: synthetic?.excerpts ?? "",
+          ownershipHints: [],
+          sizeHints: [],
+        }
+      : frozen !== undefined &&
+          frozen.error !== true &&
+          typeof frozen.websiteOffering === "string"
+        ? {
+            websiteOffering: frozen.websiteOffering,
+            excerpts: frozen.excerptsTrimmedTo500Chars ?? "",
+            ownershipHints: frozen.ownershipHints ?? [],
+            sizeHints: frozen.sizeHints ?? [],
+          }
+        : undefined;
   const pkg = buildEvidencePackage(
     {
       id: `bakeoff-${name}`,
       raw_name: name,
-      raw_domain: domain,
+      raw_domain: (frozen?.domain as string | undefined) ?? domain,
       cage: null,
       uei: null,
       city: null,
       state: null,
       country: null,
-      award_count: null,
+      award_count: synthetic ? 12 : null,
       freshest_award: null,
       created_at: new Date().toISOString(),
-      source_payload: {},
+      source_payload:
+        synthetic?.makes !== undefined
+          ? {
+              makes: synthetic.makes,
+              models_sample: synthetic.modelsSample ?? [],
+            }
+          : {},
     },
-    undefined,
+    website as never,
     (ownership === "dead" ? "dead" : ownership) as never,
   );
   const state = {
@@ -107,13 +183,17 @@ async function runVariant(
     variant.vetoStatuses.includes(pkg.ownershipStatus ?? "unknown")
   )
     return { final: "reject", exit: "r0-veto", cost };
-  if (variant.order === "disposition-first" || variant.order === "vet-then-disposition") {
-    if (variant.order === "vet-then-disposition") {
-      const over = await ask({ oversize: JEV_OVERSIZE_QUESTION });
-      const overNoul = over.answers["oversize"]?.noul;
-      if (typeof overNoul === "number" && overNoul >= 0.5)
-        return { final: "reject", exit: "r0-oversize", cost };
-    }
+  if (variant.order === "disposition-first") {
+    const d = await ask({ disposition: JEV_DISPOSITION_QUESTION });
+    const choice = String(d.answers["disposition"]?.choice ?? "");
+    if (["high_priority", "research", "reject"].includes(choice))
+      return { final: choice, exit: "r0-disposition", cost };
+  }
+  if (variant.order === "vet-then-disposition") {
+    const over0 = await ask({ oversize: JEV_OVERSIZE_QUESTION });
+    const over0Noul = over0.answers["oversize"]?.noul;
+    if (typeof over0Noul === "number" && over0Noul >= 0.5)
+      return { final: "reject", exit: "r0-oversize", cost };
     const d = await ask({ disposition: JEV_DISPOSITION_QUESTION });
     const choice = String(d.answers["disposition"]?.choice ?? "");
     if (["high_priority", "research", "reject"].includes(choice))
@@ -132,15 +212,18 @@ async function runVariant(
   const r2 = await ask({
     product_vs_process: r2Questions[variant.r2Mode],
   });
-  if (String(r2.answers["product_vs_process"]?.choice ?? "") === "process")
+  if (
+    String(r2.answers["product_vs_process"]?.choice ?? "") === "process" &&
+    variant.r2Continue !== true
+  )
     return { final: "research", exit: "r2", cost };
   if (variant.vetoStatuses.includes(pkg.ownershipStatus ?? "unknown"))
     return { final: "reject", exit: "r3-veto", cost };
-  const r3 = await ask({ oversize: JEV_OVERSIZE_QUESTION });
+  const r3 = await ask({ oversize: r3Questions[variant.r3Mode ?? "default"] });
   const over = r3.answers["oversize"]?.noul;
   if (typeof over === "number" && over >= 0.5)
     return { final: "reject", exit: "r3", cost };
-  const r4 = await ask({ disposition: JEV_DISPOSITION_QUESTION });
+  const r4 = await ask({ disposition: r4Questions[variant.r4Mode ?? "default"] });
   const choice = String(r4.answers["disposition"]?.choice ?? "research");
   return {
     final: ["high_priority", "research", "reject"].includes(choice)
@@ -154,6 +237,19 @@ async function runVariant(
 let miss = 0;
 let totalCost = 0;
 const exitCounts: Record<string, number> = {};
+const extras: {
+  name: string;
+  ownership: string;
+  expected: string;
+  synthetic?: {
+    makes?: string[];
+    modelsSample?: string[];
+    excerpts?: string;
+    websiteOffering?: string;
+  };
+}[] = JSON.parse(
+  readFileSync(new URL("./jev-bakeoff-extras.json", import.meta.url), "utf8"),
+);
 for (let rep = 0; rep < repeats; rep++) {
   for (const entry of INVESTOR_VERDICTS_V1) {
     const ownership =
@@ -176,6 +272,21 @@ for (let rep = 0; rep < repeats; rep++) {
       miss += 1;
       console.log(
         `MISS rep=${rep} name=${entry.name} verdict=${entry.verdict} final=${final} exit=${exit}`,
+      );
+    }
+  }
+  for (const extra of extras) {
+    const { final, exit, cost } = await runVariant(
+      extra.name,
+      null,
+      extra.ownership,
+      extra.synthetic,
+    );
+    exitCounts[exit] = (exitCounts[exit] ?? 0) + 1;
+    if (final !== extra.expected) {
+      miss += 1;
+      console.log(
+        `MISS rep=${rep} name=${extra.name} verdict=extra-${extra.expected} final=${final} exit=${exit}`,
       );
     }
   }
