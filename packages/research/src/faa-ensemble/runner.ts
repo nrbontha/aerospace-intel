@@ -2232,7 +2232,10 @@ export async function runLadderSignal(
     );
     costs.push(r1.costUsd);
     const r1Noul = r1.answers["manufacturer"]?.noul;
-    if (typeof r1Noul === "number" && Number.isFinite(r1Noul) && r1Noul < 0.5) {
+    // Bakeoff winner (t=0.2): reject only when Jev is confident; borderline
+    // names get the full ladder + Muse hearing. Production r1 rejects are
+    // bimodal (all confidence >0.8), so this changes nothing live today.
+    if (typeof r1Noul === "number" && Number.isFinite(r1Noul) && r1Noul < 0.2) {
       const outcome: JevScreenOutcome = {
         decision: "reject",
         confidence: 1 - r1Noul,
