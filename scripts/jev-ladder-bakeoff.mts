@@ -22,6 +22,8 @@ import {
   JEV_OVERSIZE_QUESTION,
   JEV_PRODUCT_PROCESS_QUESTION,
   buildEvidencePackage,
+  matchGovernmentRecipientName,
+  matchNonprofitAcademicName,
 } from "../packages/research/src/faa-ensemble/runner.js";
 import { INVESTOR_VERDICTS_V1 } from "../packages/research/src/scoring-axial/fixtures/investor-verdicts.js";
 
@@ -32,7 +34,11 @@ interface Variant {
   r2Mode: "choice" | "strict-product" | "lenient";
   r3Mode?: "default" | "scale";
   r4Mode?: "default" | "sector-sharp" | "platform-sharp";
-  order: "ladder" | "disposition-first" | "screen-then-disposition" | "vet-then-disposition";
+  order:
+    | "ladder"
+    | "disposition-first"
+    | "screen-then-disposition"
+    | "vet-then-disposition";
   vetoFirst: boolean;
   enriched: boolean;
   r2Continue: boolean;
@@ -44,10 +50,7 @@ const evidenceByName: Record<string, unknown> = JSON.parse(
 );
 
 const variant: Variant = JSON.parse(
-  readFileSync(
-    new URL("./jev-ladder-variant.json", import.meta.url),
-    "utf8",
-  ),
+  readFileSync(new URL("./jev-ladder-variant.json", import.meta.url), "utf8"),
 );
 const r1Questions = {
   default: JEV_MANUFACTURER_QUESTION,
@@ -144,7 +147,8 @@ async function runVariant(
           | undefined)
       : undefined;
   const website =
-    synthetic?.excerpts !== undefined || synthetic?.websiteOffering !== undefined
+    synthetic?.excerpts !== undefined ||
+    synthetic?.websiteOffering !== undefined
       ? {
           websiteOffering: synthetic?.websiteOffering ?? "products_menu",
           excerpts: synthetic?.excerpts ?? "",
@@ -212,6 +216,14 @@ async function runVariant(
     pkg.ownershipStatus === "pe_owned" &&
     flipYear !== null &&
     flipYear <= new Date().getFullYear() - flipYears;
+  // Deterministic r0 name-shape rungs (mirror of runLadderSignal: same
+  // matchers, same order, identity before ownership). Reject rungs exit
+  // r0-veto; personal-name / single-token rungs persist an abstain row and
+  // continue in production, so they are no-ops here by construction.
+  if (matchNonprofitAcademicName(pkg.name) !== null)
+    return { final: "reject", exit: "r0-veto", cost, flipped: isFlip };
+  if (matchGovernmentRecipientName(pkg.name) !== null)
+    return { final: "reject", exit: "r0-veto", cost, flipped: isFlip };
   if (
     variant.vetoFirst &&
     !isFlip &&
@@ -234,7 +246,9 @@ async function runVariant(
     if (["high_priority", "research", "reject"].includes(choice))
       return { final: choice, exit: "r0-disposition", cost, flipped: isFlip };
   }
-  const r1 = await ask({ manufacturer: r1Questions[variant.r1Mode ?? "default"] });
+  const r1 = await ask({
+    manufacturer: r1Questions[variant.r1Mode ?? "default"],
+  });
   const noul = r1.answers["manufacturer"]?.noul;
   if (typeof noul === "number" && noul < variant.r1Threshold)
     return { final: "reject", exit: "r1", cost, flipped: isFlip };
@@ -252,13 +266,18 @@ async function runVariant(
     variant.r2Continue !== true
   )
     return { final: "research", exit: "r2", cost, flipped: isFlip };
-  if (!isFlip && variant.vetoStatuses.includes(pkg.ownershipStatus ?? "unknown"))
+  if (
+    !isFlip &&
+    variant.vetoStatuses.includes(pkg.ownershipStatus ?? "unknown")
+  )
     return { final: "reject", exit: "r3-veto", cost, flipped: isFlip };
   const r3 = await ask({ oversize: r3Questions[variant.r3Mode ?? "default"] });
   const over = r3.answers["oversize"]?.noul;
   if (typeof over === "number" && over >= 0.5)
     return { final: "reject", exit: "r3", cost, flipped: isFlip };
-  const r4 = await ask({ disposition: r4Questions[variant.r4Mode ?? "default"] });
+  const r4 = await ask({
+    disposition: r4Questions[variant.r4Mode ?? "default"],
+  });
   const choice = String(r4.answers["disposition"]?.choice ?? "research");
   return {
     final: ["high_priority", "research", "reject"].includes(choice)
