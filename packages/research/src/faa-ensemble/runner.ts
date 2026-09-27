@@ -2180,6 +2180,193 @@ export async function runMuseVerification(
 }
 
 // ---------------------------------------------------------------------------
+// Deterministic r0 name-shape rungs ($0, no model calls; run before r1).
+//
+// Survivors reach the ladder with nearly text-free states (name + address/zip
+// + domain; USAspending NAICS/PSC arrays always empty; website evidence for
+// ~11 rows), so the first cut must come from the name itself. Each rung is
+// a pure regex/shape predicate over pkg.name:
+// - nonprofit-academic / government-recipient: FINAL-reject. Both cleared the
+//   zero-new-miss gate on the full 34-case bakeoff (only Embry-Riddle
+//   Aeronautical University fires, already reject-expected; no add/hold row
+//   matches either pattern).
+// - personal-name / single-token: route to research with a reason tag. A
+//   person-shaped name (TOM BOWER) cannot FINAL-reject: the hold row "Middle
+//   Fork" shares the shape. These rungs persist a NULL-decision abstain row
+//   and let the ladder continue, so bakeoff finals are byte-identical.
+// ---------------------------------------------------------------------------
+
+/** Prompt versions for the deterministic r0 name-shape rungs. */
+export const JEV_LADDER_R0_PROMPT_VERSIONS = {
+  "personal-name": "jev-ladder-r0-personal-name",
+  "nonprofit-academic": "jev-ladder-r0-nonprofit-academic",
+  "government-recipient": "jev-ladder-r0-government-recipient",
+  "single-token": "jev-ladder-r0-single-token",
+} as const;
+
+export type JevLadderR0Rung = keyof typeof JEV_LADDER_R0_PROMPT_VERSIONS;
+
+/** Nonprofit/academic/government markers that never describe a manufacturer. */
+const R0_NONPROFIT_ACADEMIC_PATTERNS: readonly RegExp[] = [
+  /\bLABORATORY\b/i,
+  /\bUNIVERSITY\b/i,
+  /\bUNIVERSITIES\b/i,
+  /\bCOLLEGE\b/i,
+  /\bINSTITUTE\b/i,
+  /\bFOUNDATION\b/i,
+  /\bHOSPITAL\b/i,
+  /\bCLINIC\b/i,
+  /\bCHURCH\b/i,
+  /\bMUSEUM\b/i,
+  /\bLIBRARY\b/i,
+];
+
+/** LABORATORIES (plural) fires only with a research/nonprofit context word. */
+const R0_LABORATORIES_RE = /\bLABORATORIES\b/i;
+const R0_LABORATORIES_CONTEXT_RE =
+  /\b(RESEARCH|NATIONAL|NONPROFIT|UNIVERSITY|INSTITUTE)\b/i;
+
+const R0_GOVERNMENT_PATTERNS: readonly RegExp[] = [
+  /\bCITY OF\b/i,
+  /\bCOUNTY OF\b/i,
+  /\bSTATE OF\b/i,
+  /\bTOWN OF\b/i,
+  /\bVILLAGE OF\b/i,
+  /\bCOMMONWEALTH OF\b/i,
+  /\bDEPARTMENT OF\b/i,
+  /\bSHERIFF\b/i,
+  /\bU\.?\s?S\.?\s+(AIR FORCE|ARMY|NAVY|MARINE CORPS|COAST GUARD)\b/i,
+];
+
+/** Tokens that prove a name is a company, never a person. */
+const R0_COMPANY_TOKENS: Record<string, true> = {
+  INC: true,
+  INCORPORATED: true,
+  LLC: true,
+  CORP: true,
+  CORPORATION: true,
+  LTD: true,
+  LIMITED: true,
+  CO: true,
+  COMPANY: true,
+  LP: true,
+  LLP: true,
+  PLLC: true,
+  PA: true,
+  DBA: true,
+  SYSTEMS: true,
+  GROUP: true,
+  HOLDINGS: true,
+  INDUSTRIES: true,
+  DIVISION: true,
+  SUBSIDIARY: true,
+  SERVICES: true,
+  SERVICE: true,
+  SOLUTIONS: true,
+  CONSULTING: true,
+  PARTNERS: true,
+};
+/** Trade words that prove a name is a business, never a person. */
+const R0_TRADE_TOKENS: Record<string, true> = {
+  AERO: true,
+  AEROSPACE: true,
+  AERONAUTICAL: true,
+  AVIATION: true,
+  AVIONICS: true,
+  ELECTRONICS: true,
+  ELECTRIC: true,
+  MANUFACTURING: true,
+  SUPPLY: true,
+  SUPPLIES: true,
+  INTERNATIONAL: true,
+  TECHNOLOGIES: true,
+  TECHNOLOGY: true,
+  ENGINEERING: true,
+  BATTERY: true,
+  BATTERIES: true,
+  COMPOSITE: true,
+  COMPOSITES: true,
+  SPECIALTIES: true,
+  ACTUATION: true,
+  PARTS: true,
+  PRODUCTS: true,
+  AIRCRAFT: true,
+};
+const R0_NAME_TOKEN_RE = /^[A-Za-z][A-Za-z'\-]*$/;
+const R0_VOWEL_RE = /[AEIOUY]/i;
+
+function r0CleanTokens(name: string): string[] {
+  return name
+    .replace(/[.,()"/]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim()
+    .split(" ")
+    .filter((token) => token !== "");
+}
+
+/**
+ * Nonprofit/academic marker in a recipient name. Returns the matched marker
+ * (uppercased) or null. THE CHARLES STARK DRAPER LABORATORY INC fires on
+ * LABORATORY; Embry-Riddle Aeronautical University fires on UNIVERSITY.
+ */
+export function matchNonprofitAcademicName(name: string): string | null {
+  for (const pattern of R0_NONPROFIT_ACADEMIC_PATTERNS) {
+    const hit = name.match(pattern);
+    if (hit) return hit[0].toUpperCase();
+  }
+  const plural = name.match(R0_LABORATORIES_RE);
+  if (plural && R0_LABORATORIES_CONTEXT_RE.test(name))
+    return plural[0].toUpperCase();
+  return null;
+}
+
+/**
+ * Government-as-recipient marker. Returns the matched marker (uppercased)
+ * or null.
+ */
+export function matchGovernmentRecipientName(name: string): string | null {
+  for (const pattern of R0_GOVERNMENT_PATTERNS) {
+    const hit = name.match(pattern);
+    if (hit) return hit[0].toUpperCase();
+  }
+  return null;
+}
+
+/**
+ * Person-shaped recipient: exactly two alpha tokens, no corp suffix, no
+ * trade words, each token vowel-bearing (excludes acronyms like BNC).
+ * Returns the normalized name or null. Research-routing only: the hold row
+ * "Middle Fork" shares this shape, so it must never FINAL-reject.
+ */
+export function matchPersonalNameShape(name: string): string | null {
+  const tokens = r0CleanTokens(name);
+  if (tokens.length !== 2) return null;
+  for (const token of tokens) {
+    if (!R0_NAME_TOKEN_RE.test(token) || token.length < 2) return null;
+    const upper = token.toUpperCase();
+    if (R0_COMPANY_TOKENS[upper] === true || R0_TRADE_TOKENS[upper] === true)
+      return null;
+    if (!R0_VOWEL_RE.test(token)) return null;
+  }
+  return tokens.join(" ");
+}
+
+/**
+ * Single opaque token (Keddeg, Whelen, Skydweller): no structure to judge,
+ * needs the full ladder. Research-routing only; persists a triage tag.
+ */
+export function matchSingleTokenName(name: string): string | null {
+  const tokens = r0CleanTokens(name);
+  if (tokens.length !== 1) return null;
+  const token = tokens[0] as string;
+  if (!R0_NAME_TOKEN_RE.test(token) || token.length < 3) return null;
+  const upper = token.toUpperCase();
+  if (R0_COMPANY_TOKENS[upper] === true || R0_TRADE_TOKENS[upper] === true)
+    return null;
+  return token;
+}
+
+// ---------------------------------------------------------------------------
 // Staged JEv ladder (conditional re-screen for the research backlog)
 //
 // JEv costs ~$0.00002/call: instead of one disposition call per signal, the
@@ -2270,6 +2457,75 @@ export async function runLadderSignal(
       ? costs.reduce<number>((sum, c) => sum + (c ?? 0), 0)
       : null;
   try {
+    // Deterministic r0 name-shape rungs ($0, no model calls; identity before
+    // ownership: a nonprofit/government/person-shaped recipient is resolved
+    // here even when ownershipStatus is unknown). Reject rungs return with
+    // exitRung r0-veto; research-routing rungs persist an abstain row and
+    // continue, leaving existing rungs byte-identical.
+    const r0Nonprofit = matchNonprofitAcademicName(pkg.name);
+    if (r0Nonprofit !== null) {
+      const outcome: JevScreenOutcome = {
+        decision: "reject",
+        confidence: 1,
+        costUsd: null,
+      };
+      await persistJevEvaluation(
+        db,
+        signalId,
+        model,
+        outcome,
+        JEV_LADDER_R0_PROMPT_VERSIONS["nonprofit-academic"],
+        `jev-ladder-r0-nonprofit-academic:${r0Nonprofit}`,
+      );
+      return { ...outcome, costUsd: totalCost(), exitRung: "r0-veto" };
+    }
+    const r0Government = matchGovernmentRecipientName(pkg.name);
+    if (r0Government !== null) {
+      const outcome: JevScreenOutcome = {
+        decision: "reject",
+        confidence: 1,
+        costUsd: null,
+      };
+      await persistJevEvaluation(
+        db,
+        signalId,
+        model,
+        outcome,
+        JEV_LADDER_R0_PROMPT_VERSIONS["government-recipient"],
+        `jev-ladder-r0-government-recipient:${r0Government}`,
+      );
+      return { ...outcome, costUsd: totalCost(), exitRung: "r0-veto" };
+    }
+    const r0Personal = matchPersonalNameShape(pkg.name);
+    if (r0Personal !== null) {
+      await persistJevEvaluation(
+        db,
+        signalId,
+        model,
+        {
+          decision: null,
+          confidence: 0.5,
+          costUsd: null,
+        },
+        JEV_LADDER_R0_PROMPT_VERSIONS["personal-name"],
+        `jev-ladder-r0-personal-name:${r0Personal}:needs-identity-check`,
+      );
+    }
+    const r0SingleToken = matchSingleTokenName(pkg.name);
+    if (r0SingleToken !== null) {
+      await persistJevEvaluation(
+        db,
+        signalId,
+        model,
+        {
+          decision: null,
+          confidence: 0.5,
+          costUsd: null,
+        },
+        JEV_LADDER_R0_PROMPT_VERSIONS["single-token"],
+        `jev-ladder-r0-single-token:${r0SingleToken}:needs-identity-check`,
+      );
+    }
     // Bakeoff winner (ladder_miss 7 vs 18): affirmative ownership evidence
     // rejects before any model call, so acquired names never die as
     // rung-2 "research" instead of rung-3 "reject".
