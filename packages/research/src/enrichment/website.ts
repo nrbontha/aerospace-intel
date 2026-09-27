@@ -34,6 +34,7 @@ import {
   recordExaSpendUsd,
   EXA_CONTENTS_COST_USD,
 } from "./exa-budget.js";
+import { resolveDocumentId, resolveExaSourceId } from "./exa-persist.js";
 import { EXA_CONTENTS_URL_LIMIT, ExaSearchClient } from "../search/exa.js";
 import type { WebsiteOffering } from "../scoring-axial/features.js";
 
@@ -301,19 +302,7 @@ async function persistWebsiteEvidence(
 ): Promise<void> {
   try {
     if (result.fetchesSucceeded === 0) return;
-    const sourceRows = await db.execute<{ id: string }>(sql`
-      INSERT INTO data_sources (name, source_type, publisher, access, ingestion)
-      VALUES ('Exa', 'website', 'Exa', 'public', 'manual')
-      ON CONFLICT (lower(name), coalesce(publisher, '')) DO NOTHING
-      RETURNING id
-    `);
-    let sourceId = sourceRows.rows[0]?.id ?? null;
-    if (sourceId === null) {
-      const existing = await db.execute<{ id: string }>(sql`
-        SELECT id FROM data_sources WHERE lower(name) = 'exa' LIMIT 1
-      `);
-      sourceId = existing.rows[0]?.id ?? null;
-    }
+    const sourceId = await resolveExaSourceId(db, "website");
     if (sourceId === null) return;
     const metadata = JSON.stringify({
       companyName,
@@ -325,27 +314,17 @@ async function persistWebsiteEvidence(
     const pageUrls: string[] = [];
     for (const page of result.pages) {
       const docHash = sha256Hex(`${page.url}\u0000${result.websiteOffering}`);
-      const docRows = await db.execute<{ id: string }>(sql`
-        INSERT INTO source_documents
-          (data_source_id, canonical_url, title, document_type, content_sha256, metadata)
-        VALUES (
-          ${sourceId},
-          ${page.url},
-          ${`Official site: ${companyName}`},
-          'web_page',
-          ${docHash},
-          ${JSON.stringify({ companyName, method: WEBSITE_EVIDENCE_EXTRACTION_METHOD })}::jsonb
-        )
-        ON CONFLICT (content_sha256) DO NOTHING
-        RETURNING id
-      `);
-      let documentId = docRows.rows[0]?.id ?? null;
-      if (documentId === null) {
-        const existing = await db.execute<{ id: string }>(sql`
-          SELECT id FROM source_documents WHERE content_sha256 = ${docHash} LIMIT 1
-        `);
-        documentId = existing.rows[0]?.id ?? null;
-      }
+      const documentId = await resolveDocumentId(db, {
+        sourceId,
+        url: page.url,
+        title: `Official site: ${companyName}`,
+        documentType: "web_page",
+        contentHash: docHash,
+        metadataJson: JSON.stringify({
+          companyName,
+          method: WEBSITE_EVIDENCE_EXTRACTION_METHOD,
+        }),
+      });
       if (documentId === null) continue;
       pageUrls.push(page.url);
       await db.execute(sql`

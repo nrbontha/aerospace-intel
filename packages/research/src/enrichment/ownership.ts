@@ -11,6 +11,7 @@ import {
   EXA_SEARCH_COST_USD,
   recordExaSpendUsd,
 } from "./exa-budget.js";
+import { resolveDocumentId, resolveExaSourceId } from "./exa-persist.js";
 
 /**
  * Acquisition/ownership news check (Agent OwnNewsCheck owns this module).
@@ -360,42 +361,20 @@ async function persistAffirmativeFinding(
       result.owner !== null &&
       result.status !== "dead"
     ) {
-      const sourceRows = await db.execute<{ id: string }>(sql`
-        INSERT INTO data_sources (name, source_type, publisher, access, ingestion)
-        VALUES ('Exa', 'news', 'Exa', 'public', 'manual')
-        ON CONFLICT (lower(name), coalesce(publisher, '')) DO NOTHING
-        RETURNING id
-      `);
-      let sourceId = sourceRows.rows[0]?.id ?? null;
-      if (sourceId === null) {
-        const existing = await db.execute<{ id: string }>(sql`
-          SELECT id FROM data_sources WHERE lower(name) = 'exa' LIMIT 1
-        `);
-        sourceId = existing.rows[0]?.id ?? null;
-      }
+      const sourceId = await resolveExaSourceId(db, "news");
       if (sourceId !== null) {
         const docHash = sha256Hex(`${result.sourceUrl}\u0000${result.excerpt}`);
-        const docRows = await db.execute<{ id: string }>(sql`
-          INSERT INTO source_documents
-            (data_source_id, canonical_url, title, document_type, content_sha256, metadata)
-          VALUES (
-            ${sourceId},
-            ${result.sourceUrl},
-            ${`Exa acquisition check: ${companyName}`},
-            'news',
-            ${docHash},
-            ${JSON.stringify({ companyName, method: "exa_acquisition_search" })}::jsonb
-          )
-          ON CONFLICT (content_sha256) DO NOTHING
-          RETURNING id
-        `);
-        let documentId = docRows.rows[0]?.id ?? null;
-        if (documentId === null) {
-          const existing = await db.execute<{ id: string }>(sql`
-            SELECT id FROM source_documents WHERE content_sha256 = ${docHash} LIMIT 1
-          `);
-          documentId = existing.rows[0]?.id ?? null;
-        }
+        const documentId = await resolveDocumentId(db, {
+          sourceId,
+          url: result.sourceUrl,
+          title: `Exa acquisition check: ${companyName}`,
+          documentType: "news",
+          contentHash: docHash,
+          metadataJson: JSON.stringify({
+            companyName,
+            method: "exa_acquisition_search",
+          }),
+        });
         if (documentId !== null) {
           const evidenceRows = await db.execute<{ id: string }>(sql`
             INSERT INTO evidence

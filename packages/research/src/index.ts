@@ -18,3 +18,4 @@ export * from "./faa-ensemble/runner.js";
 export * from "./enrichment/exa-budget.js";
 export * from "./enrichment/ownership.js";
 export * from "./enrichment/website.js";
+export * from "./enrichment/exa-persist.js";

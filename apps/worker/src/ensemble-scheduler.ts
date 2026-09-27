@@ -1,21 +1,13 @@
 import { z } from "zod";
 
-import { populateUnifiedTargets, promoteEnsembleLeads } from "@asi/database";
 import { getDatabase } from "@asi/database/client";
 import {
-  canSpendExa,
   dailyBudgetCapUsd,
-  EXA_CONTENTS_COST_USD,
-  EXA_SEARCH_COST_USD,
   getDailySpendUsd,
-  getExaDailySpendUsd,
   OpenRouterClient,
-  OWNERSHIP_CHECK_TICK_CAP,
-  runJevSweep,
-  runMuseVerification,
-  runOwnershipChecks,
-  runWebsiteEnrichment,
 } from "@asi/research";
+
+import { FUNNEL_STAGES } from "./funnel-stages.js";
 
 import type { QueueLogger } from "./queue.js";
 
@@ -34,8 +26,9 @@ import type { QueueLogger } from "./queue.js";
  * Dependency note: `runJevSweep` / `runMuseVerification` (Agent RunnerLib,
  * packages/research/src/faa-ensemble/runner.ts) and
  * `populateUnifiedTargets` / `promoteEnsembleLeads` (Agent PopulateLib,
- * packages/database/src/unified-targets/) are imported from the package
- * roots; those agents own re-exporting them there.
+ * packages/database/src/unified-targets/) are consumed through the
+ * FUNNEL_STAGES registry in ./funnel-stages.js; those agents own
+ * re-exporting them from the package roots.
  */
 
 export const ENSEMBLE_SCHEDULE_ENV = "ENSEMBLE_SCHEDULE_MINUTES";
@@ -53,8 +46,6 @@ const DEFAULT_DELAY_MS = 1_000;
 const DEFAULT_JEV_SWEEP_LIMIT = 0;
 const DEFAULT_JEV_SWEEP_CONCURRENCY = 8;
 const DEFAULT_VERIFY_BATCH_LIMIT = 120;
-/** Max website enrichments per tick (unvetted HP/P1 without website evidence). */
-const WEBSITE_ENRICHMENT_TICK_CAP = 10;
 
 /** While unhealthy, skip runs for this long (prevents hollow-row eras). */
 const UNHEALTHY_CACHE_MS = 15 * 60 * 1_000;
@@ -153,6 +144,34 @@ function toLogReason(error: unknown): string {
   return error instanceof Error ? error.message : "unknown";
 }
 
+/**
+ * Legacy per-step event names, kept alongside the unified
+ * `ensemble.scheduler_stage_completed` / `ensemble.scheduler_stage_failed`
+ * events so existing dashboards keep working.
+ */
+const LEGACY_STAGE_COMPLETED_EVENTS: Record<string, string> = {
+  "jev-sweep": "ensemble.scheduler_jev_sweep_completed",
+  "muse-verify": "ensemble.scheduler_verification_completed",
+  ownership: "ensemble.scheduler_ownership_completed",
+  "website-enrich": "ensemble.scheduler_enrichment_completed",
+  "unify-refresh": "ensemble.scheduler_unified_refresh_completed",
+  promote: "ensemble.scheduler_promotion_completed",
+};
+
+const LEGACY_STAGE_FAILED_EVENTS: Record<string, string> = {
+  "jev-sweep": "ensemble.scheduler_jev_sweep_failed",
+  "muse-verify": "ensemble.scheduler_verification_failed",
+  ownership: "ensemble.scheduler_ownership_failed",
+  "website-enrich": "ensemble.scheduler_enrichment_failed",
+  "unify-refresh": "ensemble.scheduler_unified_refresh_failed",
+  promote: "ensemble.scheduler_promotion_failed",
+};
+
+const LEGACY_STAGE_BUDGET_SKIPPED_EVENTS: Record<string, string> = {
+  ownership: "ensemble.scheduler_ownership_budget_skipped",
+  "website-enrich": "ensemble.scheduler_enrichment_budget_skipped",
+};
+
 export function startEnsembleScheduler(
   options: EnsembleSchedulerOptions,
 ): EnsembleSchedulerHandle {
@@ -217,113 +236,42 @@ export function startEnsembleScheduler(
         return;
       }
 
-      // 3. Stage 1: JEv sweep of the queue at full speed (zero Muse calls).
-      try {
-        const sweep = await runJevSweep(getDatabase(), {
-          limit: config.sweepLimit,
-          concurrency: config.sweepConcurrency,
-        });
-        logger("info", "ensemble.scheduler_jev_sweep_completed", {
-          screened: sweep.screened,
-          flagged: sweep.flagged,
-          errors: sweep.errors,
-        });
-      } catch (error) {
-        logger("error", "ensemble.scheduler_jev_sweep_failed", {
-          reason: toLogReason(error),
-        });
-      }
-
-      // 4. Stage 2: independent Muse verification of flagged items + audit sample.
-      try {
-        const verification = await runMuseVerification(getDatabase(), {
-          limit: config.verifyLimit,
-          concurrency: config.concurrency,
-        });
-        logger("info", "ensemble.scheduler_verification_completed", {
-          verified: verification.verified,
-          confirmed: verification.confirmed,
-          overruled: verification.overruled,
-          errors: verification.errors,
-        });
-      } catch (error) {
-        logger("error", "ensemble.scheduler_verification_failed", {
-          reason: toLogReason(error),
-        });
-      }
-
-      // 5. Ownership news checks for HP-unified names lacking ownership
-      // evidence (cap 10/tick), gated by EXA_DAILY_BUDGET_USD.
-      try {
-        if (!canSpendExa(EXA_SEARCH_COST_USD)) {
-          logger("warn", "ensemble.scheduler_ownership_budget_skipped", {
-            spendUsd: getExaDailySpendUsd(),
+      // 3. Funnel stages in registry order (see ./funnel-stages.js). Each
+      // stage is individually guarded: one throwing never blocks the rest,
+      // and this tick never throws so the worker process always survives.
+      for (const stage of FUNNEL_STAGES) {
+        try {
+          const summary = await stage.run({ db: getDatabase(), config });
+          const { done, note, budgetSkipped, ...fields } = summary;
+          logger("info", "ensemble.scheduler_stage_completed", {
+            stage: stage.key,
+            done,
+            note,
+            ...fields,
           });
-        } else {
-          const ownership = await runOwnershipChecks(getDatabase(), {
-            limit: OWNERSHIP_CHECK_TICK_CAP,
+          if (budgetSkipped) {
+            const skippedEvent = LEGACY_STAGE_BUDGET_SKIPPED_EVENTS[stage.key];
+            if (skippedEvent !== undefined) {
+              logger("warn", skippedEvent, { spendUsd: summary.spendUsd });
+            }
+            continue;
+          }
+          const completedEvent = LEGACY_STAGE_COMPLETED_EVENTS[stage.key];
+          if (completedEvent !== undefined) {
+            logger("info", completedEvent, { ...fields });
+          }
+        } catch (error) {
+          logger("error", "ensemble.scheduler_stage_failed", {
+            stage: stage.key,
+            reason: toLogReason(error),
           });
-          logger("info", "ensemble.scheduler_ownership_completed", {
-            checked: ownership.checked,
-            affirmed: ownership.affirmed,
-            skipped: ownership.skipped,
-            costUsd: ownership.costUsd,
-          });
+          const failedEvent = LEGACY_STAGE_FAILED_EVENTS[stage.key];
+          if (failedEvent !== undefined) {
+            logger("error", failedEvent, {
+              reason: toLogReason(error),
+            });
+          }
         }
-      } catch (error) {
-        logger("error", "ensemble.scheduler_ownership_failed", {
-          reason: toLogReason(error),
-        });
-      }
-
-      // 6. Website enrichment for unvetted HP/P1 names without website
-      // evidence (cap 10/tick), gated by EXA_DAILY_BUDGET_USD.
-      try {
-        if (!canSpendExa(EXA_CONTENTS_COST_USD)) {
-          logger("warn", "ensemble.scheduler_enrichment_budget_skipped", {
-            spendUsd: getExaDailySpendUsd(),
-          });
-        } else {
-          const enrichment = await runWebsiteEnrichment(getDatabase(), {
-            limit: WEBSITE_ENRICHMENT_TICK_CAP,
-          });
-          logger("info", "ensemble.scheduler_enrichment_completed", {
-            checked: enrichment.checked,
-            enriched: enrichment.enriched,
-            skipped: enrichment.skipped,
-            costUsd: enrichment.costUsd,
-          });
-        }
-      } catch (error) {
-        logger("error", "ensemble.scheduler_enrichment_failed", {
-          reason: toLogReason(error),
-        });
-      }
-
-      // 7. Nightly-style unified refresh (runs every tick; populate is
-      // idempotent per-source upsert, so this is safe).
-      try {
-        const refreshed = await populateUnifiedTargets(getDatabase());
-        logger("info", "ensemble.scheduler_unified_refresh_completed", {
-          sources: refreshed,
-        });
-      } catch (error) {
-        logger("error", "ensemble.scheduler_unified_refresh_failed", {
-          reason: toLogReason(error),
-        });
-      }
-
-      // 8. High-priority to lead promotion.
-      try {
-        const promotion = await promoteEnsembleLeads(getDatabase());
-        logger("info", "ensemble.scheduler_promotion_completed", {
-          promoted: promotion.promoted,
-          skipped: promotion.skipped,
-        });
-      } catch (error) {
-        logger("error", "ensemble.scheduler_promotion_failed", {
-          reason: toLogReason(error),
-        });
       }
     } catch (error) {
       logger("error", "ensemble.scheduler_tick_failed", {
