@@ -1,0 +1,1 @@
+{"order": "ladder", "r1Threshold": 0.5, "r2Mode": "choice", "vetoStatuses": ["strategic_owned", "pe_owned", "public", "dead"], "vetoFirst": true}

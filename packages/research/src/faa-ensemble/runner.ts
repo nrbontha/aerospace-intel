@@ -2126,7 +2126,7 @@ export async function runMuseVerification(
 // ---------------------------------------------------------------------------
 
 /** Rung where a laddered signal exited (r3-veto spent no call). */
-export type LadderExitRung = "r1" | "r2" | "r3-veto" | "r3" | "r4";
+export type LadderExitRung = "r0-veto" | "r1" | "r2" | "r3-veto" | "r3" | "r4";
 
 export interface LadderSignalVerdict {
   readonly decision: EnsembleDecision;
@@ -2172,7 +2172,7 @@ export interface LadderRescreenSummary {
 }
 
 function ladderExits(): Record<LadderExitRung, number> {
-  return { r1: 0, r2: 0, "r3-veto": 0, r3: 0, r4: 0 };
+  return { "r0-veto": 0, r1: 0, r2: 0, "r3-veto": 0, r3: 0, r4: 0 };
 }
 
 function clampConfidence(value: unknown): number {
@@ -2203,6 +2203,27 @@ export async function runLadderSignal(
       ? costs.reduce<number>((sum, c) => sum + (c ?? 0), 0)
       : null;
   try {
+    // Bakeoff winner (ladder_miss 7 vs 18): affirmative ownership evidence
+    // rejects before any model call, so acquired names never die as
+    // rung-2 "research" instead of rung-3 "reject".
+    if (
+      LADDER_OWNERSHIP_VETO_STATUSES.includes(pkg.ownershipStatus ?? "unknown")
+    ) {
+      const outcome: JevScreenOutcome = {
+        decision: "reject",
+        confidence: 1,
+        costUsd: null,
+      };
+      await persistJevEvaluation(
+        db,
+        signalId,
+        model,
+        outcome,
+        JEV_LADDER_PROMPT_VERSIONS.r1,
+        `jev-ladder-r0-ownership-veto:${pkg.ownershipStatus ?? "unknown"}`,
+      );
+      return { ...outcome, costUsd: totalCost(), exitRung: "r0-veto" };
+    }
     const r1 = await callJev(
       apiKey,
       state,
