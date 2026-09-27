@@ -388,11 +388,32 @@ export async function selectWebsiteEnrichmentCandidates(
     WHERE (tier = 'high_interest' OR investor_priority = 1)
       AND COALESCE(domain, website_url) IS NOT NULL
       AND COALESCE(domain, website_url) <> ''
-      AND NOT EXISTS (
-        SELECT 1 FROM evidence e
-        JOIN source_documents sd ON sd.id = e.source_document_id
-        WHERE e.extraction_method = ${WEBSITE_EVIDENCE_EXTRACTION_METHOD}
-          AND position(lower(COALESCE(ut.domain, ut.website_url, '')) in lower(sd.canonical_url)) > 0
+      AND (
+        NOT EXISTS (
+          SELECT 1 FROM evidence e
+          JOIN source_documents sd ON sd.id = e.source_document_id
+          WHERE e.extraction_method = ${WEBSITE_EVIDENCE_EXTRACTION_METHOD}
+            AND position(lower(COALESCE(ut.domain, ut.website_url, '')) in lower(sd.canonical_url)) > 0
+        )
+        OR (
+          -- Flaky-fetch recovery (bakeoff finding): a thin first fetch
+          -- permanently starves rung 2, so retry while evidence stays
+          -- excerpt-poor and attempts are below the bound.
+          (
+            SELECT COUNT(*)
+            FROM evidence e
+            JOIN source_documents sd ON sd.id = e.source_document_id
+            WHERE e.extraction_method = ${WEBSITE_EVIDENCE_EXTRACTION_METHOD}
+              AND position(lower(COALESCE(ut.domain, ut.website_url, '')) in lower(sd.canonical_url)) > 0
+          ) < 3
+          AND NOT EXISTS (
+            SELECT 1 FROM evidence e
+            JOIN source_documents sd ON sd.id = e.source_document_id
+            WHERE e.extraction_method = ${WEBSITE_EVIDENCE_EXTRACTION_METHOD}
+              AND position(lower(COALESCE(ut.domain, ut.website_url, '')) in lower(sd.canonical_url)) > 0
+              AND COALESCE(e.metadata->>'website_excerpts', '') <> ''
+          )
+        )
       )
     ORDER BY updated_at ASC NULLS FIRST
     LIMIT ${capped}

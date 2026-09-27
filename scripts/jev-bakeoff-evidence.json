@@ -16,11 +16,11 @@
     "domain": "butlernational.com",
     "domainConfidence": "high",
     "websiteOffering": "products_menu",
-    "excerptsTrimmedTo500Chars": "Butler National Corporation Butler National Corporation Established in 1960, Butler National is a public holding company focused on aerospace engineering, aircraft modifications, electronics, and professional management services. Corporate Overview Butler National Corporation is an aerospace-focused holding company that delivers engineering, aircraft modifications, electrical systems integration, commercial and defense electronics, and professional management servi\u2026 In addition to an online plat",
+    "excerptsTrimmedTo500Chars": "Avcon provides FAA-approved aircraft modifications, engineering, avionics and electrical systems integration, and special mission solutions. Applications included the McDonnell Douglas DC8, DC9, MD 11, MD-80, MD 90 or DC10 – factory delivered with Butler National Switching Units on board to handle the complex task of switching hundreds of communication navigation functions simu… The YD-202 Yaw Damper dampens short yaw and Dutch roll motions of the aircraft, stabilizing the yaw axis. The former “",
     "ownershipHints": [
-      "Butler National Corporation Butler National Corporation Established in 1960, Butler National is a public holding company focused on aerospace engineering, aircraft modifications, electronics, and professional management services.",
-      "Corporate Overview Butler National Corporation is an aerospace-focused holding company that delivers engineering, aircraft modifications, electrical systems integration, commercial and defense electronics, and professional management servi\u2026",
-      "In addition to an online platform, the Company also features a physical DraftKings branded sports book in the Boot Hill Casino & Resort that opened on February 28, 2023. ## History Butler National Corporation formed in 1960 with the merger\u2026"
+      "Established in 1960, Butler National is a public holding company focused on aerospace engineering, aircraft modifications, electronics, and professional management services.",
+      "Butler National Corporation is an aerospace-focused holding company that delivers engineering, aircraft modifications, electrical systems integration, commercial and defense electronics, and professional management services.",
+      "Butler National Corporation formed in 1960 with the merger of an aviation research firm, owned by the Butler family, and the National Connector Corporation."
     ],
     "sizeHints": [],
     "fetchSkipped": false,
@@ -30,7 +30,7 @@
     "domain": "avconindustries.com",
     "domainConfidence": "high",
     "websiteOffering": "capabilities_only",
-    "excerptsTrimmedTo500Chars": "",
+    "excerptsTrimmedTo500Chars": "Avcon offers innovative FAA-approved special mission modifications for a wide range of airplane and operational roles. Avcon Acquires STC for Next-Gen Environmental Research Airplane EASA and CAA Issue STC for Avcon Non-Halon Replacement Portable Fire Extinguisher Solution New Century,… Avcon Industries Acquires STC-Approved Installation of Non-Halon Aircraft Fire Extinguishers in Learjets Avcon takes pride in its ability to partner with customers and enhance their special mission capabilities.W",
     "ownershipHints": [],
     "sizeHints": [],
     "fetchSkipped": false,
@@ -40,11 +40,14 @@
     "domain": "bncsme.com",
     "domainConfidence": "high",
     "websiteOffering": "products_menu",
-    "excerptsTrimmedTo500Chars": "Special Mission Electronics - BNC Tempe ## BNC Tempe Special Mission Electronics A subsidiary of Butler National Corporation # Special Mission Electronics Solutions from Butler National \u2013 Tempe Butler National Gun Control Units are used to\u2026",
+    "excerptsTrimmedTo500Chars": "MIL-STD-882 compliant software and firmware. MIL-STD-461 and -810 qualified enclosures. The box received a full Air-Worthiness Release (AWR) for the MH-60 Direct Action Penetrator. The B306 is also form, fit, and function compatible with the AH-64 Apache pre-Block III helicopters (GCB P/N 7-217222500-611). We work with complex avionics and weapons systems, using communication formats such as RS232, RS422, RS485 and CANBus. Our software development process is MIL-STD-882 compliant. A subsidiary o",
     "ownershipHints": [
-      "Special Mission Electronics - BNC Tempe ## BNC Tempe Special Mission Electronics A subsidiary of Butler National Corporation # Special Mission Electronics Solutions from Butler National \u2013 Tempe Butler National Gun Control Units are used to\u2026"
+      "A subsidiary of Butler National Corporation",
+      "All engineering and design activities are conducted at our parent company’s facility in New Century, KS."
     ],
-    "sizeHints": [],
+    "sizeHints": [
+      "All engineering and design activities are conducted at our parent company’s facility in New Century, KS."
+    ],
     "fetchSkipped": false,
     "exaCostUsd": 0.025
   },
@@ -62,7 +65,7 @@
     "domain": "dartaerospace.com",
     "domainConfidence": "high",
     "websiteOffering": "products_menu",
-    "excerptsTrimmedTo500Chars": "",
+    "excerptsTrimmedTo500Chars": "Over the years, DART has evolved into a global force in helicopter equipment with 2000 STC-certified products, a robust aftermarket support network, and a team of passionate experts dedicated to our customers’ missions, whether in emergenc…",
     "ownershipHints": [],
     "sizeHints": [],
     "fetchSkipped": false,
@@ -72,10 +75,10 @@
     "domain": "vancestreetcapital.com",
     "domainConfidence": "high",
     "websiteOffering": "capabilities_only",
-    "excerptsTrimmedTo500Chars": "Capital # Critical Businesses Vance Street Capital is a Los Angeles-based private equity firm with deep expertise in manufacturing and engineering. Entrepreneurial Experience We are entrepreneurs at heart, and more than 75% of our investments have been family-owned businesses. We excel at partnering with family-owned businesses and executing corporate carve outs because of our hands-on operational approach.",
+    "excerptsTrimmedTo500Chars": "Vance Street Capital is a Los Angeles-based private equity firm with deep expertise in manufacturing and engineering. We are entrepreneurs at heart, and more than 75% of our investments have been family-owned businesses. We excel at partnering with family-owned businesses and executing corporate carve outs because of our hands-on operational approach.",
     "ownershipHints": [
-      "Capital # Critical Businesses Vance Street Capital is a Los Angeles-based private equity firm with deep expertise in manufacturing and engineering.",
-      "Entrepreneurial Experience We are entrepreneurs at heart, and more than 75% of our investments have been family-owned businesses.",
+      "Vance Street Capital is a Los Angeles-based private equity firm with deep expertise in manufacturing and engineering.",
+      "We are entrepreneurs at heart, and more than 75% of our investments have been family-owned businesses.",
       "We excel at partnering with family-owned businesses and executing corporate carve outs because of our hands-on operational approach."
     ],
     "sizeHints": [],
@@ -116,12 +119,12 @@
     "domain": "robertsonfuelsystems.com",
     "domainConfidence": "high",
     "websiteOffering": "products_menu",
-    "excerptsTrimmedTo500Chars": "Robertson is proud that it has never accepted any government or customer development funding. # HEICO CORPORATION Robertson Fuel Systems is a HEICO company (HEICO Corporation, a New York Stock Exchange listed company (NYSE: HEI and HEI.A)). Ranked as one of the 100 \u201cWorld\u2019s Most Innovative Growth Companies\u201d, 100 \u201cBest Small Companies\u201d and 200 \u201cHot Shot Stocks\u201d by Forbes over the past decade, HEICO provides more than 1 million square feet of design, manufacturing, repair, over\u2026",
+    "excerptsTrimmedTo500Chars": "Robertson Fuel Systems is a HEICO company (HEICO Corporation, a New York Stock Exchange listed company (NYSE: HEI and HEI.A)). Ranked as one of the 100 “World’s Most Innovative Growth Companies”, 100 “Best Small Companies” and 200 “Hot Shot Stocks” by Forbes over the past decade, HEICO provides more than 1 million square feet of design, manufacturing, repair, over…",
     "ownershipHints": [
-      "Robertson is proud that it has never accepted any government or customer development funding. # HEICO CORPORATION Robertson Fuel Systems is a HEICO company (HEICO Corporation, a New York Stock Exchange listed company (NYSE: HEI and HEI.A))."
+      "Robertson Fuel Systems is a HEICO company (HEICO Corporation, a New York Stock Exchange listed company (NYSE: HEI and HEI.A))."
     ],
     "sizeHints": [
-      "Ranked as one of the 100 \u201cWorld\u2019s Most Innovative Growth Companies\u201d, 100 \u201cBest Small Companies\u201d and 200 \u201cHot Shot Stocks\u201d by Forbes over the past decade, HEICO provides more than 1 million square feet of design, manufacturing, repair, over\u2026"
+      "Ranked as one of the 100 “World’s Most Innovative Growth Companies”, 100 “Best Small Companies” and 200 “Hot Shot Stocks” by Forbes over the past decade, HEICO provides more than 1 million square feet of design, manufacturing, repair, over…"
     ],
     "fetchSkipped": false,
     "exaCostUsd": 0.025
@@ -130,9 +133,13 @@
     "domain": "shadin.com",
     "domainConfidence": "high",
     "websiteOffering": "products_menu",
-    "excerptsTrimmedTo500Chars": "",
-    "ownershipHints": [],
-    "sizeHints": [],
+    "excerptsTrimmedTo500Chars": "A state of the art manufacturing facility, AS9100/ISO achievements, and an FAA-PMA certification give us the tools to help technologists commercialize their intellectual property. From our Flight Performance solutions such as the DigiFlo and ADC2000 that have been in the marketplaces for many years, to our AIS and Volta families of COTS and MOTS data converters, Shadin products are designed to add value, built with… A New Company with a Long History A state of the art manufacturing facility, AS9",
+    "ownershipHints": [
+      "A New Company with a Long History"
+    ],
+    "sizeHints": [
+      "A state of the art manufacturing facility, AS9100/ISO achievements, and an FAA-PMA certification give us the tools to help technologists commercialize their intellectual property."
+    ],
     "fetchSkipped": false,
     "exaCostUsd": 0.034999999999999996
   },
@@ -140,7 +147,7 @@
     "domain": "lqlite.com",
     "domainConfidence": "high",
     "websiteOffering": "unknown",
-    "excerptsTrimmedTo500Chars": "",
+    "excerptsTrimmedTo500Chars": "It provides essential information about supply items including the National Stock Number (NSN), the item name, manufacturers and suppliers including part numbers. All rights reserved. ® LogiQuest is a registered trademark of Terabase Corporation. ® Terabase is a registered trademark of Terabase Corporation.",
     "ownershipHints": [],
     "sizeHints": [],
     "fetchSkipped": false,
@@ -150,10 +157,10 @@
     "domain": "cleat.ai",
     "domainConfidence": "high",
     "websiteOffering": "capabilities_only",
-    "excerptsTrimmedTo500Chars": "Explore live coverage, county by county \u2192 50,000+Public agencies tracked 1,500+Counties covered 50 + DCStates covered 6.8M+Opportunities tracked ### The Impact Measurable results from government contractors using CLEATUS 4-6x More Proposal\u2026",
+    "excerptsTrimmedTo500Chars": "Companies increase proposal output without adding headcount",
     "ownershipHints": [],
     "sizeHints": [
-      "Explore live coverage, county by county \u2192 50,000+Public agencies tracked 1,500+Counties covered 50 + DCStates covered 6.8M+Opportunities tracked ### The Impact Measurable results from government contractors using CLEATUS 4-6x More Proposal\u2026"
+      "Companies increase proposal output without adding headcount"
     ],
     "fetchSkipped": false,
     "exaCostUsd": 0.015
@@ -185,9 +192,9 @@
     "domain": "visionsafe.com",
     "domainConfidence": "high",
     "websiteOffering": "unknown",
-    "excerptsTrimmedTo500Chars": "All rights reserved About VisionSafe | Aviation Safety Equipment Leaders # Experience That Shapes Aviation Safety For more than 30 years, VisionSafe has advanced aviation standards and saved lives with practical, pilot-centered safety syst\u2026",
+    "excerptsTrimmedTo500Chars": "VisionSafe operates within FAA and EASA regulatory frameworks and maintains registration to ISO 9001, AS9100, and AS9110 quality standards. VisionSafe was founded by inventor and pilot Bertil Werjefelt, whose firsthand experience in aviation made clear just how essential visibility is to safe flight.After pioneering Portable Breathing Equipment, now adopted across commercial a…",
     "ownershipHints": [
-      "All rights reserved About VisionSafe | Aviation Safety Equipment Leaders # Experience That Shapes Aviation Safety For more than 30 years, VisionSafe has advanced aviation standards and saved lives with practical, pilot-centered safety syst\u2026"
+      "VisionSafe was founded by inventor and pilot Bertil Werjefelt, whose firsthand experience in aviation made clear just how essential visibility is to safe flight.After pioneering Portable Breathing Equipment, now adopted across commercial a…"
     ],
     "sizeHints": [],
     "fetchSkipped": false,
@@ -197,7 +204,7 @@
     "domain": "iflyei.com",
     "domainConfidence": "high",
     "websiteOffering": "products_menu",
-    "excerptsTrimmedTo500Chars": "FAA-APPROVED AIRCRAFT ENGINE INSTRUMENTS Transducers, Sensors, Probes and More AL-1(X) Chrome Annunciator Light CGR-30P Premium Engine Monitor Primary Replacement STC TSO PMA",
+    "excerptsTrimmedTo500Chars": "FAA-APPROVED AIRCRAFT ENGINE INSTRUMENTS Transducers, Sensors, Probes and More AL-1(X) – Chrome Annunciator Light CGR-30P Premium Engine Monitor - Primary Replacement STC’d, TSO’d & PMA’d - Primary Replacement STC’d & TSO’d",
     "ownershipHints": [],
     "sizeHints": [],
     "fetchSkipped": false,
@@ -205,18 +212,18 @@
     "productHints": [
       "FAA-APPROVED AIRCRAFT ENGINE INSTRUMENTS",
       "Transducers, Sensors, Probes and More",
-      "AL-1(X) Chrome Annunciator Light",
+      "AL-1(X) – Chrome Annunciator Light",
       "CGR-30P Premium Engine Monitor",
-      "Primary Replacement STC TSO PMA"
+      "- Primary Replacement STC’d, TSO’d & PMA’d",
+      "- Primary Replacement STC’d & TSO’d"
     ],
-    "refrozen": true,
-    "refrozen_product_hints": true
+    "refrozen_best_of": 1
   },
   "Alpha Aviation": {
     "domain": "alphaaviation.com",
     "domainConfidence": "high",
     "websiteOffering": "products_menu",
-    "excerptsTrimmedTo500Chars": "",
+    "excerptsTrimmedTo500Chars": "SAIB 2026-10R1: Our restraint assemblies are TSO-C114 or TSO-C22g, and meet the specifications outlined in the Special Airworthiness Information Bulletin that was released on 4/15/2026. How do I know if I need an STC Kit or not? Under Belt Resources, see “ Guide: Do I Need A Replacement or STC/PMA/OEM/Minor Change Installation Kit”",
     "ownershipHints": [],
     "sizeHints": [],
     "fetchSkipped": false,
@@ -236,9 +243,9 @@
     "domain": "concordebattery.com",
     "domainConfidence": "high",
     "websiteOffering": "unknown",
-    "excerptsTrimmedTo500Chars": "Founded on a tradition of excellence, Concorde\u2019s Platinum Series \u00ae sealed lead acid batteries are universally recognized.",
+    "excerptsTrimmedTo500Chars": "PHENOM 100 RG-390E/30 - 2 EACH GULFSTREAM GV, GV-SP RG-380E/53L - 2 EACH Founded on a tradition of excellence, Concorde’s Platinum Series ® sealed lead acid batteries are universally recognized.",
     "ownershipHints": [
-      "Founded on a tradition of excellence, Concorde\u2019s Platinum Series \u00ae sealed lead acid batteries are universally recognized."
+      "Founded on a tradition of excellence, Concorde’s Platinum Series ® sealed lead acid batteries are universally recognized."
     ],
     "sizeHints": [],
     "fetchSkipped": false,
@@ -248,9 +255,9 @@
     "domain": "middlefork.com",
     "domainConfidence": "high",
     "websiteOffering": "unknown",
-    "excerptsTrimmedTo500Chars": "Clint and Molly Frank of Sandpoint, Idaho own and operate the company and take great pride in offering exceptional whitewater rafting and fishing trips for families, friends, and corporations. \u201cWe have remained a small family owned company\u2026",
+    "excerptsTrimmedTo500Chars": "Clint and Molly Frank of Sandpoint, Idaho own and operate the company and take great pride in offering exceptional whitewater rafting and fishing trips for families, friends, and corporations. “We have remained a small family owned company…",
     "ownershipHints": [
-      "Clint and Molly Frank of Sandpoint, Idaho own and operate the company and take great pride in offering exceptional whitewater rafting and fishing trips for families, friends, and corporations. \u201cWe have remained a small family owned company\u2026"
+      "Clint and Molly Frank of Sandpoint, Idaho own and operate the company and take great pride in offering exceptional whitewater rafting and fishing trips for families, friends, and corporations. “We have remained a small family owned company…"
     ],
     "sizeHints": [],
     "fetchSkipped": false,
@@ -273,12 +280,12 @@
     "domain": "whelen.com",
     "domainConfidence": "high",
     "websiteOffering": "products_menu",
-    "excerptsTrimmedTo500Chars": "With cutting-edge facilities in Connecticut and New Hampshire spanning nearly 1,000,000 square feet, we design and manufacture a comprehensive range of high-powered warning lights, white illumination systems, sirens, controllers, mass noti\u2026 We\u2019re proud to have the largest engineering team in the industry as well as a dedicated workforce of over 1,900 employees who are the driving force behind our relentless pursuit of innovation and quality. Discover More Our Leadership Team Our executive leader",
+    "excerptsTrimmedTo500Chars": "With cutting-edge facilities in Connecticut and New Hampshire spanning nearly 1,000,000 square feet, we design and manufacture a comprehensive range of high-powered warning lights, white illumination systems, sirens, controllers, mass noti… We’re proud to have the largest engineering team in the industry as well as a dedicated workforce of over 1,900 employees who are the driving force behind our relentless pursuit of innovation and quality. Our executive leadership team guides a dedicated workf",
     "ownershipHints": [],
     "sizeHints": [
-      "With cutting-edge facilities in Connecticut and New Hampshire spanning nearly 1,000,000 square feet, we design and manufacture a comprehensive range of high-powered warning lights, white illumination systems, sirens, controllers, mass noti\u2026",
-      "We\u2019re proud to have the largest engineering team in the industry as well as a dedicated workforce of over 1,900 employees who are the driving force behind our relentless pursuit of innovation and quality.",
-      "Discover More Our Leadership Team Our executive leadership team guides a dedicated workforce of over 1,500 employees, driving innovation and excellence in every aspect of our operations."
+      "With cutting-edge facilities in Connecticut and New Hampshire spanning nearly 1,000,000 square feet, we design and manufacture a comprehensive range of high-powered warning lights, white illumination systems, sirens, controllers, mass noti…",
+      "We’re proud to have the largest engineering team in the industry as well as a dedicated workforce of over 1,900 employees who are the driving force behind our relentless pursuit of innovation and quality.",
+      "Our executive leadership team guides a dedicated workforce of over 1,500 employees, driving innovation and excellence in every aspect of our operations."
     ],
     "fetchSkipped": false,
     "exaCostUsd": 0.025
@@ -302,13 +309,13 @@
     "domain": "skydweller.aero",
     "domainConfidence": "high",
     "websiteOffering": "capabilities_only",
-    "excerptsTrimmedTo500Chars": "Robert was instrumental in AME\u2019s private equity raising process and in the combined sale of AME/CMI to Lockheed Martin. Prior to her current role, she held positions at organizations such as Depository Trust & Clearing Corporation in Boston, MA, and Placement International, honing her skills in career counseling, talent acquisition, and payroll management. Skydweller Aero is headquartered in Oklahoma City with research and development facilities in Spain and Mississippi. ## Leadership ##### Robe",
+    "excerptsTrimmedTo500Chars": "Robert held key positions such as Technical Director of the Return to Flight Fire Scout Program (MQ-8B), IPT VMS Leader for Special Projects, GNC Leader for Northrop Grumman/Boeing NASA CEV Team, VMS and Flight Controls Manager for Special… Robert was instrumental in AME’s private equity raising process and in the combined sale of AME/CMI to Lockheed Martin. Prior to her current role, she held positions at organizations such as Depository Trust & Clearing Corporation in Boston, MA, and Placement",
     "ownershipHints": [
-      "Robert was instrumental in AME\u2019s private equity raising process and in the combined sale of AME/CMI to Lockheed Martin.",
+      "Robert was instrumental in AME’s private equity raising process and in the combined sale of AME/CMI to Lockheed Martin.",
       "Prior to her current role, she held positions at organizations such as Depository Trust & Clearing Corporation in Boston, MA, and Placement International, honing her skills in career counseling, talent acquisition, and payroll management."
     ],
     "sizeHints": [
-      "Skydweller Aero is headquartered in Oklahoma City with research and development facilities in Spain and Mississippi. ## Leadership ##### Robert Miller Skydweller Aero Chief Executive Officer Prior to co-founding Skydweller, Robert was co-f\u2026"
+      "Skydweller Aero is headquartered in Oklahoma City with research and development facilities in Spain and Mississippi."
     ],
     "fetchSkipped": false,
     "exaCostUsd": 0.025
