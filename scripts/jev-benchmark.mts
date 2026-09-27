@@ -102,8 +102,8 @@ async function main(): Promise<void> {
         WHERE EXISTS (SELECT 1 FROM faa_ensemble_evaluations e WHERE e.signal_id = r.signal_id AND e.error IS NULL AND e.model_id LIKE 'meta/%')
       )
       SELECT * FROM backed
-      WHERE final_decision != 'research' OR rn <= ${limit}
-      ORDER BY final_decision, rn LIMIT ${limit}`);
+      WHERE muse_decision != 'research' OR rn <= ${limit}
+      ORDER BY muse_decision, rn LIMIT ${limit}`);
     const sample = result.rows;
     console.log(`sample=${sample.length}`);
     let agree = 0;
