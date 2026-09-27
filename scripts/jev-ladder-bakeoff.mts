@@ -36,8 +36,8 @@ interface Variant {
   vetoFirst: boolean;
   enriched: boolean;
   r2Continue: boolean;
+  flipRule: boolean;
 }
-
 const evidenceByName: Record<string, unknown> = JSON.parse(
   readFileSync(new URL("./jev-bakeoff-evidence.json", import.meta.url), "utf8"),
 );
@@ -120,13 +120,14 @@ async function runVariant(
   name: string,
   domain: string | null,
   ownership: string,
+  year?: number | null,
   synthetic?: {
     makes?: string[];
     modelsSample?: string[];
     excerpts?: string;
     websiteOffering?: string;
   },
-): Promise<{ final: string; exit: string; cost: number }> {
+): Promise<{ final: string; exit: string; cost: number; flipped?: boolean }> {
   const frozen =
     variant.enriched === true
       ? (evidenceByName[name] as
@@ -201,36 +202,43 @@ async function runVariant(
     cost += r.costUsd ?? 0;
     return r;
   };
+  const flipYear = typeof year === "number" ? year : null;
+  const isFlip =
+    variant.flipRule === true &&
+    pkg.ownershipStatus === "pe_owned" &&
+    flipYear !== null &&
+    flipYear <= new Date().getFullYear() - 5;
   if (
     variant.vetoFirst &&
+    !isFlip &&
     variant.vetoStatuses.includes(pkg.ownershipStatus ?? "unknown")
   )
-    return { final: "reject", exit: "r0-veto", cost };
+    return { final: "reject", exit: "r0-veto", cost, flipped: false };
   if (variant.order === "disposition-first") {
     const d = await ask({ disposition: JEV_DISPOSITION_QUESTION });
     const choice = String(d.answers["disposition"]?.choice ?? "");
     if (["high_priority", "research", "reject"].includes(choice))
-      return { final: choice, exit: "r0-disposition", cost };
+      return { final: choice, exit: "r0-disposition", cost, flipped: isFlip };
   }
   if (variant.order === "vet-then-disposition") {
     const over0 = await ask({ oversize: JEV_OVERSIZE_QUESTION });
     const over0Noul = over0.answers["oversize"]?.noul;
     if (typeof over0Noul === "number" && over0Noul >= 0.5)
-      return { final: "reject", exit: "r0-oversize", cost };
+      return { final: "reject", exit: "r0-oversize", cost, flipped: isFlip };
     const d = await ask({ disposition: JEV_DISPOSITION_QUESTION });
     const choice = String(d.answers["disposition"]?.choice ?? "");
     if (["high_priority", "research", "reject"].includes(choice))
-      return { final: choice, exit: "r0-disposition", cost };
+      return { final: choice, exit: "r0-disposition", cost, flipped: isFlip };
   }
   const r1 = await ask({ manufacturer: r1Questions[variant.r1Mode ?? "default"] });
   const noul = r1.answers["manufacturer"]?.noul;
   if (typeof noul === "number" && noul < variant.r1Threshold)
-    return { final: "reject", exit: "r1", cost };
+    return { final: "reject", exit: "r1", cost, flipped: isFlip };
   if (variant.order === "screen-then-disposition") {
     const d = await ask({ disposition: JEV_DISPOSITION_QUESTION });
     const choice = String(d.answers["disposition"]?.choice ?? "");
     if (["high_priority", "research", "reject"].includes(choice))
-      return { final: choice, exit: "r1-disposition", cost };
+      return { final: choice, exit: "r1-disposition", cost, flipped: isFlip };
   }
   const r2 = await ask({
     product_vs_process: r2Questions[variant.r2Mode],
@@ -239,13 +247,13 @@ async function runVariant(
     String(r2.answers["product_vs_process"]?.choice ?? "") === "process" &&
     variant.r2Continue !== true
   )
-    return { final: "research", exit: "r2", cost };
-  if (variant.vetoStatuses.includes(pkg.ownershipStatus ?? "unknown"))
-    return { final: "reject", exit: "r3-veto", cost };
+    return { final: "research", exit: "r2", cost, flipped: isFlip };
+  if (!isFlip && variant.vetoStatuses.includes(pkg.ownershipStatus ?? "unknown"))
+    return { final: "reject", exit: "r3-veto", cost, flipped: isFlip };
   const r3 = await ask({ oversize: r3Questions[variant.r3Mode ?? "default"] });
   const over = r3.answers["oversize"]?.noul;
   if (typeof over === "number" && over >= 0.5)
-    return { final: "reject", exit: "r3", cost };
+    return { final: "reject", exit: "r3", cost, flipped: isFlip };
   const r4 = await ask({ disposition: r4Questions[variant.r4Mode ?? "default"] });
   const choice = String(r4.answers["disposition"]?.choice ?? "research");
   return {
@@ -254,6 +262,7 @@ async function runVariant(
       : "research",
     exit: "r4",
     cost,
+    flipped: isFlip,
   };
 }
 
@@ -279,10 +288,11 @@ for (let rep = 0; rep < repeats; rep++) {
       entry.expectedOwnershipStatus === "unknown"
         ? "unknown"
         : entry.expectedOwnershipStatus;
-    const { final, exit, cost } = await runVariant(
+    const { final, exit, cost, flipped } = await runVariant(
       entry.name,
       null,
       ownership,
+      entry.year ?? null,
     );
     totalCost += cost;
     exitCounts[exit] = (exitCounts[exit] ?? 0) + 1;
@@ -294,7 +304,11 @@ for (let rep = 0; rep < repeats; rep++) {
     if (bad) {
       miss += 1;
       console.log(
-        `MISS rep=${rep} name=${entry.name} verdict=${entry.verdict} final=${final} exit=${exit}`,
+        `${flipped === true ? "FLIP-MISS" : "MISS"} rep=${rep} name=${entry.name} verdict=${entry.verdict} final=${final} exit=${exit}`,
+      );
+    } else if (flipped === true) {
+      console.log(
+        `FLIP-OK rep=${rep} name=${entry.name} final=${final} exit=${exit}`,
       );
     }
   }
@@ -303,6 +317,7 @@ for (let rep = 0; rep < repeats; rep++) {
       extra.name,
       null,
       extra.ownership,
+      null,
       extra.synthetic,
     );
     exitCounts[exit] = (exitCounts[exit] ?? 0) + 1;

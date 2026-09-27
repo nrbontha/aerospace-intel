@@ -323,6 +323,7 @@ export function buildJevState(
     ownership_hints: pkg.ownershipHints,
     size_hints: pkg.sizeHints,
     ownership_status: pkg.ownershipStatus ?? "unknown",
+    ownership_year: pkg.ownershipYear ?? null,
     product_evidence: pkg.productEvidence ?? [],
   };
 }
@@ -420,6 +421,8 @@ export interface FaaEvidencePackage {
   readonly sizeHints: readonly string[];
   /** Ownership class (unified_targets.ownership_status; absent = unknown). */
   readonly ownershipStatus?: UnifiedTargetOwnershipStatus;
+  /** Acquisition year from ownership_observations.valid_from (null = unknown). */
+  readonly ownershipYear?: number | null;
   /** Short product/catalog/PMA phrases from the PMA payload (max 6, each ≤120 chars; absent = []). */
   readonly productEvidence?: readonly string[];
 }
@@ -473,6 +476,7 @@ export function buildEvidencePackage(
   row: SourceSignalRowLike,
   website: WebsiteEvidence = EMPTY_WEBSITE_EVIDENCE,
   ownership: UnifiedTargetOwnershipStatus = "unknown",
+  ownershipYear: number | null = null,
 ): FaaEvidencePackage {
   const payload =
     typeof row.source_payload === "object" && row.source_payload !== null
@@ -517,6 +521,10 @@ export function buildEvidencePackage(
     )
       ? ownership
       : "unknown",
+    ownershipYear:
+      typeof ownershipYear === "number" && Number.isFinite(ownershipYear)
+        ? ownershipYear
+        : null,
     productEvidence: buildProductEvidence(makes, modelsSample),
   };
 }
@@ -687,7 +695,43 @@ export async function loadOwnershipStatus(
   }
 }
 
-// ---------------------------------------------------------------------------
+/**
+ * Flip-candidate support: earliest known acquisition year for a company, via
+ * ownership_observations.valid_from linked through companies. Null when
+ * unknown. PE assets held >= FLIP_MIN_HOLD_YEARS may be back on the market.
+ */
+export const FLIP_MIN_HOLD_YEARS = 5;
+
+export async function loadAcquisitionYear(
+  db: Database,
+  name: string | null,
+  companyId?: string | null,
+): Promise<number | null> {
+  try {
+    const cleanName = metadataText(name);
+    const normalized =
+      cleanName === null ? null : normalizeUnifiedName(cleanName);
+    const normalizedCompany = metadataText(companyId ?? null);
+    if (normalized === null && normalizedCompany === null) return null;
+    const rows = await db.execute<{ year: unknown }>(sql`
+      SELECT EXTRACT(YEAR FROM o.valid_from)::int AS year
+      FROM ownership_observations o
+      WHERE o.valid_from IS NOT NULL
+        AND o.company_id IN (
+          SELECT c.id FROM companies c
+          WHERE (${normalizedCompany} IS NOT NULL AND c.id = ${normalizedCompany}::uuid)
+            OR (${normalized} IS NOT NULL AND lower(c.legal_name) = ${normalized})
+            OR (${normalized} IS NOT NULL AND lower(c.display_name) = ${normalized})
+        )
+      ORDER BY o.observed_at DESC
+      LIMIT 1
+    `);
+    const year = rows.rows[0]?.year;
+    return typeof year === "number" && Number.isFinite(year) ? year : null;
+  } catch {
+    return null;
+  }
+}
 // Prompts (high-recall filter: reject ONLY on affirmative negative evidence;
 // missing ownership/size/revenue -> research, never reject)
 // ---------------------------------------------------------------------------
@@ -702,6 +746,7 @@ function buildEnrichmentContext(pkg: FaaEvidencePackage): string {
     "Enrichment signals (missing evidence renders as unknown/[] and MUST NOT count against the holder):",
     `- websiteOffering: ${offering}`,
     `- ownershipStatus: ${ownership}`,
+    `- ownershipYear: ${pkg.ownershipYear ?? "unknown"}`,
     `- productEvidence: ${JSON.stringify(products)}`,
   ].join("\n");
 }
@@ -2219,7 +2264,30 @@ export async function runLadderSignal(
     // Bakeoff winner (ladder_miss 7 vs 18): affirmative ownership evidence
     // rejects before any model call, so acquired names never die as
     // rung-2 "research" instead of rung-3 "reject".
+    // Flip-candidate exemption: PE assets held >= FLIP_MIN_HOLD_YEARS may be
+    // back on the market (secondary buyout), so they climb the ladder with a
+    // flip-candidate-watch tag instead of vetoing. Year unknown fails closed.
+    const ownershipYear = pkg.ownershipYear ?? null;
+    const isFlipCandidate =
+      pkg.ownershipStatus === "pe_owned" &&
+      ownershipYear !== null &&
+      ownershipYear <= new Date().getFullYear() - FLIP_MIN_HOLD_YEARS;
+    if (isFlipCandidate) {
+      await persistJevEvaluation(
+        db,
+        signalId,
+        model,
+        {
+          decision: null,
+          confidence: 0.5,
+          costUsd: null,
+        },
+        JEV_LADDER_PROMPT_VERSIONS.r1,
+        `flip-candidate-watch:pe_owned-since-${ownershipYear}`,
+      );
+    }
     if (
+      !isFlipCandidate &&
       LADDER_OWNERSHIP_VETO_STATUSES.includes(pkg.ownershipStatus ?? "unknown")
     ) {
       const outcome: JevScreenOutcome = {
@@ -2318,6 +2386,7 @@ export async function runLadderSignal(
       "jev-ladder-r2-product-vs-process-pass",
     );
     if (
+      !isFlipCandidate &&
       LADDER_OWNERSHIP_VETO_STATUSES.includes(pkg.ownershipStatus ?? "unknown")
     ) {
       const outcome: JevScreenOutcome = {
@@ -2512,15 +2581,12 @@ export async function runLadderRescreen(
       const domain = asText(row.raw_domain) ?? asText(row.rawDomain);
       const companyId =
         typeof row.company_id === "string" ? row.company_id : null;
+      const name = asText(row.raw_name) ?? asText(row.rawName);
       const pkg = buildEvidencePackage(
         row,
         await loadWebsiteEvidence(db, domain, companyId),
-        await loadOwnershipStatus(
-          db,
-          asText(row.raw_name) ?? asText(row.rawName),
-          domain,
-          companyId,
-        ),
+        await loadOwnershipStatus(db, name, domain, companyId),
+        await loadAcquisitionYear(db, name, companyId),
       );
       let verdict: LadderSignalVerdict | null;
       try {
