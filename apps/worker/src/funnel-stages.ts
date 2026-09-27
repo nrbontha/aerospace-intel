@@ -7,6 +7,7 @@ import {
   getExaDailySpendUsd,
   OWNERSHIP_CHECK_TICK_CAP,
   runJevSweep,
+  runLadderRescreen,
   runMuseVerification,
   runOwnershipChecks,
   runWebsiteEnrichment,
@@ -82,6 +83,28 @@ export const FUNNEL_STAGES: readonly FunnelStage[] = [
         screened: sweep.screened,
         flagged: sweep.flagged,
         errors: sweep.errors,
+      };
+    },
+  },
+  {
+    key: "jev-ladder",
+    label: "JEv ladder rescreen",
+    async run(ctx) {
+      const ladder = await runLadderRescreen(ctx.db, {
+        limit: ctx.config.sweepLimit,
+        concurrency: ctx.config.sweepConcurrency,
+      });
+      return {
+        done: ladder.screened,
+        note:
+          `screened=${ladder.screened} hp=${ladder.hp} ` +
+          `research=${ladder.research} rejected=${ladder.rejected} ` +
+          `costUsd=${ladder.costUsd}`,
+        screened: ladder.screened,
+        hp: ladder.hp,
+        research: ladder.research,
+        rejected: ladder.rejected,
+        costUsd: ladder.costUsd,
       };
     },
   },

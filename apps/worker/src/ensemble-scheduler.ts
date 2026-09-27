@@ -151,6 +151,7 @@ function toLogReason(error: unknown): string {
  */
 const LEGACY_STAGE_COMPLETED_EVENTS: Record<string, string> = {
   "jev-sweep": "ensemble.scheduler_jev_sweep_completed",
+  "jev-ladder": "ensemble.scheduler_ladder_completed",
   "muse-verify": "ensemble.scheduler_verification_completed",
   ownership: "ensemble.scheduler_ownership_completed",
   "website-enrich": "ensemble.scheduler_enrichment_completed",
@@ -160,6 +161,7 @@ const LEGACY_STAGE_COMPLETED_EVENTS: Record<string, string> = {
 
 const LEGACY_STAGE_FAILED_EVENTS: Record<string, string> = {
   "jev-sweep": "ensemble.scheduler_jev_sweep_failed",
+  "jev-ladder": "ensemble.scheduler_ladder_failed",
   "muse-verify": "ensemble.scheduler_verification_failed",
   ownership: "ensemble.scheduler_ownership_failed",
   "website-enrich": "ensemble.scheduler_enrichment_failed",

@@ -237,6 +237,42 @@ export const JEV_OVERSIZE_QUESTION = {
   },
 } as const;
 
+export const JEV_PRODUCT_PROCESS_QUESTION = {
+  type: "choice",
+  instructions:
+    "Does this company sell a proprietary manufactured PRODUCT, or only a proprietary process/capability?",
+  criteria: {
+    product:
+      "Named/branded products, catalog, PMA/STC/TSO articles, patented components (websiteOffering products_menu, non-empty productEvidence, or part evidence)",
+    process:
+      "Kitting, assembly, repair, services, capabilities-only marketing, no named products",
+  },
+} as const;
+
+/**
+ * Per-rung prompt versions for the staged JEv ladder. Each rung persists its
+ * own faa_ensemble_evaluations row under the JEv model id, so one laddered
+ * signal fans out to up to four rows (r1..r4 in call order).
+ */
+export const JEV_LADDER_PROMPT_VERSIONS = {
+  r1: "jev-ladder-r1",
+  r2: "jev-ladder-r2",
+  r3: "jev-ladder-r3",
+  r4: "jev-ladder-r4",
+} as const;
+
+export type JevLadderRung = keyof typeof JEV_LADDER_PROMPT_VERSIONS;
+
+/**
+ * Deterministic rung-3 veto: these ownership classes reject without a call.
+ */
+const LADDER_OWNERSHIP_VETO_STATUSES: readonly string[] = [
+  "strategic_owned",
+  "pe_owned",
+  "public",
+  "dead",
+];
+
 export interface JevScreenOutcome {
   readonly decision: EnsembleDecision;
   readonly confidence: number;
@@ -251,6 +287,33 @@ function jevChoiceToDecision(choice: unknown): EnsembleDecision | null {
     : null;
 }
 
+/**
+ * Shared JEv state payload (single disposition call and ladder rungs send
+ * identical company state; only the questions differ).
+ */
+export function buildJevState(
+  pkg: FaaEvidencePackage,
+): Record<string, unknown> {
+  return {
+    company_name: pkg.name,
+    domain: pkg.domain,
+    identifiers: { cage: pkg.cage, uei: pkg.uei },
+    location: { city: pkg.city, state: pkg.state, country: pkg.country },
+    address: pkg.address,
+    part_count: pkg.partCount,
+    makes: pkg.makes,
+    models_sample: pkg.modelsSample,
+    latest_supplement_date: pkg.supplementDate,
+    guid_url: pkg.guidUrl,
+    website_offering: pkg.websiteOffering,
+    website_excerpts: pkg.websiteExcerpts,
+    ownership_hints: pkg.ownershipHints,
+    size_hints: pkg.sizeHints,
+    ownership_status: pkg.ownershipStatus ?? "unknown",
+    product_evidence: pkg.productEvidence ?? [],
+  };
+}
+
 export async function defaultScreenJev(
   apiKey: string,
   model: string,
@@ -259,24 +322,7 @@ export async function defaultScreenJev(
   try {
     const result = await callJev(
       apiKey,
-      {
-        company_name: pkg.name,
-        domain: pkg.domain,
-        identifiers: { cage: pkg.cage, uei: pkg.uei },
-        location: { city: pkg.city, state: pkg.state, country: pkg.country },
-        address: pkg.address,
-        part_count: pkg.partCount,
-        makes: pkg.makes,
-        models_sample: pkg.modelsSample,
-        latest_supplement_date: pkg.supplementDate,
-        guid_url: pkg.guidUrl,
-        website_offering: pkg.websiteOffering,
-        website_excerpts: pkg.websiteExcerpts,
-        ownership_hints: pkg.ownershipHints,
-        size_hints: pkg.sizeHints,
-        ownership_status: pkg.ownershipStatus ?? "unknown",
-        product_evidence: pkg.productEvidence ?? [],
-      },
+      buildJevState(pkg),
       {
         disposition: JEV_DISPOSITION_QUESTION,
         manufacturer: JEV_MANUFACTURER_QUESTION,
@@ -1032,12 +1078,22 @@ async function persistEvaluation(
 /**
  * Persist a JEv screen verdict as an evaluation row (model_id is the JEv
  * model). Other claim columns stay NULL: JEv returns no prose evidence.
+ * promptVersion/reason default to the single-call sweep values; the staged
+ * ladder passes its per-rung prompt_version (jev-ladder-r1..r4) and persists
+ * pass-through rungs with a NULL decision (abstain) so only terminal exits
+ * write verdicts the re-screen selector can see.
  */
 async function persistJevEvaluation(
   db: Database,
   signalId: string,
   modelId: string,
-  outcome: JevScreenOutcome,
+  outcome: {
+    readonly decision: EnsembleDecision | null;
+    readonly confidence: number;
+    readonly costUsd: number | null;
+  },
+  promptVersion: string = FAA_EVALUATOR_PROMPT_VERSION,
+  reason = "jev-prescreen",
 ): Promise<void> {
   await db.execute(sql`
     INSERT INTO faa_ensemble_evaluations (
@@ -1047,11 +1103,11 @@ async function persistJevEvaluation(
       missing_evidence, false_negative_risk, reason, tokens, cost_usd,
       error, retry_count, updated_at
     ) VALUES (
-      ${signalId}, ${modelId}, ${FAA_EVALUATOR_PROMPT_VERSION},
+      ${signalId}, ${modelId}, ${promptVersion},
       ${JSON.stringify({ decision: outcome.decision, confidence: outcome.confidence })},
       ${JSON.stringify({ decision: outcome.decision, confidence: outcome.confidence })},
       ${outcome.decision}, ${Math.round(outcome.confidence * 100)},
-      null, null, null, '[]', '[]', '[]', null, 'jev-prescreen', null,
+      null, null, null, '[]', '[]', '[]', null, ${reason}, null,
       ${outcome.costUsd}, null, 0, now()
     )
     ON CONFLICT (signal_id, model_id, prompt_version) DO UPDATE SET
@@ -2054,4 +2110,398 @@ export async function runMuseVerification(
     },
   );
   return { verified, confirmed, overruled, errors };
+}
+
+// ---------------------------------------------------------------------------
+// Staged JEv ladder (conditional re-screen for the research backlog)
+//
+// JEv costs ~$0.00002/call: instead of one disposition call per signal, the
+// ladder spends one cheap call per rung and stops at the first decisive rung:
+// r1 manufacturer (noul; non-manufacturer -> reject) -> r2 product_vs_process
+// (choice; process-only -> research) -> r3 deterministic ownership veto
+// (strategic_owned/pe_owned/public/dead -> reject, no call) then oversize
+// (noul inverted; oversize -> reject) -> r4 disposition (verdict stands).
+// Each rung persists its own faa_ensemble_evaluations row under the JEv
+// model id with prompt_version jev-ladder-r1..r4.
+// ---------------------------------------------------------------------------
+
+/** Rung where a laddered signal exited (r3-veto spent no call). */
+export type LadderExitRung = "r1" | "r2" | "r3-veto" | "r3" | "r4";
+
+export interface LadderSignalVerdict {
+  readonly decision: EnsembleDecision;
+  readonly confidence: number;
+  readonly costUsd: number | null;
+  readonly exitRung: LadderExitRung;
+}
+
+export interface LadderRescreenOptions {
+  /** 0 (or omitted) = re-screen the entire research backlog. */
+  readonly limit?: number;
+  readonly status?: string;
+  readonly sourceKeys?: readonly string[];
+  readonly concurrency?: number;
+}
+
+export interface LadderRescreenDependencies {
+  /**
+   * Per-signal ladder override (tests/staging), including per-rung
+   * persistence; defaults to runLadderSignal.
+   */
+  readonly runLadder?: (
+    db: Database,
+    signalId: string,
+    pkg: FaaEvidencePackage,
+  ) => Promise<LadderSignalVerdict | null>;
+  readonly apiKey?: string;
+  readonly config?: FaaEnsembleConfig;
+}
+
+export interface LadderRescreenSummary {
+  /** Signals where the ladder reached a verdict. */
+  readonly screened: number;
+  readonly hp: number;
+  readonly research: number;
+  readonly rejected: number;
+  /** Summed ladder call costs (null rung costs count as 0). */
+  readonly costUsd: number;
+  /** Ladder misses (thrown call or unparseable final answer). */
+  readonly errors: number;
+  /** Per-rung exits, keyed by LadderExitRung. */
+  readonly exits: Record<LadderExitRung, number>;
+}
+
+function ladderExits(): Record<LadderExitRung, number> {
+  return { r1: 0, r2: 0, "r3-veto": 0, r3: 0, r4: 0 };
+}
+
+function clampConfidence(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value)
+    ? Math.max(0, Math.min(1, value))
+    : 0.5;
+}
+
+/**
+ * Run the staged ladder for one signal, persisting each rung's evaluation
+ * row. Pass-through rungs persist a NULL-decision abstain row (only terminal
+ * exits write verdicts, keeping the latest-eval-is-research selector clean);
+ * missing/NaN rung answers fail OPEN and continue. A throw or an
+ * unparseable FINAL (r4) answer returns null and persists nothing further,
+ * mirroring the sweep's error accounting.
+ */
+export async function runLadderSignal(
+  db: Database,
+  signalId: string,
+  pkg: FaaEvidencePackage,
+  apiKey: string,
+  model: string,
+): Promise<LadderSignalVerdict | null> {
+  const state = buildJevState(pkg);
+  const costs: (number | null)[] = [];
+  const totalCost = (): number | null =>
+    costs.some((c) => typeof c === "number")
+      ? costs.reduce<number>((sum, c) => sum + (c ?? 0), 0)
+      : null;
+  try {
+    const r1 = await callJev(
+      apiKey,
+      state,
+      { manufacturer: JEV_MANUFACTURER_QUESTION },
+      { model },
+    );
+    costs.push(r1.costUsd);
+    const r1Noul = r1.answers["manufacturer"]?.noul;
+    if (typeof r1Noul === "number" && Number.isFinite(r1Noul) && r1Noul < 0.5) {
+      const outcome: JevScreenOutcome = {
+        decision: "reject",
+        confidence: 1 - r1Noul,
+        costUsd: r1.costUsd,
+      };
+      await persistJevEvaluation(
+        db,
+        signalId,
+        model,
+        outcome,
+        JEV_LADDER_PROMPT_VERSIONS.r1,
+        "jev-ladder-r1-manufacturer",
+      );
+      return { ...outcome, costUsd: totalCost(), exitRung: "r1" };
+    }
+    await persistJevEvaluation(
+      db,
+      signalId,
+      model,
+      {
+        decision: null,
+        confidence: clampConfidence(r1Noul),
+        costUsd: r1.costUsd,
+      },
+      JEV_LADDER_PROMPT_VERSIONS.r1,
+      "jev-ladder-r1-manufacturer-pass",
+    );
+    const r2 = await callJev(
+      apiKey,
+      state,
+      { product_vs_process: JEV_PRODUCT_PROCESS_QUESTION },
+      { model },
+    );
+    costs.push(r2.costUsd);
+    const r2Choice = r2.answers["product_vs_process"]?.choice;
+    if (r2Choice === "process") {
+      const outcome: JevScreenOutcome = {
+        decision: "research",
+        confidence: clampConfidence(
+          r2.answers["product_vs_process"]?.confidence,
+        ),
+        costUsd: r2.costUsd,
+      };
+      await persistJevEvaluation(
+        db,
+        signalId,
+        model,
+        outcome,
+        JEV_LADDER_PROMPT_VERSIONS.r2,
+        "jev-ladder-r2-product-vs-process",
+      );
+      return { ...outcome, costUsd: totalCost(), exitRung: "r2" };
+    }
+    await persistJevEvaluation(
+      db,
+      signalId,
+      model,
+      {
+        decision: null,
+        confidence: clampConfidence(
+          r2.answers["product_vs_process"]?.confidence,
+        ),
+        costUsd: r2.costUsd,
+      },
+      JEV_LADDER_PROMPT_VERSIONS.r2,
+      "jev-ladder-r2-product-vs-process-pass",
+    );
+    if (
+      LADDER_OWNERSHIP_VETO_STATUSES.includes(pkg.ownershipStatus ?? "unknown")
+    ) {
+      const outcome: JevScreenOutcome = {
+        decision: "reject",
+        confidence: 1,
+        costUsd: null,
+      };
+      await persistJevEvaluation(
+        db,
+        signalId,
+        model,
+        outcome,
+        JEV_LADDER_PROMPT_VERSIONS.r3,
+        `jev-ladder-r3-ownership-veto:${pkg.ownershipStatus ?? "unknown"}`,
+      );
+      return { ...outcome, costUsd: totalCost(), exitRung: "r3-veto" };
+    }
+    const r3 = await callJev(
+      apiKey,
+      state,
+      { oversize: JEV_OVERSIZE_QUESTION },
+      { model },
+    );
+    costs.push(r3.costUsd);
+    const r3Noul = r3.answers["oversize"]?.noul;
+    if (
+      typeof r3Noul === "number" &&
+      Number.isFinite(r3Noul) &&
+      r3Noul >= 0.5
+    ) {
+      const outcome: JevScreenOutcome = {
+        decision: "reject",
+        confidence: r3Noul,
+        costUsd: r3.costUsd,
+      };
+      await persistJevEvaluation(
+        db,
+        signalId,
+        model,
+        outcome,
+        JEV_LADDER_PROMPT_VERSIONS.r3,
+        "jev-ladder-r3-oversize",
+      );
+      return { ...outcome, costUsd: totalCost(), exitRung: "r3" };
+    }
+    await persistJevEvaluation(
+      db,
+      signalId,
+      model,
+      {
+        decision: null,
+        confidence:
+          typeof r3Noul === "number" && Number.isFinite(r3Noul)
+            ? 1 - r3Noul
+            : 0.5,
+        costUsd: r3.costUsd,
+      },
+      JEV_LADDER_PROMPT_VERSIONS.r3,
+      "jev-ladder-r3-oversize-pass",
+    );
+    const r4 = await callJev(
+      apiKey,
+      state,
+      { disposition: JEV_DISPOSITION_QUESTION },
+      { model },
+    );
+    costs.push(r4.costUsd);
+    const answer = r4.answers["disposition"];
+    const decision = jevChoiceToDecision(answer?.choice);
+    if (decision === null) return null;
+    const outcome: JevScreenOutcome = {
+      decision,
+      confidence: clampConfidence(answer?.confidence),
+      costUsd: r4.costUsd,
+    };
+    await persistJevEvaluation(
+      db,
+      signalId,
+      model,
+      outcome,
+      JEV_LADDER_PROMPT_VERSIONS.r4,
+      "jev-ladder-r4-disposition",
+    );
+    return { ...outcome, costUsd: totalCost(), exitRung: "r4" };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Re-screen selection: signals whose LATEST JEv eval (any prompt_version) is
+ * a `research` verdict, with no faa_ensemble_results row. Pass-through rungs
+ * persist NULL-decision abstain rows, so they never match the join and never
+ * shadow a terminal verdict; only true HP/reject verdicts and result rows
+ * keep a signal out.
+ */
+async function selectLadderRescreenCandidates(
+  db: Database,
+  args: {
+    status: string;
+    sourceKeys: readonly string[];
+    jevModel: string;
+    /** 0 = all. */
+    limit: number;
+  },
+): Promise<CandidateSignalRow[]> {
+  const base = await db.execute<CandidateSignalRow>(sql`
+    SELECT
+      ss.id,
+      ss.raw_name,
+      ss.raw_domain,
+      ss.uei,
+      ss.cage,
+      ss.city,
+      ss.state,
+      ss.country,
+      ss.award_count,
+      ss.freshest_award,
+      ss.created_at,
+      ss.source_payload
+    FROM source_signals ss
+    JOIN faa_ensemble_evaluations jev
+      ON jev.signal_id = ss.id
+      AND jev.model_id = ${args.jevModel}
+      AND jev.decision = 'research'
+      AND jev.prompt_version NOT LIKE 'jev-ladder-%'
+    WHERE ss.status::text = ${args.status}
+      ${sourceKeyFilter(args.sourceKeys)}
+      AND NOT EXISTS (
+        SELECT 1 FROM faa_ensemble_evaluations newer
+        WHERE newer.signal_id = ss.id
+          AND newer.model_id = ${args.jevModel}
+          AND newer.id <> jev.id
+          AND (
+            newer.created_at > jev.created_at
+            OR (
+              newer.created_at = jev.created_at
+              AND newer.decision IS NOT NULL
+              AND newer.decision IS DISTINCT FROM 'research'
+            )
+          )
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM faa_ensemble_results r WHERE r.signal_id = ss.id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM golden_examples g
+        WHERE lower(g.name) = lower(ss.raw_name)
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM companies c
+        WHERE lower(c.legal_name) = lower(ss.raw_name)
+      )
+    ORDER BY jev.created_at ASC, ss.id ASC
+    ${args.limit <= 0 ? sql`` : sql`LIMIT ${args.limit}`}
+  `);
+  return [...base.rows];
+}
+
+/**
+ * Re-screen the research backlog through the staged ladder. Never writes
+ * faa_ensemble_results rows — only per-rung JEv evaluation rows.
+ */
+export async function runLadderRescreen(
+  db: Database = getDatabase(),
+  opts: LadderRescreenOptions = {},
+  deps: LadderRescreenDependencies = {},
+): Promise<LadderRescreenSummary> {
+  const config = deps.config ?? resolveEnsembleConfig();
+  const rows = await selectLadderRescreenCandidates(db, {
+    status: opts.status ?? DEFAULT_FAA_STATUS,
+    sourceKeys: opts.sourceKeys ?? [],
+    jevModel: config.jevModel,
+    limit: opts.limit ?? 0,
+  });
+  const apiKey = deps.apiKey ?? process.env["OPENROUTER_API_KEY"] ?? "";
+  const runLadder =
+    deps.runLadder ??
+    ((ladderDb: Database, signalId: string, pkg: FaaEvidencePackage) =>
+      runLadderSignal(ladderDb, signalId, pkg, apiKey, config.jevModel));
+  let screened = 0;
+  let hp = 0;
+  let research = 0;
+  let rejected = 0;
+  let costUsd = 0;
+  let errors = 0;
+  const exits = ladderExits();
+  await runWithConcurrency(
+    rows,
+    opts.concurrency ?? config.concurrency,
+    async (row) => {
+      const domain = asText(row.raw_domain) ?? asText(row.rawDomain);
+      const companyId =
+        typeof row.company_id === "string" ? row.company_id : null;
+      const pkg = buildEvidencePackage(
+        row,
+        await loadWebsiteEvidence(db, domain, companyId),
+        await loadOwnershipStatus(
+          db,
+          asText(row.raw_name) ?? asText(row.rawName),
+          domain,
+          companyId,
+        ),
+      );
+      let verdict: LadderSignalVerdict | null;
+      try {
+        verdict = await runLadder(db, row.id, pkg);
+      } catch {
+        errors += 1;
+        return;
+      }
+      if (verdict === null) {
+        errors += 1;
+        return;
+      }
+      screened += 1;
+      exits[verdict.exitRung] += 1;
+      if (verdict.decision === "high_priority") hp += 1;
+      else if (verdict.decision === "research") research += 1;
+      else rejected += 1;
+      costUsd += verdict.costUsd ?? 0;
+    },
+  );
+  return { screened, hp, research, rejected, costUsd, errors, exits };
 }
