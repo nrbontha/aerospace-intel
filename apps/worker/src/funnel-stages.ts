@@ -23,6 +23,7 @@ export interface FunnelStageConfig {
   delayMs: number;
   sweepLimit: number;
   sweepConcurrency: number;
+  ladderConcurrency: number;
   verifyLimit: number;
 }
 
@@ -68,7 +69,14 @@ export interface FunnelStage {
  * Keep this property when adding stages: gate on the absence of YOUR output
  * artifact, never on timestamps or tick cursors.
  */
-export const FUNNEL_STAGES: readonly FunnelStage[] = [
+
+/**
+ * Fast loop: JEv sweep + ladder rescreen. Both are ~100ms/call local-model
+ * steps gated on artifact absence, so they crunch the backlog on a short
+ * interval while Muse verification follows at its own pace. Handoff between
+ * the loops is DB state only — no shared tick lock.
+ */
+export const FAST_STAGES: readonly FunnelStage[] = [
   {
     key: "jev-sweep",
     label: "JEv sweep",
@@ -92,7 +100,7 @@ export const FUNNEL_STAGES: readonly FunnelStage[] = [
     async run(ctx) {
       const ladder = await runLadderRescreen(ctx.db, {
         limit: ctx.config.sweepLimit,
-        concurrency: ctx.config.sweepConcurrency,
+        concurrency: ctx.config.ladderConcurrency,
       });
       return {
         done: ladder.screened,
@@ -108,6 +116,13 @@ export const FUNNEL_STAGES: readonly FunnelStage[] = [
       };
     },
   },
+];
+
+/**
+ * Slow loop: Muse verification + ownership + website enrichment + unified
+ * refresh + promotion. Keeps the existing 30-minute cadence and concurrency.
+ */
+export const SLOW_STAGES: readonly FunnelStage[] = [
   {
     key: "muse-verify",
     label: "Muse verification",
@@ -216,4 +231,10 @@ export const FUNNEL_STAGES: readonly FunnelStage[] = [
       };
     },
   },
+];
+
+/** Full registry in run order (fast stages first, then slow). */
+export const FUNNEL_STAGES: readonly FunnelStage[] = [
+  ...FAST_STAGES,
+  ...SLOW_STAGES,
 ];

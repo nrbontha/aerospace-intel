@@ -7,28 +7,40 @@ import {
   OpenRouterClient,
 } from "@asi/research";
 
-import { FUNNEL_STAGES } from "./funnel-stages.js";
+import { FAST_STAGES, SLOW_STAGES } from "./funnel-stages.js";
+
+import type { FunnelStage } from "./funnel-stages.js";
 
 import type { QueueLogger } from "./queue.js";
 
 /**
- * Autonomous ensemble screening loop for Railway.
+ * Autonomous ensemble screening loops for Railway.
  *
- * Every tick: probe the ensemble model (skip while unhealthy) -> enforce the
- * daily spend cap -> JEv sweep of the full queue (no Muse calls) ->
- * independent Muse verification of flagged items + audit sample -> Exa
- * ownership checks (HP names lacking ownership evidence, cap 10/tick) ->
- * Exa website enrichment (unvetted HP/P1 names without website evidence,
- * cap 10/tick) -> refresh unified targets -> promote high-priority results
- * to leads. Every step is individually guarded; this module never throws so
- * the worker process always survives.
+ * Two independent loops share nothing but DB state (handoff is artifact
+ * absence, never a shared tick lock), so either loop stalls or deploys
+ * without blocking the other:
+ *
+ * - Fast loop (FAST_STAGES, every JEV_FAST_INTERVAL_MS, default 60s): JEv
+ *   sweep of the full queue (no Muse calls) -> JEv ladder rescreen, both at
+ *   32-wide concurrency.
+ * - Slow loop (SLOW_STAGES, every ENSEMBLE_SCHEDULE_MINUTES, default 30min):
+ *   independent Muse verification of flagged items + audit sample -> Exa
+ *   ownership checks (HP names lacking ownership evidence, cap 10/tick) ->
+ *   Exa website enrichment (unvetted HP/P1 names without website evidence,
+ *   cap 10/tick) -> refresh unified targets -> promote high-priority results
+ *   to leads.
+ *
+ * Every tick of either loop: probe the ensemble model (skip while unhealthy)
+ * -> enforce the daily spend cap -> run that loop's stages in registry order.
+ * Every step is individually guarded; this module never throws so the worker
+ * process always survives.
  *
  * Dependency note: `runJevSweep` / `runMuseVerification` (Agent RunnerLib,
  * packages/research/src/faa-ensemble/runner.ts) and
  * `populateUnifiedTargets` / `promoteEnsembleLeads` (Agent PopulateLib,
  * packages/database/src/unified-targets/) are consumed through the
- * FUNNEL_STAGES registry in ./funnel-stages.js; those agents own
- * re-exporting them from the package roots.
+ * FAST_STAGES / SLOW_STAGES registries in ./funnel-stages.js; those agents
+ * own re-exporting them from the package roots.
  */
 
 export const ENSEMBLE_SCHEDULE_ENV = "ENSEMBLE_SCHEDULE_MINUTES";
@@ -37,6 +49,8 @@ export const ENSEMBLE_CONCURRENCY_ENV = "ENSEMBLE_CONCURRENCY";
 export const ENSEMBLE_DELAY_MS_ENV = "ENSEMBLE_DELAY_MS";
 export const JEV_SWEEP_LIMIT_ENV = "JEV_SWEEP_LIMIT";
 export const JEV_SWEEP_CONCURRENCY_ENV = "JEV_SWEEP_CONCURRENCY";
+export const JEV_LADDER_CONCURRENCY_ENV = "JEV_LADDER_CONCURRENCY";
+export const JEV_FAST_INTERVAL_MS_ENV = "JEV_FAST_INTERVAL_MS";
 export const VERIFY_BATCH_LIMIT_ENV = "VERIFY_BATCH_LIMIT";
 
 const DEFAULT_SCHEDULE_MINUTES = 30;
@@ -44,7 +58,9 @@ const DEFAULT_BATCH_LIMIT = 0;
 const DEFAULT_CONCURRENCY = 2;
 const DEFAULT_DELAY_MS = 1_000;
 const DEFAULT_JEV_SWEEP_LIMIT = 0;
-const DEFAULT_JEV_SWEEP_CONCURRENCY = 8;
+const DEFAULT_JEV_SWEEP_CONCURRENCY = 32;
+const DEFAULT_JEV_LADDER_CONCURRENCY = 32;
+const DEFAULT_JEV_FAST_INTERVAL_MS = 60_000;
 const DEFAULT_VERIFY_BATCH_LIMIT = 120;
 
 /** While unhealthy, skip runs for this long (prevents hollow-row eras). */
@@ -64,16 +80,24 @@ export interface EnsembleSchedulerOptions {
   apiKey: string;
   model: string;
   scheduleMinutes?: number;
+  fastIntervalMs?: number;
   batchLimit?: number;
   concurrency?: number;
   delayMs?: number;
   sweepLimit?: number;
   sweepConcurrency?: number;
+  ladderConcurrency?: number;
   verifyLimit?: number;
 }
 
 export interface EnsembleSchedulerHandle {
   stop(): void;
+}
+
+/** Independent per-loop tick state (fast and slow loops never share one). */
+export interface EnsembleLoopState {
+  inFlight: boolean;
+  unhealthyUntil: number;
 }
 
 function readPositiveInt(raw: string | undefined, fallback: number): number {
@@ -90,11 +114,13 @@ function readNonNegativeInt(raw: string | undefined, fallback: number): number {
 
 export function resolveSchedulerConfig(options: EnsembleSchedulerOptions): {
   scheduleMinutes: number;
+  fastIntervalMs: number;
   batchLimit: number;
   concurrency: number;
   delayMs: number;
   sweepLimit: number;
   sweepConcurrency: number;
+  ladderConcurrency: number;
   verifyLimit: number;
 } {
   return {
@@ -103,6 +129,12 @@ export function resolveSchedulerConfig(options: EnsembleSchedulerOptions): {
       readPositiveInt(
         process.env[ENSEMBLE_SCHEDULE_ENV],
         DEFAULT_SCHEDULE_MINUTES,
+      ),
+    fastIntervalMs:
+      options.fastIntervalMs ??
+      readPositiveInt(
+        process.env[JEV_FAST_INTERVAL_MS_ENV],
+        DEFAULT_JEV_FAST_INTERVAL_MS,
       ),
     batchLimit:
       options.batchLimit ??
@@ -130,6 +162,12 @@ export function resolveSchedulerConfig(options: EnsembleSchedulerOptions): {
       readPositiveInt(
         process.env[JEV_SWEEP_CONCURRENCY_ENV],
         DEFAULT_JEV_SWEEP_CONCURRENCY,
+      ),
+    ladderConcurrency:
+      options.ladderConcurrency ??
+      readPositiveInt(
+        process.env[JEV_LADDER_CONCURRENCY_ENV],
+        DEFAULT_JEV_LADDER_CONCURRENCY,
       ),
     verifyLimit:
       options.verifyLimit ??
@@ -181,20 +219,27 @@ export function startEnsembleScheduler(
   const config = resolveSchedulerConfig(options);
   const client = new OpenRouterClient(apiKey);
   let stopped = false;
-  let inFlight = false;
-  let unhealthyUntil = 0;
+  // Independent per-loop state: the fast JEv loop and the slow verify loop
+  // share nothing but DB state, so either loop stalls (overlap, unhealthy
+  // model, spend cap) or deploys without blocking the other.
+  const fastLoop: EnsembleLoopState = { inFlight: false, unhealthyUntil: 0 };
+  const slowLoop: EnsembleLoopState = { inFlight: false, unhealthyUntil: 0 };
 
-  async function tick(): Promise<void> {
-    if (stopped || inFlight) {
-      if (inFlight)
+  async function tick(
+    stages: readonly FunnelStage[],
+    loop: "fast" | "slow",
+    state: EnsembleLoopState,
+  ): Promise<void> {
+    if (stopped || state.inFlight) {
+      if (state.inFlight)
         logger("warn", "ensemble.scheduler_tick_overlap_skipped", {});
       return;
     }
-    inFlight = true;
+    state.inFlight = true;
     try {
       // 1. Model health probe: skip the run while unhealthy.
       try {
-        if (Date.now() < unhealthyUntil) {
+        if (Date.now() < state.unhealthyUntil) {
           logger("warn", "ensemble.scheduler_unhealthy_cached_skip", { model });
           return;
         }
@@ -210,9 +255,9 @@ export function startEnsembleScheduler(
           maxAttempts: 1,
           timeoutMs: PROBE_TIMEOUT_MS,
         });
-        unhealthyUntil = 0;
+        state.unhealthyUntil = 0;
       } catch (error) {
-        unhealthyUntil = Date.now() + UNHEALTHY_CACHE_MS;
+        state.unhealthyUntil = Date.now() + UNHEALTHY_CACHE_MS;
         logger("warn", "ensemble.scheduler_model_unhealthy", {
           model,
           reason: toLogReason(error),
@@ -238,10 +283,11 @@ export function startEnsembleScheduler(
         return;
       }
 
-      // 3. Funnel stages in registry order (see ./funnel-stages.js). Each
-      // stage is individually guarded: one throwing never blocks the rest,
-      // and this tick never throws so the worker process always survives.
-      for (const stage of FUNNEL_STAGES) {
+      // 3. This loop's funnel stages in registry order (see
+      // ./funnel-stages.js). Each stage is individually guarded: one throwing
+      // never blocks the rest, and this tick never throws so the worker
+      // process always survives.
+      for (const stage of stages) {
         try {
           const summary = await stage.run({ db: getDatabase(), config });
           const { done, note, budgetSkipped, ...fields } = summary;
@@ -249,6 +295,7 @@ export function startEnsembleScheduler(
             stage: stage.key,
             done,
             note,
+            loop,
             ...fields,
           });
           if (budgetSkipped) {
@@ -280,23 +327,29 @@ export function startEnsembleScheduler(
         reason: toLogReason(error),
       });
     } finally {
-      inFlight = false;
+      state.inFlight = false;
     }
   }
 
-  const timer = setInterval(
+  const fastTimer = setInterval(() => {
+    void tick(FAST_STAGES, "fast", fastLoop);
+  }, config.fastIntervalMs);
+  const slowTimer = setInterval(
     () => {
-      void tick();
+      void tick(SLOW_STAGES, "slow", slowLoop);
     },
     config.scheduleMinutes * 60 * 1_000,
   );
-  timer.unref();
-  void tick();
+  fastTimer.unref();
+  slowTimer.unref();
+  void tick(FAST_STAGES, "fast", fastLoop);
+  void tick(SLOW_STAGES, "slow", slowLoop);
 
   return {
     stop(): void {
       stopped = true;
-      clearInterval(timer);
+      clearInterval(fastTimer);
+      clearInterval(slowTimer);
     },
   };
 }
