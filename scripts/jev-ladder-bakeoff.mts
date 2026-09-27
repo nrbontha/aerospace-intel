@@ -27,6 +27,7 @@ import { INVESTOR_VERDICTS_V1 } from "../packages/research/src/scoring-axial/fix
 
 interface Variant {
   r1Threshold: number;
+  r1Mode?: "default" | "broad";
   vetoStatuses: string[];
   r2Mode: "choice" | "strict-product" | "lenient";
   r3Mode?: "default" | "scale";
@@ -47,6 +48,18 @@ const variant: Variant = JSON.parse(
     "utf8",
   ),
 );
+const r1Questions = {
+  default: JEV_MANUFACTURER_QUESTION,
+  broad: {
+    type: "noul",
+    instructions:
+      "Could this company plausibly design, build, or integrate physical aerospace/defense products or test systems, broadly construed? Answer true unless it is clearly services, distribution, software, or unrelated business only.",
+    criteria: {
+      true: "Any plausible hardware, product, or test-system footprint.",
+      false: "Clearly services, distribution, software, or unrelated only.",
+    },
+  },
+} as const;
 const r2Questions = {
   choice: JEV_PRODUCT_PROCESS_QUESTION,
   "strict-product": {
@@ -199,7 +212,7 @@ async function runVariant(
     if (["high_priority", "research", "reject"].includes(choice))
       return { final: choice, exit: "r0-disposition", cost };
   }
-  const r1 = await ask({ manufacturer: JEV_MANUFACTURER_QUESTION });
+  const r1 = await ask({ manufacturer: r1Questions[variant.r1Mode ?? "default"] });
   const noul = r1.answers["manufacturer"]?.noul;
   if (typeof noul === "number" && noul < variant.r1Threshold)
     return { final: "reject", exit: "r1", cost };

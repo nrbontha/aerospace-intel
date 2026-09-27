@@ -227,6 +227,19 @@ export const JEV_MANUFACTURER_QUESTION = {
   },
 } as const;
 
+// Bakeoff winner (r1Mode broad): rung 1 fails open on obscure names so
+// plausible-but-unknown manufacturers get the full ladder + Muse hearing.
+// Kept separate from JEV_MANUFACTURER_QUESTION so the sweep path is untouched.
+export const JEV_LADDER_R1_QUESTION = {
+  type: "noul",
+  instructions:
+    "Could this company plausibly design, build, or integrate physical aerospace/defense products or test systems, broadly construed? Answer true unless it is clearly services, distribution, software, or unrelated business only.",
+  criteria: {
+    true: "Any plausible hardware, product, or test-system footprint.",
+    false: "Clearly services, distribution, software, or unrelated only.",
+  },
+} as const;
+
 export const JEV_OVERSIZE_QUESTION = {
   type: "noul",
   instructions:
@@ -2227,7 +2240,7 @@ export async function runLadderSignal(
     const r1 = await callJev(
       apiKey,
       state,
-      { manufacturer: JEV_MANUFACTURER_QUESTION },
+      { manufacturer: JEV_LADDER_R1_QUESTION },
       { model },
     );
     costs.push(r1.costUsd);
