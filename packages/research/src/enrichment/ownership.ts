@@ -34,11 +34,7 @@ import {
  */
 
 export type AcquisitionStatus =
-  | "acquired"
-  | "pe_owned"
-  | "public_parent"
-  | "dead"
-  | "unknown";
+  "acquired" | "pe_owned" | "public_parent" | "dead" | "unknown";
 
 export interface AcquisitionHistoryResult {
   readonly status: AcquisitionStatus;
@@ -59,7 +55,7 @@ const MAX_SNIPPETS = 3;
 const LEGAL_SUFFIX_RE =
   /\s+(llc|inc|corp|corporation|incorporated|co|company|ltd|limited|lp|llp|pllc|plc|gmbh|pa|pc)\.?$/i;
 
-const ACQUIRE_RE = /acquir/i;
+const ACQUIRE_RE = /acquir|acquisit/i;
 const PE_SIGNAL_RE =
   /private[\s-]?equity|portfolio company|buyout|backed by|investment firm|venture capital/i;
 const PUBLIC_SIGNAL_RE =
@@ -75,13 +71,10 @@ const OWNER_PATTERNS: RegExp[] = [
   new RegExp(`${OWNER_PHRASE}\\s+(?:has|have)\\s+acquired\\b`, "i"),
   new RegExp(`${OWNER_PHRASE}\\s+acquires\\b`, "i"),
   new RegExp(
-    `${OWNER_PHRASE}\\s+(?:has\\s+|have\\s+)?(?:completed(?:\\s+its)?\\s+|announced(?:\\s+its)?\\s+|closed(?:\\s+its)?\\s+)?(?:the\\s+)?acquisition\\b`,
+    `${OWNER_PHRASE}\\s+(?:has\\s+|have\\s+)?(?:complet(?:e|es|ed)(?:\\s+its)?\\s+|announc(?:e|es|ed)(?:\\s+its)?\\s+|clos(?:e|es|ed)(?:\\s+its)?\\s+)?(?:the\\s+)?acquisition\\b`,
     "i",
   ),
-  new RegExp(
-    `(?:subsidiary|division|unit)\\s+of\\s+${OWNER_PHRASE}`,
-    "i",
-  ),
+  new RegExp(`(?:subsidiary|division|unit)\\s+of\\s+${OWNER_PHRASE}`, "i"),
   new RegExp(`wholly[-\\s]?owned\\s+by\\s+${OWNER_PHRASE}`, "i"),
 ];
 
@@ -90,7 +83,12 @@ function escapeRegExp(text: string): string {
 }
 
 function cleanCompanyName(name: string): string {
-  return name.replace(/\s+/g, " ").trim().toLowerCase().replace(LEGAL_SUFFIX_RE, "").trim();
+  return name
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase()
+    .replace(LEGAL_SUFFIX_RE, "")
+    .trim();
 }
 
 function identityTokens(name: string): string[] {
@@ -127,14 +125,19 @@ function passesIdentityGate(
   const tokens = identityTokens(companyName);
   if (
     tokens.length > 0 &&
-    tokens.every((token) => new RegExp(`\\b${escapeRegExp(token)}\\b`).test(hay))
+    tokens.every((token) =>
+      new RegExp(`\\b${escapeRegExp(token)}\\b`).test(hay),
+    )
   ) {
     return true;
   }
   if (domain !== undefined) {
     const host = hostOf(url);
     const normalizedDomain = domain.toLowerCase().replace(/^www\./, "");
-    if (host !== null && (host === normalizedDomain || host.endsWith(`.${normalizedDomain}`))) {
+    if (
+      host !== null &&
+      (host === normalizedDomain || host.endsWith(`.${normalizedDomain}`))
+    ) {
       return true;
     }
   }
@@ -142,7 +145,11 @@ function passesIdentityGate(
 }
 
 function cleanOwner(raw: string, companyName: string): string | null {
-  const owner = raw.replace(/[.,;:'"]+$/g, "").trim().replace(/\s+/g, " ");
+  const owner = raw
+    .replace(/[.,;:'"]+$/g, "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/\s+(completes?|announces?|closes?|has|have)$/i, "");
   if (owner.length === 0 || owner.length > OWNER_MAX_CHARS) return null;
   if (owner.toLowerCase() === cleanCompanyName(companyName)) return null;
   if (/^(the|a|an|its|their|this|that)\b/i.test(owner)) return null;
@@ -155,7 +162,10 @@ interface SentenceVote {
   sentence: string;
 }
 
-function classifySentence(sentence: string, companyName: string): SentenceVote | null {
+export function classifySentence(
+  sentence: string,
+  companyName: string,
+): SentenceVote | null {
   const dead = DEAD_SIGNAL_RE.test(sentence);
   const acquired = ACQUIRE_RE.test(sentence);
   const hasOwnerSignal =
@@ -173,8 +183,10 @@ function classifySentence(sentence: string, companyName: string): SentenceVote |
     }
   }
   if (owner === null) return null;
-  if (PE_SIGNAL_RE.test(sentence)) return { status: "pe_owned", owner, sentence };
-  if (PUBLIC_SIGNAL_RE.test(sentence)) return { status: "public_parent", owner, sentence };
+  if (PE_SIGNAL_RE.test(sentence))
+    return { status: "pe_owned", owner, sentence };
+  if (PUBLIC_SIGNAL_RE.test(sentence))
+    return { status: "public_parent", owner, sentence };
   return { status: "acquired", owner, sentence };
 }
 
@@ -221,7 +233,9 @@ export async function checkAcquisitionHistory(
     const client = new ExaSearchClient({ apiKey });
     // Exa search costs ~$0.005/call; the client response carries no usage
     // actuals, so record the conservative estimate.
-    const results = await client.search(`"${name}" acquired by OR acquisition OR acquired`);
+    const results = await client.search(
+      `"${name}" acquired by OR acquisition OR acquired`,
+    );
     recordExaSpendUsd(EXA_SEARCH_COST_USD);
     const costUsd = EXA_SEARCH_COST_USD;
 
@@ -229,7 +243,14 @@ export async function checkAcquisitionHistory(
     let supportingUrl: string | null = null;
     for (const result of results.slice(0, MAX_SNIPPETS)) {
       const snippet = `${result.title}. ${result.text}`;
-      if (!passesIdentityGate(snippet, name, domain?.trim() || undefined, result.url)) {
+      if (
+        !passesIdentityGate(
+          snippet,
+          name,
+          domain?.trim() || undefined,
+          result.url,
+        )
+      ) {
         continue;
       }
       const sentences = snippet.split(/(?<=[.!?])\s+/);
@@ -249,14 +270,19 @@ export async function checkAcquisitionHistory(
     const statuses = new Set(votes.map((vote) => vote.status));
     if (statuses.size !== 1) return { ...unknown, costUsd };
     const owners = new Set(
-      votes.map((vote) => vote.owner).filter((owner): owner is string => owner !== null),
+      votes
+        .map((vote) => vote.owner)
+        .filter((owner): owner is string => owner !== null),
     );
     // Two different named owners (name collision across snippets) → unknown.
-    if (status !== "dead" && (owners.size !== 1)) return { ...unknown, costUsd };
-    const owner = status === "dead" ? null : [...owners][0] ?? null;
+    if (status !== "dead" && owners.size !== 1) return { ...unknown, costUsd };
+    const owner = status === "dead" ? null : ([...owners][0] ?? null);
     if (status !== "dead" && owner === null) return { ...unknown, costUsd };
 
-    const excerpt = truncate(votes.map((vote) => vote.sentence).join(" "), EXCERPT_MAX_CHARS);
+    const excerpt = truncate(
+      votes.map((vote) => vote.sentence).join(" "),
+      EXCERPT_MAX_CHARS,
+    );
     const year = extractYear(votes.map((vote) => vote.sentence).join(" "));
     const result: AcquisitionHistoryResult = {
       status,
@@ -309,7 +335,11 @@ async function persistAffirmativeFinding(
   result: AcquisitionHistoryResult,
 ): Promise<void> {
   try {
-    if (result.status === "unknown" || result.sourceUrl === null || result.excerpt === null) {
+    if (
+      result.status === "unknown" ||
+      result.sourceUrl === null ||
+      result.excerpt === null
+    ) {
       return;
     }
     const db = getDatabase();
@@ -325,7 +355,11 @@ async function persistAffirmativeFinding(
     `);
     const companyId = companyRows.rows[0]?.id ?? null;
 
-    if (companyId !== null && result.owner !== null && result.status !== "dead") {
+    if (
+      companyId !== null &&
+      result.owner !== null &&
+      result.status !== "dead"
+    ) {
       const sourceRows = await db.execute<{ id: string }>(sql`
         INSERT INTO data_sources (name, source_type, publisher, access, ingestion)
         VALUES ('Exa', 'news', 'Exa', 'public', 'manual')
@@ -438,7 +472,10 @@ export async function selectOwnershipCheckCandidates(
 ): Promise<OwnershipCheckCandidate[]> {
   const capped = Math.max(0, Math.min(limit, OWNERSHIP_CHECK_TICK_CAP));
   if (capped === 0) return [];
-  const result = await db.execute<{ company_name: string; domain: string | null }>(sql`
+  const result = await db.execute<{
+    company_name: string;
+    domain: string | null;
+  }>(sql`
     SELECT company_name, domain
     FROM unified_targets
     WHERE tier = 'high_interest'
@@ -446,7 +483,10 @@ export async function selectOwnershipCheckCandidates(
     ORDER BY updated_at ASC NULLS FIRST
     LIMIT ${capped}
   `);
-  return result.rows.map((row) => ({ companyName: row.company_name, domain: row.domain }));
+  return result.rows.map((row) => ({
+    companyName: row.company_name,
+    domain: row.domain,
+  }));
 }
 
 /**
@@ -461,13 +501,22 @@ export async function runOwnershipChecks(
   try {
     const apiKey = opts.exaApiKey ?? process.env["EXA_API_KEY"] ?? "";
     if (apiKey.trim().length === 0) {
-      return { checked: 0, affirmed: 0, skipped: "missing_exa_api_key", costUsd: 0 };
+      return {
+        checked: 0,
+        affirmed: 0,
+        skipped: "missing_exa_api_key",
+        costUsd: 0,
+      };
     }
-    const candidates = await selectOwnershipCheckCandidates(db, opts.limit ?? OWNERSHIP_CHECK_TICK_CAP);
+    const candidates = await selectOwnershipCheckCandidates(
+      db,
+      opts.limit ?? OWNERSHIP_CHECK_TICK_CAP,
+    );
     let checked = 0;
     let affirmed = 0;
     let costUsd = 0;
-    let skipped: string | null = candidates.length === 0 ? "no_candidates" : null;
+    let skipped: string | null =
+      candidates.length === 0 ? "no_candidates" : null;
     for (const candidate of candidates) {
       if (!canSpendExa(EXA_SEARCH_COST_USD)) {
         skipped = "budget_exhausted";
