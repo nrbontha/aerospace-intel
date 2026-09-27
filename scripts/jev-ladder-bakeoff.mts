@@ -31,7 +31,7 @@ interface Variant {
   vetoStatuses: string[];
   r2Mode: "choice" | "strict-product" | "lenient";
   r3Mode?: "default" | "scale";
-  r4Mode?: "default" | "sector-sharp";
+  r4Mode?: "default" | "sector-sharp" | "platform-sharp";
   order: "ladder" | "disposition-first" | "screen-then-disposition" | "vet-then-disposition";
   vetoFirst: boolean;
   enriched: boolean;
@@ -85,6 +85,16 @@ const r4Questions = {
       reject:
         (JEV_DISPOSITION_QUESTION.criteria as Record<string, string>).reject +
         " Manufacturers whose end markets are primarily non-aerospace (emergency vehicles, automotive, marine, industrial) are reject even when they make physical products.",
+    },
+  },
+  "platform-sharp": {
+    type: "choice",
+    instructions: JEV_DISPOSITION_QUESTION.instructions as string,
+    criteria: {
+      ...(JEV_DISPOSITION_QUESTION.criteria as Record<string, string>),
+      reject:
+        (JEV_DISPOSITION_QUESTION.criteria as Record<string, string>).reject +
+        " Manufacturers whose end markets are primarily non-aerospace (emergency vehicles, automotive, marine, industrial) are reject even when they make physical products. Companies developing whole aircraft or unmanned platform systems as their product are platform OEMs, not component suppliers, and are reject.",
     },
   },
 } as const;
