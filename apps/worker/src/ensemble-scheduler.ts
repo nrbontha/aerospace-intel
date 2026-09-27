@@ -1,13 +1,13 @@
 import { z } from "zod";
 
-import { populateUnifiedTargets, promoteEnsembleLeads } from "@asi/database";
 import { getDatabase } from "@asi/database/client";
 import {
   dailyBudgetCapUsd,
   getDailySpendUsd,
   OpenRouterClient,
-  runEnsembleBatch,
 } from "@asi/research";
+
+import { FUNNEL_STAGES } from "./funnel-stages.js";
 
 import type { QueueLogger } from "./queue.js";
 
@@ -15,26 +15,37 @@ import type { QueueLogger } from "./queue.js";
  * Autonomous ensemble screening loop for Railway.
  *
  * Every tick: probe the ensemble model (skip while unhealthy) -> enforce the
- * daily spend cap -> run the ensemble batch -> refresh unified targets ->
- * promote high-priority results to leads. Every step is individually guarded;
- * this module never throws so the worker process always survives.
+ * daily spend cap -> JEv sweep of the full queue (no Muse calls) ->
+ * independent Muse verification of flagged items + audit sample -> Exa
+ * ownership checks (HP names lacking ownership evidence, cap 10/tick) ->
+ * Exa website enrichment (unvetted HP/P1 names without website evidence,
+ * cap 10/tick) -> refresh unified targets -> promote high-priority results
+ * to leads. Every step is individually guarded; this module never throws so
+ * the worker process always survives.
  *
- * Dependency note: `runEnsembleBatch` (Agent RunnerLib,
+ * Dependency note: `runJevSweep` / `runMuseVerification` (Agent RunnerLib,
  * packages/research/src/faa-ensemble/runner.ts) and
  * `populateUnifiedTargets` / `promoteEnsembleLeads` (Agent PopulateLib,
- * packages/database/src/unified-targets/) are imported from the package
- * roots; those agents own re-exporting them there.
+ * packages/database/src/unified-targets/) are consumed through the
+ * FUNNEL_STAGES registry in ./funnel-stages.js; those agents own
+ * re-exporting them from the package roots.
  */
 
 export const ENSEMBLE_SCHEDULE_ENV = "ENSEMBLE_SCHEDULE_MINUTES";
 export const ENSEMBLE_BATCH_LIMIT_ENV = "ENSEMBLE_BATCH_LIMIT";
 export const ENSEMBLE_CONCURRENCY_ENV = "ENSEMBLE_CONCURRENCY";
 export const ENSEMBLE_DELAY_MS_ENV = "ENSEMBLE_DELAY_MS";
+export const JEV_SWEEP_LIMIT_ENV = "JEV_SWEEP_LIMIT";
+export const JEV_SWEEP_CONCURRENCY_ENV = "JEV_SWEEP_CONCURRENCY";
+export const VERIFY_BATCH_LIMIT_ENV = "VERIFY_BATCH_LIMIT";
 
 const DEFAULT_SCHEDULE_MINUTES = 30;
 const DEFAULT_BATCH_LIMIT = 0;
 const DEFAULT_CONCURRENCY = 2;
 const DEFAULT_DELAY_MS = 1_000;
+const DEFAULT_JEV_SWEEP_LIMIT = 0;
+const DEFAULT_JEV_SWEEP_CONCURRENCY = 8;
+const DEFAULT_VERIFY_BATCH_LIMIT = 120;
 
 /** While unhealthy, skip runs for this long (prevents hollow-row eras). */
 const UNHEALTHY_CACHE_MS = 15 * 60 * 1_000;
@@ -56,6 +67,9 @@ export interface EnsembleSchedulerOptions {
   batchLimit?: number;
   concurrency?: number;
   delayMs?: number;
+  sweepLimit?: number;
+  sweepConcurrency?: number;
+  verifyLimit?: number;
 }
 
 export interface EnsembleSchedulerHandle {
@@ -79,6 +93,9 @@ export function resolveSchedulerConfig(options: EnsembleSchedulerOptions): {
   batchLimit: number;
   concurrency: number;
   delayMs: number;
+  sweepLimit: number;
+  sweepConcurrency: number;
+  verifyLimit: number;
 } {
   return {
     scheduleMinutes:
@@ -102,12 +119,58 @@ export function resolveSchedulerConfig(options: EnsembleSchedulerOptions): {
     delayMs:
       options.delayMs ??
       readNonNegativeInt(process.env[ENSEMBLE_DELAY_MS_ENV], DEFAULT_DELAY_MS),
+    sweepLimit:
+      options.sweepLimit ??
+      readNonNegativeInt(
+        process.env[JEV_SWEEP_LIMIT_ENV],
+        DEFAULT_JEV_SWEEP_LIMIT,
+      ),
+    sweepConcurrency:
+      options.sweepConcurrency ??
+      readPositiveInt(
+        process.env[JEV_SWEEP_CONCURRENCY_ENV],
+        DEFAULT_JEV_SWEEP_CONCURRENCY,
+      ),
+    verifyLimit:
+      options.verifyLimit ??
+      readNonNegativeInt(
+        process.env[VERIFY_BATCH_LIMIT_ENV],
+        DEFAULT_VERIFY_BATCH_LIMIT,
+      ),
   };
 }
 
 function toLogReason(error: unknown): string {
   return error instanceof Error ? error.message : "unknown";
 }
+
+/**
+ * Legacy per-step event names, kept alongside the unified
+ * `ensemble.scheduler_stage_completed` / `ensemble.scheduler_stage_failed`
+ * events so existing dashboards keep working.
+ */
+const LEGACY_STAGE_COMPLETED_EVENTS: Record<string, string> = {
+  "jev-sweep": "ensemble.scheduler_jev_sweep_completed",
+  "muse-verify": "ensemble.scheduler_verification_completed",
+  ownership: "ensemble.scheduler_ownership_completed",
+  "website-enrich": "ensemble.scheduler_enrichment_completed",
+  "unify-refresh": "ensemble.scheduler_unified_refresh_completed",
+  promote: "ensemble.scheduler_promotion_completed",
+};
+
+const LEGACY_STAGE_FAILED_EVENTS: Record<string, string> = {
+  "jev-sweep": "ensemble.scheduler_jev_sweep_failed",
+  "muse-verify": "ensemble.scheduler_verification_failed",
+  ownership: "ensemble.scheduler_ownership_failed",
+  "website-enrich": "ensemble.scheduler_enrichment_failed",
+  "unify-refresh": "ensemble.scheduler_unified_refresh_failed",
+  promote: "ensemble.scheduler_promotion_failed",
+};
+
+const LEGACY_STAGE_BUDGET_SKIPPED_EVENTS: Record<string, string> = {
+  ownership: "ensemble.scheduler_ownership_budget_skipped",
+  "website-enrich": "ensemble.scheduler_enrichment_budget_skipped",
+};
 
 export function startEnsembleScheduler(
   options: EnsembleSchedulerOptions,
@@ -173,47 +236,42 @@ export function startEnsembleScheduler(
         return;
       }
 
-      // 3. Ensemble screening batch.
-      try {
-        const result = await runEnsembleBatch({
-          limit: config.batchLimit,
-          concurrency: config.concurrency,
-          delayMs: config.delayMs,
-        });
-        logger("info", "ensemble.scheduler_batch_completed", {
-          signals: result.signals,
-          metrics: result.metrics,
-        });
-      } catch (error) {
-        logger("error", "ensemble.scheduler_batch_failed", {
-          reason: toLogReason(error),
-        });
-      }
-
-      // 4. Nightly-style unified refresh (runs every tick; populate is
-      // idempotent per-source upsert, so this is safe).
-      try {
-        const refreshed = await populateUnifiedTargets(getDatabase());
-        logger("info", "ensemble.scheduler_unified_refresh_completed", {
-          sources: refreshed,
-        });
-      } catch (error) {
-        logger("error", "ensemble.scheduler_unified_refresh_failed", {
-          reason: toLogReason(error),
-        });
-      }
-
-      // 5. High-priority to lead promotion.
-      try {
-        const promotion = await promoteEnsembleLeads(getDatabase());
-        logger("info", "ensemble.scheduler_promotion_completed", {
-          promoted: promotion.promoted,
-          skipped: promotion.skipped,
-        });
-      } catch (error) {
-        logger("error", "ensemble.scheduler_promotion_failed", {
-          reason: toLogReason(error),
-        });
+      // 3. Funnel stages in registry order (see ./funnel-stages.js). Each
+      // stage is individually guarded: one throwing never blocks the rest,
+      // and this tick never throws so the worker process always survives.
+      for (const stage of FUNNEL_STAGES) {
+        try {
+          const summary = await stage.run({ db: getDatabase(), config });
+          const { done, note, budgetSkipped, ...fields } = summary;
+          logger("info", "ensemble.scheduler_stage_completed", {
+            stage: stage.key,
+            done,
+            note,
+            ...fields,
+          });
+          if (budgetSkipped) {
+            const skippedEvent = LEGACY_STAGE_BUDGET_SKIPPED_EVENTS[stage.key];
+            if (skippedEvent !== undefined) {
+              logger("warn", skippedEvent, { spendUsd: summary.spendUsd });
+            }
+            continue;
+          }
+          const completedEvent = LEGACY_STAGE_COMPLETED_EVENTS[stage.key];
+          if (completedEvent !== undefined) {
+            logger("info", completedEvent, { ...fields });
+          }
+        } catch (error) {
+          logger("error", "ensemble.scheduler_stage_failed", {
+            stage: stage.key,
+            reason: toLogReason(error),
+          });
+          const failedEvent = LEGACY_STAGE_FAILED_EVENTS[stage.key];
+          if (failedEvent !== undefined) {
+            logger("error", failedEvent, {
+              reason: toLogReason(error),
+            });
+          }
+        }
       }
     } catch (error) {
       logger("error", "ensemble.scheduler_tick_failed", {
