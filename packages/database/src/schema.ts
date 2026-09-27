@@ -2418,6 +2418,7 @@ export const faaEnsembleEvaluations = pgTable(
     error: text("error"),
     retryCount: integer("retry_count").notNull().default(0),
     createdAt: ct(),
+    updatedAt: ut(),
   },
   (t) => [
     index("faa_ensemble_evaluations_signal_idx").on(t.signalId),

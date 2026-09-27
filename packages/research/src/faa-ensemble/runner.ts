@@ -655,7 +655,8 @@ async function persistEvaluation(
       reason = EXCLUDED.reason,
       tokens = EXCLUDED.tokens,
       cost_usd = EXCLUDED.cost_usd,
-      error = EXCLUDED.error
+      error = EXCLUDED.error,
+      updated_at = now()
   `);
 }
 
