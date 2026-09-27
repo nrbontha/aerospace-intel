@@ -16,7 +16,10 @@ import {
   createRefreshResearchHandler,
   createSourceResearchHandler,
 } from "./handlers/index.js";
-import { startCampaignSweep, type CampaignSweepHandle } from "./campaign-sweep.js";
+import {
+  startCampaignSweep,
+  type CampaignSweepHandle,
+} from "./campaign-sweep.js";
 import {
   startEnsembleScheduler,
   type EnsembleSchedulerHandle,
@@ -273,7 +276,8 @@ export async function startWorker(): Promise<WorkerRuntime> {
       env.DATABASE_URL !== undefined
     ) {
       const seeded = await ensureDefaultAgents(getDatabase());
-      if (seeded > 0) log("info", "supervisor.registry_seeded", { count: seeded });
+      if (seeded > 0)
+        log("info", "supervisor.registry_seeded", { count: seeded });
       supervisor = startSupervisor({
         handlers: createV1TickHandlerRegistry(),
         logger: log,
@@ -295,9 +299,10 @@ export async function startWorker(): Promise<WorkerRuntime> {
     });
     log("info", "campaign.sweep_started", {});
 
-    // Autonomous sourcing loop: ensemble screening + unified refresh +
-    // high-priority promotion on a fixed tick. Never throws: the scheduler
-    // logs and skips per step, and stays off without an API key.
+    // Autonomous sourcing loops: a fast JEv sweep+ladder loop (60s) plus the
+    // slow verify/enrich/unify/promote loop (30min), both in one scheduler.
+    // Never throws: the scheduler logs and skips per step, the loops share
+    // nothing but DB state, and both stay off without an API key.
     if (env.OPENROUTER_API_KEY !== undefined) {
       ensembleScheduler = startEnsembleScheduler({
         logger: log,
