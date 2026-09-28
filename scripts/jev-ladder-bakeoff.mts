@@ -352,9 +352,56 @@ for (let rep = 0; rep < repeats; rep++) {
     }
   }
 }
+const golden: {
+  name: string;
+  domain: string;
+  ownership: string;
+  revenue: string;
+  makes: string[];
+  modelsSample: string[];
+  productEvidence: string[];
+  expected: string;
+}[] = JSON.parse(
+  readFileSync(new URL("./jev-bakeoff-golden.json", import.meta.url), "utf8"),
+);
+let goldenMiss = 0;
+for (let rep = 0; rep < repeats; rep++) {
+  for (const g of golden) {
+    const { final, exit, cost } = await runVariant(
+      g.name,
+      g.domain,
+      g.ownership,
+      null,
+      {
+        makes: g.makes,
+        modelsSample: g.modelsSample,
+        excerpts: g.productEvidence.join(" "),
+        websiteOffering:
+          g.productEvidence.length > 0 ? "products_menu" : "unknown",
+      },
+    );
+    totalCost += cost;
+    let bad = false;
+    if (g.expected === "high_priority" && final !== "high_priority")
+      bad = true;
+    else if (g.expected === "research" && final === "reject") bad = true;
+    else if (g.expected === "reject" && final !== "reject") bad = true;
+    if (bad) {
+      goldenMiss += 1;
+      console.log(
+        `GOLDEN-MISS rep=${rep} name=${g.name} expected=${g.expected} final=${final} exit=${exit}`,
+      );
+    } else if ((variant as { goldenLoud?: boolean }).goldenLoud === true) {
+      console.log(
+        `GOLDEN-OK rep=${rep} name=${g.name} expected=${g.expected} final=${final} exit=${exit}`,
+      );
+    }
+  }
+}
 console.log(`EXITS ${JSON.stringify(exitCounts)}`);
 console.log(`COST totalUsd=${totalCost.toFixed(4)}`);
 console.log(`METRIC ladder_miss=${miss}`);
+console.log(`METRIC golden_miss=${goldenMiss}`);
 console.log(
   `ASI cases=${INVESTOR_VERDICTS_V1.length * repeats} cost_usd=${totalCost.toFixed(4)}`,
 );
