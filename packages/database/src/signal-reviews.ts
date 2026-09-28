@@ -1,0 +1,846 @@
+import { createHash } from "node:crypto";
+
+import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+
+import type { Database } from "./client.js";
+import {
+  signalReviewState,
+  sourceSignalEvidenceLinks,
+  sourceSignals,
+  type NewSignalReviewState,
+  type SignalReviewPhase,
+  type SignalReviewState,
+  type SourceSignalEvidenceLink,
+} from "./schema.js";
+import {
+  matchesExpectedReviewInputContract,
+  type ExpectedFaaReviewInputContract,
+} from "./unified-targets/records.js";
+
+export type SignalReviewJson = Record<string, unknown>;
+export type SignalReviewTransaction = Parameters<
+  Parameters<Database["transaction"]>[0]
+>[0];
+export type SignalReviewExecutor = Database | SignalReviewTransaction;
+type SignalReviewStateRow = typeof signalReviewState.$inferSelect;
+
+export type SignalReviewClaim = Omit<
+  SignalReviewState,
+  "leaseToken" | "leaseExpiresAt"
+> & {
+  leaseToken: string;
+  leaseExpiresAt: Date;
+};
+
+export interface ClaimSignalReviewsOptions {
+  phase: SignalReviewPhase;
+  limit: number;
+  leaseSeconds?: number;
+}
+
+export interface BootstrapSignalReviewStatesOptions {
+  limit?: number;
+}
+
+export interface ReconcileChangedSignalReviewsOptions {
+  limit?: number;
+}
+
+export interface FailSignalReviewOptions {
+  /** Dependency/configuration/budget deferrals do not consume a candidate attempt. */
+  deferred?: boolean;
+  retryAfterMs?: number;
+}
+
+export interface CompleteSignalResearchInput {
+  researchEvidence: SignalReviewJson;
+  outcome: SignalReviewJson;
+  researchDueAt: Date | null;
+  expectedReviewInputContract: ExpectedFaaReviewInputContract;
+}
+
+export interface UpdateClaimedSignalReviewInput {
+  inputHash: string;
+  inputManifest: SignalReviewJson;
+}
+
+export interface SignalReviewTransition {
+  phase: SignalReviewPhase;
+  inputHash?: string | null;
+  inputManifest?: SignalReviewJson | null;
+  researchEvidence?: SignalReviewJson;
+  jevEvaluationId?: string | null;
+  nextAttemptAt?: Date;
+  researchDueAt?: Date | null;
+  lastResearchOutcome?: SignalReviewJson | null;
+  inputsCheckedAt?: Date | null;
+}
+
+export type SignalReviewCommitResult<T> =
+  { accepted: true; value: T; state: SignalReviewState } | { accepted: false };
+
+export type SourceSignalEvidenceStage =
+  "domain" | "website" | "ownership" | "size";
+
+export interface LinkSourceSignalEvidenceInput {
+  signalId: string;
+  evidenceId: string;
+  stage: SourceSignalEvidenceStage;
+  researchRevision: string;
+}
+
+const DEFAULT_LEASE_SECONDS = 15 * 60;
+const MAX_LEASE_SECONDS = 60 * 60;
+const DEFAULT_BOOTSTRAP_LIMIT = 250;
+const MAX_BOOTSTRAP_LIMIT = 1_000;
+const DEFAULT_DEFERRED_RETRY_MS = 15 * 60_000;
+const FAILURE_BACKOFF_BASE_MS = 60_000;
+const DEFAULT_RECONCILE_LIMIT = 250;
+const MAX_RECONCILE_LIMIT = 1_000;
+const FAILURE_BACKOFF_CAP_MS = 6 * 60 * 60_000;
+const MAX_TIMESTAMP = new Date("9999-12-31T23:59:59.999Z");
+const VOLATILE_HASH_KEYS: Readonly<Record<string, true>> = {
+  evidenceId: true,
+  documentId: true,
+  sourceDocumentId: true,
+  linkId: true,
+  databaseId: true,
+  retrievedAt: true,
+  fetchedAt: true,
+  checkedAt: true,
+  recordedAt: true,
+  createdAt: true,
+  updatedAt: true,
+  lastSeenAt: true,
+  firstSeenAt: true,
+  evidence_id: true,
+  document_id: true,
+  source_document_id: true,
+  retrieved_at: true,
+  fetched_at: true,
+  checked_at: true,
+  created_at: true,
+  updated_at: true,
+  proofEvidenceIds: true,
+  namedProductEvidenceIds: true,
+  supportEvidenceIds: true,
+};
+
+class SignalReviewFenceRejected extends Error {
+  constructor() {
+    super("signal review claim is stale or expired");
+    this.name = "SignalReviewFenceRejected";
+  }
+}
+
+function asState(row: SignalReviewStateRow): SignalReviewState {
+  return row as SignalReviewState;
+}
+
+function asClaim(row: SignalReviewStateRow): SignalReviewClaim {
+  if (row.leaseToken === null || row.leaseExpiresAt === null) {
+    throw new Error(
+      `signal review ${row.signalId} was returned without a lease`,
+    );
+  }
+  return row as SignalReviewClaim;
+}
+
+function requireJsonObject(value: SignalReviewJson, name: string): void {
+  if (value === null || Array.isArray(value)) {
+    throw new TypeError(`${name} must be a JSON object`);
+  }
+}
+
+function hasOwn<T extends object>(value: T, key: PropertyKey): boolean {
+  return Object.prototype.hasOwnProperty.call(value, key);
+}
+
+function canonicalHashValue(value: unknown, key?: string): unknown {
+  if (key !== undefined && VOLATILE_HASH_KEYS[key] === true) return undefined;
+  if (value === undefined) return undefined;
+  if (
+    value === null ||
+    typeof value === "string" ||
+    typeof value === "boolean"
+  ) {
+    return value;
+  }
+  if (typeof value === "number") {
+    if (!Number.isFinite(value))
+      throw new TypeError("review input must contain finite numbers");
+    return Object.is(value, -0) ? 0 : value;
+  }
+  if (value instanceof Date) return value.toISOString();
+  if (Array.isArray(value)) {
+    const values = value
+      .map((entry) => canonicalHashValue(entry))
+      .filter((entry) => entry !== undefined)
+      .map((entry) => {
+        const serialized = JSON.stringify(entry);
+        if (serialized === undefined) {
+          throw new TypeError("review input contains a non-JSON array value");
+        }
+        return serialized;
+      });
+    return [...new Set(values)]
+      .sort()
+      .map((entry) => JSON.parse(entry) as unknown);
+  }
+  if (typeof value === "object") {
+    const normalized: Record<string, unknown> = {};
+    const artifactRecord = value as Record<string, unknown>;
+    const persistenceArtifact =
+      "evidenceId" in artifactRecord ||
+      "documentId" in artifactRecord ||
+      "sourceDocumentId" in artifactRecord ||
+      "retrievedAt" in artifactRecord ||
+      ("url" in artifactRecord &&
+        ("quote" in artifactRecord ||
+          "contentHash" in artifactRecord ||
+          "contentSha256" in artifactRecord));
+    for (const [entryKey, entryValue] of Object.entries(value).sort(
+      ([a], [b]) => a.localeCompare(b),
+    )) {
+      if (entryKey === "id" && persistenceArtifact) continue;
+      const canonical = canonicalHashValue(entryValue, entryKey);
+      if (canonical !== undefined) normalized[entryKey] = canonical;
+    }
+    return normalized;
+  }
+  throw new TypeError(
+    `review input contains unsupported ${typeof value} value`,
+  );
+}
+
+/**
+ * Hash substantive review input deterministically. Object key order, set-like
+ * array order, retrieval timestamps, and persistence-only IDs do not affect the
+ * result. Callers must still omit other operational metadata from the input.
+ */
+export function hashSignalReviewInput(value: unknown): string {
+  const canonical = JSON.stringify(canonicalHashValue(value));
+  if (canonical === undefined) {
+    throw new TypeError("review input must have a JSON value");
+  }
+  return createHash("sha256").update(canonical).digest("hex");
+}
+
+/**
+ * Seed a bounded FIFO slice of raw signals without changing ingestion status or
+ * treating legacy evaluation rows as current review proof.
+ */
+export async function bootstrapSignalReviewStates(
+  db: Database,
+  options: BootstrapSignalReviewStatesOptions = {},
+): Promise<number> {
+  if (options.limit !== undefined && !Number.isFinite(options.limit)) {
+    throw new TypeError("bootstrap limit must be finite");
+  }
+  const limit = Math.min(
+    Math.max(1, Math.trunc(options.limit ?? DEFAULT_BOOTSTRAP_LIMIT)),
+    MAX_BOOTSTRAP_LIMIT,
+  );
+  await reconcileChangedSignalReviews(db, { limit });
+  const inserted = await db.execute<{ signal_id: string }>(sql`
+    INSERT INTO signal_review_state (
+      signal_id,
+      source_revision,
+      phase,
+      next_attempt_at
+    )
+    SELECT candidate.id,
+           candidate.review_revision,
+           'research',
+           candidate.created_at - CASE
+             WHEN candidate.prior_jev_hp THEN interval '200 years'
+             WHEN candidate.faa_priority THEN interval '100 years'
+             ELSE interval '0 years'
+           END
+    FROM (
+      SELECT ss.id,
+             ss.review_revision,
+             ss.created_at,
+             COALESCE((
+               SELECT evaluation.decision = 'high_priority'
+               FROM faa_ensemble_evaluations evaluation
+               WHERE evaluation.signal_id = ss.id
+                 AND evaluation.prompt_version LIKE 'jev-ladder-%'
+                 AND evaluation.decision IS NOT NULL
+                 AND evaluation.error IS NULL
+               ORDER BY evaluation.updated_at DESC,
+                        evaluation.created_at DESC,
+                        evaluation.id DESC
+               LIMIT 1
+             ), false) AS prior_jev_hp,
+             (ss.source_key IN (
+               'faa_pma_database',
+               'faa_drs_pma',
+               'faa_drs_pma_search'
+             )) AS faa_priority
+      FROM source_signals ss
+      LEFT JOIN signal_review_state srs ON srs.signal_id = ss.id
+      WHERE srs.signal_id IS NULL
+        AND (
+          ss.status IN ('queued_qualification', 'qualifying', 'qualified')
+          OR (
+            ss.status IN ('rejected', 'quarantined')
+            AND ss.source_key IN (
+              'faa_pma_database',
+              'faa_drs_pma',
+              'faa_drs_pma_search'
+            )
+            AND (
+              ss.qualification->>'reason' IN (
+                'qualification_error',
+                'official_identity_not_verified',
+                'identity_not_verified'
+              )
+              OR ss.qualification->>'error' IN (
+                'qualification_error',
+                'official_identity_not_verified',
+                'identity_not_verified'
+              )
+              OR ss.qualification->'reasons' ?| ARRAY[
+                'qualification_error',
+                'official_identity_not_verified',
+                'identity_not_verified'
+              ]
+            )
+            AND NOT COALESCE(
+              ss.qualification ?| ARRAY[
+                'humanDecision',
+                'humanOverride',
+                'reviewedByUserId',
+                'reviewedBy',
+                'reviewedAt',
+                'decidedByUserId'
+              ]
+              OR ss.qualification->>'decisionSource' = 'human'
+              OR ss.qualification->>'reviewSource' = 'human',
+              false
+            )
+          )
+        )
+      ORDER BY prior_jev_hp DESC,
+               faa_priority DESC,
+               ss.created_at ASC,
+               ss.id ASC
+      LIMIT ${limit}
+    ) candidate
+    ON CONFLICT (signal_id) DO NOTHING
+    RETURNING signal_id
+  `);
+  return inserted.rows.length;
+}
+
+/** Idempotently initialize one signal without resetting any existing review. */
+export async function ensureSignalReviewState(
+  db: Database,
+  signalId: string,
+  phase: SignalReviewPhase = "research",
+): Promise<SignalReviewState> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`
+      INSERT INTO signal_review_state (signal_id, source_revision, phase)
+      SELECT id, review_revision, ${phase}
+      FROM source_signals
+      WHERE id = ${signalId}
+      ON CONFLICT (signal_id) DO NOTHING
+    `);
+    const existing = await tx
+      .select()
+      .from(signalReviewState)
+      .where(eq(signalReviewState.signalId, signalId))
+      .limit(1);
+    if (existing[0] === undefined) {
+      throw new Error(`source signal ${signalId} does not exist`);
+    }
+    return asState(existing[0]);
+  });
+}
+
+/**
+ * Requeue a bounded slice of reviews whose material source revision changed.
+ * State rows are locked before their source rows are read, preserving the
+ * state-then-source lock order used by publication and promotion.
+ */
+export async function reconcileChangedSignalReviews(
+  db: Database,
+  options: ReconcileChangedSignalReviewsOptions = {},
+): Promise<number> {
+  if (options.limit !== undefined && !Number.isFinite(options.limit)) {
+    throw new TypeError("reconciliation limit must be finite");
+  }
+  const limit = Math.min(
+    Math.max(1, Math.trunc(options.limit ?? DEFAULT_RECONCILE_LIMIT)),
+    MAX_RECONCILE_LIMIT,
+  );
+  const reconciled = await db.execute<{ signal_id: string }>(sql`
+    WITH changed AS (
+      SELECT state.signal_id, source.review_revision
+      FROM signal_review_state state
+      JOIN source_signals source ON source.id = state.signal_id
+      WHERE state.source_revision <> source.review_revision
+      ORDER BY state.updated_at ASC, state.signal_id ASC
+      LIMIT ${limit}
+      FOR UPDATE OF state SKIP LOCKED
+    )
+    UPDATE signal_review_state state
+    SET source_revision = changed.review_revision,
+        phase = 'research',
+        input_hash = NULL,
+        input_manifest = NULL,
+        research_evidence = '{}',
+        jev_evaluation_id = NULL,
+        next_attempt_at = clock_timestamp(),
+        attempt_count = 0,
+        last_error = NULL,
+        lease_token = NULL,
+        lease_expires_at = NULL,
+        research_due_at = NULL,
+        last_research_outcome = NULL,
+        inputs_checked_at = NULL,
+        updated_at = clock_timestamp()
+    FROM changed
+    WHERE state.signal_id = changed.signal_id
+    RETURNING state.signal_id
+  `);
+  return reconciled.rows.length;
+}
+
+/**
+ * Lock the material source revision after the caller has locked review state.
+ * Holding this share lock through commit prevents source/human edits from
+ * crossing a successful publication or promotion boundary.
+ */
+export async function lockCurrentSignalReviewSource(
+  tx: SignalReviewTransaction,
+  signalId: string,
+  expectedRevision: number,
+): Promise<boolean> {
+  const rows = await tx
+    .select({ reviewRevision: sourceSignals.reviewRevision })
+    .from(sourceSignals)
+    .where(eq(sourceSignals.id, signalId))
+    .limit(1)
+    .for("share");
+  return rows[0]?.reviewRevision === expectedRevision;
+}
+
+/**
+ * Atomically lease due work. Expired leases are reclaimable; SKIP LOCKED lets
+ * multiple workers claim disjoint FIFO slices without blocking one another.
+ */
+export async function claimSignalReviews(
+  db: Database,
+  options: ClaimSignalReviewsOptions,
+): Promise<SignalReviewClaim[]> {
+  if (!Number.isFinite(options.limit)) {
+    throw new TypeError("claim limit must be finite");
+  }
+  if (
+    options.leaseSeconds !== undefined &&
+    !Number.isFinite(options.leaseSeconds)
+  ) {
+    throw new TypeError("leaseSeconds must be finite");
+  }
+  const limit = Math.min(Math.max(1, Math.trunc(options.limit)), 500);
+  const leaseSeconds = Math.min(
+    Math.max(1, Math.trunc(options.leaseSeconds ?? DEFAULT_LEASE_SECONDS)),
+    MAX_LEASE_SECONDS,
+  );
+  await reconcileChangedSignalReviews(db, {
+    limit: Math.max(DEFAULT_RECONCILE_LIMIT, limit),
+  });
+  const leaseDuration = sql`${leaseSeconds} * interval '1 second'`;
+  const eligiblePhase =
+    options.phase === "research"
+      ? or(
+          eq(signalReviewState.phase, "research"),
+          and(
+            eq(signalReviewState.phase, "settled"),
+            sql`${signalReviewState.researchDueAt} IS NOT NULL`,
+            sql`${signalReviewState.researchDueAt} <= clock_timestamp()`,
+          ),
+        )
+      : eq(signalReviewState.phase, options.phase);
+
+  return db.transaction(async (tx) => {
+    const due = await tx
+      .select({ signalId: signalReviewState.signalId })
+      .from(signalReviewState)
+      .where(
+        and(
+          eligiblePhase,
+          sql`${signalReviewState.nextAttemptAt} <= clock_timestamp()`,
+          or(
+            isNull(signalReviewState.leaseExpiresAt),
+            sql`${signalReviewState.leaseExpiresAt} <= clock_timestamp()`,
+          ),
+        ),
+      )
+      .orderBy(
+        asc(signalReviewState.nextAttemptAt),
+        asc(signalReviewState.createdAt),
+        asc(signalReviewState.signalId),
+      )
+      .limit(limit)
+      .for("update", { skipLocked: true });
+    if (due.length === 0) return [];
+
+    const rows = await tx
+      .update(signalReviewState)
+      .set({
+        phase: options.phase,
+        leaseToken: sql`gen_random_uuid()`,
+        leaseExpiresAt: sql`clock_timestamp() + ${leaseDuration}`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        inArray(
+          signalReviewState.signalId,
+          due.map((row) => row.signalId),
+        ),
+      )
+      .returning();
+    const order = new Map(due.map((row, index) => [row.signalId, index]));
+    return rows
+      .map(asClaim)
+      .sort(
+        (a, b) =>
+          (order.get(a.signalId) ?? Number.MAX_SAFE_INTEGER) -
+          (order.get(b.signalId) ?? Number.MAX_SAFE_INTEGER),
+      );
+  });
+}
+
+function liveClaimWhere(claim: SignalReviewClaim) {
+  return and(
+    eq(signalReviewState.signalId, claim.signalId),
+    eq(signalReviewState.sourceRevision, claim.sourceRevision),
+    eq(signalReviewState.phase, claim.phase),
+    eq(signalReviewState.leaseToken, claim.leaseToken),
+    sql`${signalReviewState.leaseExpiresAt} > clock_timestamp()`,
+    sql`${signalReviewState.inputHash} IS NOT DISTINCT FROM ${claim.inputHash}`,
+  );
+}
+
+async function requeueChangedClaim(
+  tx: SignalReviewTransaction,
+  claim: SignalReviewClaim,
+): Promise<void> {
+  const source = await tx
+    .select({ reviewRevision: sourceSignals.reviewRevision })
+    .from(sourceSignals)
+    .where(eq(sourceSignals.id, claim.signalId))
+    .limit(1);
+  if (source[0] === undefined) return;
+  await tx
+    .update(signalReviewState)
+    .set({
+      sourceRevision: source[0].reviewRevision,
+      phase: "research",
+      inputHash: null,
+      inputManifest: null,
+      researchEvidence: {},
+      jevEvaluationId: null,
+      nextAttemptAt: sql`clock_timestamp()`,
+      attemptCount: 0,
+      lastError: null,
+      leaseToken: null,
+      leaseExpiresAt: null,
+      researchDueAt: null,
+      lastResearchOutcome: null,
+      inputsCheckedAt: null,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(
+      and(
+        eq(signalReviewState.signalId, claim.signalId),
+        eq(signalReviewState.leaseToken, claim.leaseToken),
+      ),
+    );
+}
+
+/**
+ * Install the canonical manifest under the current lease. A changed hash clears
+ * the old Jev pointer. The returned claim is the only valid fence for commit.
+ */
+export async function updateClaimedSignalReviewInput(
+  db: Database,
+  claim: SignalReviewClaim,
+  input: UpdateClaimedSignalReviewInput,
+): Promise<SignalReviewClaim | null> {
+  requireJsonObject(input.inputManifest, "inputManifest");
+  if (!/^[a-f\d]{64}$/u.test(input.inputHash)) {
+    throw new TypeError("inputHash must be a lowercase SHA-256 digest");
+  }
+  const changed = input.inputHash !== claim.inputHash;
+  return db.transaction(async (tx) => {
+    const locked = await tx
+      .select({ signalId: signalReviewState.signalId })
+      .from(signalReviewState)
+      .where(liveClaimWhere(claim))
+      .limit(1)
+      .for("update");
+    if (locked[0] === undefined) return null;
+    if (
+      !(await lockCurrentSignalReviewSource(
+        tx,
+        claim.signalId,
+        claim.sourceRevision,
+      ))
+    ) {
+      await requeueChangedClaim(tx, claim);
+      return null;
+    }
+    const rows = await tx
+      .update(signalReviewState)
+      .set({
+        inputHash: input.inputHash,
+        inputManifest: input.inputManifest,
+        jevEvaluationId: changed ? null : claim.jevEvaluationId,
+        inputsCheckedAt: sql`clock_timestamp()`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(liveClaimWhere(claim))
+      .returning();
+    return rows[0] === undefined ? null : asClaim(rows[0]);
+  });
+}
+
+function transitionSet(
+  transition: SignalReviewTransition,
+): Partial<NewSignalReviewState> {
+  const set: Partial<NewSignalReviewState> = {
+    phase: transition.phase,
+    attemptCount: 0,
+    lastError: null,
+    leaseToken: null,
+    leaseExpiresAt: null,
+    updatedAt: new Date(),
+  };
+  if (hasOwn(transition, "inputHash"))
+    set.inputHash = transition.inputHash ?? null;
+  if (hasOwn(transition, "inputManifest")) {
+    set.inputManifest = transition.inputManifest ?? null;
+  }
+  if (hasOwn(transition, "researchEvidence")) {
+    set.researchEvidence = transition.researchEvidence;
+  }
+  if (hasOwn(transition, "jevEvaluationId")) {
+    set.jevEvaluationId = transition.jevEvaluationId ?? null;
+  }
+  if (hasOwn(transition, "nextAttemptAt")) {
+    set.nextAttemptAt = transition.nextAttemptAt;
+  }
+  if (hasOwn(transition, "researchDueAt")) {
+    set.researchDueAt = transition.researchDueAt ?? null;
+  }
+  if (hasOwn(transition, "lastResearchOutcome")) {
+    set.lastResearchOutcome = transition.lastResearchOutcome ?? null;
+  }
+  if (hasOwn(transition, "inputsCheckedAt")) {
+    set.inputsCheckedAt = transition.inputsCheckedAt ?? null;
+  }
+  return set;
+}
+
+/**
+ * Persist a model result and transition its review state in one transaction.
+ * The callback is never called for an already-stale claim. If the lease expires
+ * during callback persistence, the transaction rolls back all callback writes.
+ */
+export async function commitSignalReview<T>(
+  db: Database,
+  claim: SignalReviewClaim,
+  transition: SignalReviewTransition,
+  persistCallback: (tx: SignalReviewTransaction) => Promise<T>,
+): Promise<SignalReviewCommitResult<T>> {
+  try {
+    return await db.transaction(async (tx) => {
+      const locked = await tx
+        .select({ signalId: signalReviewState.signalId })
+        .from(signalReviewState)
+        .where(liveClaimWhere(claim))
+        .limit(1)
+        .for("update");
+      if (locked[0] === undefined) throw new SignalReviewFenceRejected();
+      if (
+        !(await lockCurrentSignalReviewSource(
+          tx,
+          claim.signalId,
+          claim.sourceRevision,
+        ))
+      ) {
+        await requeueChangedClaim(tx, claim);
+        return { accepted: false } as const;
+      }
+      const effectiveTransition: SignalReviewTransition = hasOwn(
+        transition,
+        "nextAttemptAt",
+      )
+        ? transition
+        : {
+            ...transition,
+            nextAttemptAt:
+              transition.phase === "settled"
+                ? (transition.researchDueAt ??
+                  claim.researchDueAt ??
+                  MAX_TIMESTAMP)
+                : new Date(),
+          };
+
+      const value = await persistCallback(tx);
+      const rows = await tx
+        .update(signalReviewState)
+        .set(transitionSet(effectiveTransition))
+        .where(liveClaimWhere(claim))
+        .returning();
+      if (rows[0] === undefined) throw new SignalReviewFenceRejected();
+      return { accepted: true, value, state: asState(rows[0]) } as const;
+    });
+  } catch (error) {
+    if (error instanceof SignalReviewFenceRejected) return { accepted: false };
+    throw error;
+  }
+}
+
+/**
+ * Release a failed claim with capped exponential backoff. Deferred dependency
+ * failures retain the candidate attempt counter.
+ */
+export async function failSignalReview(
+  db: Database,
+  claim: SignalReviewClaim,
+  error: unknown,
+  options: FailSignalReviewOptions = {},
+): Promise<SignalReviewState | null> {
+  const deferred = options.deferred === true;
+  const nextAttemptCount = deferred
+    ? claim.attemptCount
+    : claim.attemptCount + 1;
+  const computedBackoff = deferred
+    ? DEFAULT_DEFERRED_RETRY_MS
+    : Math.min(
+        FAILURE_BACKOFF_CAP_MS,
+        FAILURE_BACKOFF_BASE_MS * 2 ** Math.min(claim.attemptCount, 8),
+      );
+  const requestedRetryAfterMs = options.retryAfterMs ?? computedBackoff;
+  if (!Number.isFinite(requestedRetryAfterMs)) {
+    throw new TypeError("retryAfterMs must be finite");
+  }
+  const retryAfterMs = Math.min(
+    FAILURE_BACKOFF_CAP_MS,
+    Math.max(0, requestedRetryAfterMs),
+  );
+  const message = error instanceof Error ? error.message : String(error);
+  const rows = await db
+    .update(signalReviewState)
+    .set({
+      attemptCount: nextAttemptCount,
+      lastError: message.slice(0, 10_000),
+      nextAttemptAt: new Date(Date.now() + retryAfterMs),
+      leaseToken: null,
+      leaseExpiresAt: null,
+      updatedAt: new Date(),
+    })
+    .where(liveClaimWhere(claim))
+    .returning();
+  return rows[0] === undefined ? null : asState(rows[0]);
+}
+
+/**
+ * Complete sourced research. Substantive evidence/outcome changes invalidate
+ * the frozen input. Identical evidence may reuse a verdict only when its
+ * manifest proves both the same database source revision and the caller's
+ * expected model/prompt/policy contract.
+ */
+export async function completeSignalResearch(
+  db: Database,
+  claim: SignalReviewClaim,
+  input: CompleteSignalResearchInput,
+): Promise<SignalReviewState | null> {
+  requireJsonObject(input.researchEvidence, "researchEvidence");
+  requireJsonObject(input.outcome, "outcome");
+  const previousHash = hashSignalReviewInput({
+    researchEvidence: claim.researchEvidence,
+    outcome: claim.lastResearchOutcome,
+  });
+  const nextHash = hashSignalReviewInput({
+    researchEvidence: input.researchEvidence,
+    outcome: input.outcome,
+  });
+  const changed = previousHash !== nextHash;
+  const revisionManifestCurrent =
+    claim.inputManifest?.["sourceRevision"] === claim.sourceRevision;
+  const canReuse =
+    !changed &&
+    revisionManifestCurrent &&
+    matchesExpectedReviewInputContract(
+      claim.inputManifest,
+      input.expectedReviewInputContract,
+    ) &&
+    claim.inputHash !== null &&
+    claim.jevEvaluationId !== null;
+  const phase: SignalReviewPhase = canReuse ? "settled" : "jev";
+  const nextAttemptAt =
+    phase === "jev" ? new Date() : (input.researchDueAt ?? MAX_TIMESTAMP);
+
+  const committed = await commitSignalReview(
+    db,
+    claim,
+    {
+      phase,
+      inputHash: canReuse ? claim.inputHash : null,
+      inputManifest: canReuse ? claim.inputManifest : null,
+      researchEvidence: input.researchEvidence,
+      jevEvaluationId: canReuse ? claim.jevEvaluationId : null,
+      nextAttemptAt,
+      researchDueAt: input.researchDueAt,
+      lastResearchOutcome: input.outcome,
+      inputsCheckedAt: new Date(),
+    },
+    async () => undefined,
+  );
+  return committed.accepted ? committed.state : null;
+}
+
+/** Idempotently attach primary evidence to a raw signal without creating an entity. */
+export async function linkSourceSignalEvidence(
+  db: SignalReviewExecutor,
+  input: LinkSourceSignalEvidenceInput,
+): Promise<SourceSignalEvidenceLink> {
+  if (input.researchRevision.trim().length === 0) {
+    throw new TypeError("researchRevision must not be empty");
+  }
+  const inserted = await db
+    .insert(sourceSignalEvidenceLinks)
+    .values(input)
+    .onConflictDoNothing({
+      target: [
+        sourceSignalEvidenceLinks.signalId,
+        sourceSignalEvidenceLinks.evidenceId,
+      ],
+    })
+    .returning();
+  if (inserted[0] !== undefined) return inserted[0];
+
+  const existing = await db
+    .select()
+    .from(sourceSignalEvidenceLinks)
+    .where(
+      and(
+        eq(sourceSignalEvidenceLinks.signalId, input.signalId),
+        eq(sourceSignalEvidenceLinks.evidenceId, input.evidenceId),
+      ),
+    )
+    .limit(1);
+  if (existing[0] === undefined) {
+    throw new Error(
+      `source signal evidence link disappeared for ${input.signalId}/${input.evidenceId}`,
+    );
+  }
+  return existing[0];
+}

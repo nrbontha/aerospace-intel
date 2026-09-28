@@ -14,9 +14,9 @@ import {
 import {
   classifyOwnership,
   enrichProfileSchema,
-  normalizeState,
   type EnrichmentProfile,
 } from "../packages/research/src/benchmarks/schema.js";
+import { normalizeState } from "../packages/research/src/geography.js";
 
 const BASE_PROFILE: EnrichmentProfile = enrichProfileSchema.parse({
   identity: { legalName: "ACMT", domain: "acmt-usa.com", hqState: "Connecticut", hqCity: "Manchester" },

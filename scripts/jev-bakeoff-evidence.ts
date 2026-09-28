@@ -1,45 +1,50 @@
 /**
- * JEV bakeoff evidence freeze (one-shot, ~$0.50 Exa spend).
+ * Freeze real website evidence for the JEv benchmark.
  *
- *   npx tsx scripts/jev-bakeoff-evidence.ts [--out scripts/jev-bakeoff-evidence.json]
+ * Golden identities use the original workbook domains from
+ * `jev-bakeoff-golden.json`. The supplied domain is a benchmark premise, not
+ * proof that production discovery found it. A raw, safely fetched same-domain
+ * homepage is retained for the production publisher-identity assessment.
  *
- * For each of the 29 names in INVESTOR_VERDICTS_V1:
- *   1. resolve the official domain via ExaSearchClient.searchOfficialDomainCandidates
- *      ({ legalName: name }), taking the top candidate as the best guess with a
- *      `domainConfidence: high | low` flag (high = a significant name token
- *      appears in the candidate title/url/domain, else low);
- *   2. call fetchWebsiteEvidence(apiKey, domain, name) — SKIPPED when confidence
- *      is low (spend cap);
- *   3. store { domain, domainConfidence, websiteOffering,
- *      excerptsTrimmedTo500Chars, ownershipHints, sizeHints } keyed by verdict
- *      name. On any failure store { error: true } and continue — never throws.
- *
- * Spend: one Exa search (~$0.005) per name + up to 3 contents pages (~$0.01 each)
- * for high-confidence domains only. fetchWebsiteEvidence enforces the shared
- * daily budget gate internally; search spend is recorded via recordExaSpendUsd.
- * Reports per-name domain hit rate + total Exa spend to stdout.
+ *   npx tsx scripts/jev-bakeoff-evidence.ts [--out exports/jev-bakeoff-evidence-v3.json]
  */
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 import process from "node:process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { INVESTOR_VERDICTS_V1 } from "../packages/research/src/scoring-axial/fixtures/investor-verdicts.js";
-import { ExaSearchClient } from "../packages/research/src/search/exa.js";
-import { fetchWebsiteEvidence } from "../packages/research/src/enrichment/website.js";
+import { z } from "zod";
+
+import { normalizeTargetDomain } from "../packages/database/src/unified-targets/records.js";
 import {
-  EXA_CONTENTS_COST_USD,
   EXA_SEARCH_COST_USD,
   recordExaSpendUsd,
 } from "../packages/research/src/enrichment/exa-budget.js";
+import {
+  classifyWebsiteEvidence,
+  fetchWebsiteEvidence,
+  normalizeWebsiteOrigin,
+  type WebsiteFetchOutcome,
+} from "../packages/research/src/enrichment/website.js";
+import { INVESTOR_VERDICTS_V1 } from "../packages/research/src/scoring-axial/fixtures/investor-verdicts.js";
+import {
+  isRetryableSafeFetchError,
+  SafeFetchError,
+  safeFetchUrl,
+  type SafeFetchErrorCode,
+  type SafeFetchResult,
+} from "../packages/research/src/safe-fetch.js";
+import { ExaSearchClient } from "../packages/research/src/search/exa.js";
 
-// ---------------------------------------------------------------------------
-// env bootstrap (mirror scripts/bench-enrichment.ts: source .env.local)
-// ---------------------------------------------------------------------------
 for (const line of existsSync(".env.local")
   ? readFileSync(".env.local", "utf8").split("\n")
   : []) {
   const match = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*)\s*$/u);
   const key = match?.[1];
   const value = match?.[2];
-  if (key !== undefined && value !== undefined && process.env[key] === undefined) {
+  if (
+    key !== undefined &&
+    value !== undefined &&
+    process.env[key] === undefined
+  ) {
     process.env[key] = value.trim().replace(/^["']|["']$/gu, "");
   }
 }
@@ -49,162 +54,352 @@ function argValue(flag: string): string | undefined {
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
+const goldenDocumentSchema = z.object({
+  version: z.string(),
+  cases: z.array(
+    z.object({
+      id: z.string().min(1),
+      name: z.string().min(1),
+      domain: z.string().min(1),
+    }),
+  ),
+});
+
+type IdentityStatus = "source_domain" | "candidate" | "unresolved";
+type PublisherOutcome =
+  "success" | "not_attempted" | "retryable_error" | "permanent_error";
+type PublisherErrorCode = SafeFetchErrorCode | "cross_domain_redirect";
+type FrozenWebsiteOutcome = WebsiteFetchOutcome | "not_attempted";
+
+interface FreezeCase {
+  id: string;
+  name: string;
+  cohort: "sourced_real" | "investor_review_report_only";
+  sourceDomain: string | null;
+}
+
+interface FrozenPublisherPage {
+  url: string;
+  content: string;
+  contentSha256: string;
+  retrievedAt: string;
+}
+
+interface FrozenWebsiteCase {
+  id: string;
+  name: string;
+  cohort: FreezeCase["cohort"];
+  identityStatus: IdentityStatus;
+  domain: string | null;
+  publisherOutcome: PublisherOutcome;
+  publisherErrorCode: PublisherErrorCode | null;
+  publisherPages: readonly FrozenPublisherPage[];
+  websiteOutcome: FrozenWebsiteOutcome;
+  websiteErrorCode: string | null;
+  websiteExcludedPageCount: number;
+  websiteOffering: string;
+  excerpts: string;
+  ownershipHints: readonly string[];
+  sizeHints: readonly string[];
+  productHints: readonly string[];
+  pages: readonly {
+    url: string;
+    title: string;
+    text: string;
+    textChars: number;
+    excerpt: string;
+    contentSha256: string;
+    retrievedAt: string;
+  }[];
+  fetchesAttempted: number;
+  fetchesSucceeded: number;
+  budgetLimited: boolean;
+  costUsd: number;
+  error: string | null;
+}
+
+interface FrozenEvidenceDocument {
+  version: "jev-bakeoff-evidence-v3";
+  frozenAt: string;
+  cases: FrozenWebsiteCase[];
+  totals: {
+    cases: number;
+    sourceDomains: number;
+    candidates: number;
+    unresolved: number;
+    errors: number;
+    publisherFailures: number;
+    websiteFailures: number;
+    excludedWebsitePages: number;
+    costUsd: number;
+  };
+}
+
+function publisherFailure(error: unknown): {
+  outcome: Exclude<PublisherOutcome, "success" | "not_attempted">;
+  errorCode: PublisherErrorCode;
+} {
+  if (error instanceof SafeFetchError) {
+    return {
+      outcome: isRetryableSafeFetchError(error)
+        ? "retryable_error"
+        : "permanent_error",
+      errorCode: error.code,
+    };
+  }
+  return { outcome: "retryable_error", errorCode: "network_error" };
+}
+
+function isSameDomain(url: string, domain: string): boolean {
+  const expected = normalizeTargetDomain(domain);
+  return expected !== null && normalizeTargetDomain(url) === expected;
+}
+
 const apiKey = process.env["EXA_API_KEY"];
 if (apiKey === undefined || apiKey.trim().length === 0) {
   console.error("EXA_API_KEY is not configured; cannot freeze evidence.");
   process.exit(1);
 }
 
-const outPath = argValue("--out") ?? "scripts/jev-bakeoff-evidence.json";
+const outputPath = argValue("--out") ?? "exports/jev-bakeoff-evidence-v3.json";
+mkdirSync(dirname(outputPath), { recursive: true });
+const goldenRaw = JSON.parse(
+  readFileSync(new URL("./jev-bakeoff-golden.json", import.meta.url), "utf8"),
+) as unknown;
+const golden = goldenDocumentSchema.parse(goldenRaw);
 
-// Tokens too generic to confirm a domain match.
-const GENERIC_TOKENS = new Set([
-  "llc",
-  "inc",
-  "incorporated",
-  "corp",
-  "corporation",
-  "company",
-  "co",
-  "ltd",
-  "pllc",
-  "dba",
-  "subsidiary",
-  "division",
-  "group",
-  "holdings",
-  "international",
-  "associates",
-  "systems",
-  "system",
-  "industries",
-  "industry",
-  "products",
-  "product",
-  "technologies",
-  "technology",
-  "engineering",
-  "aerospace",
-  "aviation",
-  "aircraft",
-  "the",
-  "and",
-  "of",
-]);
-
-function significantTokens(name: string): string[] {
-  return name
-    .toLowerCase()
-    .split(/[^a-z0-9]+/u)
-    .filter((t) => t.length >= 3 && !GENERIC_TOKENS.has(t));
-}
-
-type FrozenCase =
-  | {
-      readonly domain: string;
-      readonly domainConfidence: "high" | "low";
-      readonly websiteOffering: string;
-      readonly excerptsTrimmedTo500Chars: string;
-      readonly ownershipHints: readonly string[];
-      readonly sizeHints: readonly string[];
-      readonly fetchSkipped: boolean;
-      readonly exaCostUsd: number;
-    }
-  | { readonly error: true };
-
-const sleep = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
+const cases: FreezeCase[] = [
+  ...golden.cases.map((entry) => ({
+    id: `golden:${entry.id}`,
+    name: entry.name,
+    cohort: "sourced_real" as const,
+    sourceDomain: entry.domain,
+  })),
+  ...INVESTOR_VERDICTS_V1.map((entry, index) => ({
+    id: `investor-review:${index}:${entry.name}`,
+    name: entry.name,
+    cohort: "investor_review_report_only" as const,
+    sourceDomain: null,
+  })),
+];
 
 const client = new ExaSearchClient({ apiKey });
-const frozen: Record<string, FrozenCase> = {};
-let highConfidence = 0;
-let anyDomain = 0;
-let errors = 0;
-let skippedLow = 0;
-let totalSpendUsd = 0;
+const frozen: FrozenWebsiteCase[] = [];
+let totalCostUsd = 0;
 
-for (const entry of INVESTOR_VERDICTS_V1) {
-  const name = entry.name;
+for (const entry of cases) {
+  let domain = entry.sourceDomain;
+  let identityStatus: IdentityStatus =
+    domain === null ? "unresolved" : "source_domain";
+  let searchCostUsd = 0;
+  let publisherOutcome: PublisherOutcome = "not_attempted";
+  let publisherErrorCode: PublisherErrorCode | null = null;
+  let publisherSourcePages: readonly SafeFetchResult[] = [];
+
   try {
-    const candidates = await client.searchOfficialDomainCandidates({
-      legalName: name,
-    });
-    recordExaSpendUsd(EXA_SEARCH_COST_USD);
-    let spend = EXA_SEARCH_COST_USD;
+    if (domain === null) {
+      const candidates = await client.searchOfficialDomainCandidates({
+        legalName: entry.name,
+      });
+      recordExaSpendUsd(EXA_SEARCH_COST_USD);
+      searchCostUsd = EXA_SEARCH_COST_USD;
+      domain = candidates[0]?.domain ?? null;
+      identityStatus = domain === null ? "unresolved" : "candidate";
+    }
 
-    const top = candidates[0];
-    if (top === undefined) {
-      frozen[name] = { error: true };
-      errors += 1;
-      console.log(`MISS  ${name} — no candidates`);
+    if (domain === null || identityStatus === "candidate") {
+      frozen.push({
+        id: entry.id,
+        name: entry.name,
+        cohort: entry.cohort,
+        identityStatus,
+        domain,
+        publisherOutcome: "not_attempted",
+        publisherErrorCode: null,
+        publisherPages: [],
+        websiteOutcome: "not_attempted",
+        websiteErrorCode: null,
+        websiteExcludedPageCount: 0,
+        websiteOffering: "unknown",
+        excerpts: "",
+        ownershipHints: [],
+        sizeHints: [],
+        productHints: [],
+        pages: [],
+        fetchesAttempted: 0,
+        fetchesSucceeded: 0,
+        budgetLimited: false,
+        costUsd: searchCostUsd,
+        error: null,
+      });
+      totalCostUsd += searchCostUsd;
+      console.log(
+        `${identityStatus === "candidate" ? "CANDIDATE" : "UNRESOLVED"} ${entry.name}` +
+          `${domain === null ? "" : ` -> ${domain}`}`,
+      );
+      continue;
+    }
+
+    publisherOutcome = "not_attempted";
+    publisherErrorCode = null;
+    publisherSourcePages = [];
+    const origin = normalizeWebsiteOrigin(domain);
+    if (origin === null) {
+      publisherOutcome = "permanent_error";
+      publisherErrorCode = "invalid_url";
     } else {
-      anyDomain += 1;
-      const haystack =
-        `${top.title} ${top.url} ${top.domain}`.toLowerCase();
-      const tokens = significantTokens(name);
-      const matched =
-        tokens.length > 0 && tokens.some((t) => haystack.includes(t));
-      const domainConfidence = matched ? "high" : "low";
-      if (matched) highConfidence += 1;
-
-      if (!matched) {
-        skippedLow += 1;
-        frozen[name] = {
-          domain: top.domain,
-          domainConfidence,
-          websiteOffering: "unknown",
-          excerptsTrimmedTo500Chars: "",
-          ownershipHints: [],
-          sizeHints: [],
-          fetchSkipped: true,
-          exaCostUsd: spend,
-        };
-        console.log(`LOW   ${name} -> ${top.domain} (fetch skipped)`);
-      } else {
-        const site = await fetchWebsiteEvidence(apiKey, top.domain, name, {
-          client,
-        });
-        spend += site.costUsd;
-        frozen[name] = {
-          domain: top.domain,
-          domainConfidence,
-          websiteOffering: site.websiteOffering,
-          excerptsTrimmedTo500Chars: site.excerpts.slice(0, 500),
-          ownershipHints: site.ownershipHints,
-          sizeHints: site.sizeHints,
-          fetchSkipped: false,
-          exaCostUsd: spend,
-        };
-        const pages = `${site.fetchesSucceeded}/${site.fetchesAttempted}`;
-        console.log(
-          `HIT   ${name} -> ${top.domain} [${site.websiteOffering}, pages ${pages}]`,
-        );
+      try {
+        const publisherPage = await safeFetchUrl(`${origin}/`);
+        if (!isSameDomain(publisherPage.finalUrl, domain)) {
+          publisherOutcome = "permanent_error";
+          publisherErrorCode = "cross_domain_redirect";
+        } else {
+          publisherOutcome = "success";
+          publisherSourcePages = [publisherPage];
+        }
+      } catch (error) {
+        const failure = publisherFailure(error);
+        publisherOutcome = failure.outcome;
+        publisherErrorCode = failure.errorCode;
       }
     }
-    totalSpendUsd += spend;
-  } catch {
-    frozen[name] = { error: true };
-    errors += 1;
-    console.log(`ERROR ${name} — stored {error:true}`);
+
+    const website = await fetchWebsiteEvidence(apiKey, domain, entry.name, {
+      client,
+      sourcePages: publisherSourcePages,
+    });
+    const exactWebsitePages = website.pages.filter((page) =>
+      isSameDomain(page.url, domain),
+    );
+    const websiteExcludedPageCount =
+      website.pages.length - exactWebsitePages.length;
+    const exactWebsiteEvidence = classifyWebsiteEvidence(exactWebsitePages);
+    const websiteOutcome =
+      website.outcome === "success" && exactWebsitePages.length === 0
+        ? "no_content"
+        : website.outcome;
+    const costUsd = searchCostUsd + website.costUsd;
+    frozen.push({
+      id: entry.id,
+      name: entry.name,
+      cohort: entry.cohort,
+      identityStatus,
+      domain,
+      publisherOutcome,
+      publisherErrorCode,
+      publisherPages: publisherSourcePages.map((page) => ({
+        url: page.finalUrl,
+        content: page.content,
+        contentSha256: page.contentSha256,
+        retrievedAt: page.retrievedAt,
+      })),
+      websiteOutcome,
+      websiteErrorCode: website.errorCode,
+      websiteExcludedPageCount,
+      websiteOffering: exactWebsiteEvidence.websiteOffering,
+      excerpts: exactWebsiteEvidence.excerpts,
+      ownershipHints: exactWebsiteEvidence.ownershipHints,
+      sizeHints: exactWebsiteEvidence.sizeHints,
+      productHints: exactWebsiteEvidence.productHints,
+      pages: exactWebsitePages,
+      fetchesAttempted: website.fetchesAttempted,
+      fetchesSucceeded: exactWebsitePages.length,
+      budgetLimited: website.budgetLimited,
+      costUsd,
+      error: null,
+    });
+    totalCostUsd += costUsd;
+    console.log(
+      `SOURCE ${entry.name} -> ${domain} ` +
+        `[publisher ${publisherOutcome}, website ${websiteOutcome}, ` +
+        `pages ${exactWebsitePages.length}/${website.fetchesAttempted}, ` +
+        `excluded ${websiteExcludedPageCount}]`,
+    );
+  } catch (error) {
+    frozen.push({
+      id: entry.id,
+      name: entry.name,
+      cohort: entry.cohort,
+      identityStatus,
+      domain,
+      publisherOutcome,
+      publisherErrorCode,
+      publisherPages: publisherSourcePages.map((page) => ({
+        url: page.finalUrl,
+        content: page.content,
+        contentSha256: page.contentSha256,
+        retrievedAt: page.retrievedAt,
+      })),
+      websiteOutcome:
+        identityStatus === "source_domain"
+          ? "retryable_error"
+          : "not_attempted",
+      websiteErrorCode: null,
+      websiteExcludedPageCount: 0,
+      websiteOffering: "unknown",
+      excerpts: "",
+      ownershipHints: [],
+      sizeHints: [],
+      productHints: [],
+      pages: [],
+      fetchesAttempted: 0,
+      fetchesSucceeded: 0,
+      budgetLimited: false,
+      costUsd: searchCostUsd,
+      error: error instanceof Error ? error.message : String(error),
+    });
+    totalCostUsd += searchCostUsd;
+    console.log(`ERROR ${entry.name}`);
   }
-  await sleep(300);
 }
 
-writeFileSync(outPath, `${JSON.stringify(frozen, null, 2)}\n`);
+const document: FrozenEvidenceDocument = {
+  version: "jev-bakeoff-evidence-v3",
+  frozenAt: new Date().toISOString(),
+  cases: frozen,
+  totals: {
+    cases: frozen.length,
+    sourceDomains: frozen.filter(
+      (entry) => entry.identityStatus === "source_domain",
+    ).length,
+    candidates: frozen.filter((entry) => entry.identityStatus === "candidate")
+      .length,
+    unresolved: frozen.filter((entry) => entry.identityStatus === "unresolved")
+      .length,
+    errors: frozen.filter(
+      (entry) =>
+        entry.error !== null ||
+        entry.publisherOutcome === "retryable_error" ||
+        entry.publisherOutcome === "permanent_error" ||
+        (entry.identityStatus === "source_domain" &&
+          entry.websiteOutcome !== "success"),
+    ).length,
+    publisherFailures: frozen.filter(
+      (entry) =>
+        entry.publisherOutcome === "retryable_error" ||
+        entry.publisherOutcome === "permanent_error",
+    ).length,
+    websiteFailures: frozen.filter(
+      (entry) =>
+        entry.identityStatus === "source_domain" &&
+        entry.websiteOutcome !== "success",
+    ).length,
+    excludedWebsitePages: frozen.reduce(
+      (total, entry) => total + entry.websiteExcludedPageCount,
+      0,
+    ),
+    costUsd: totalCostUsd,
+  },
+};
 
-const total = INVESTOR_VERDICTS_V1.length;
-const hitRate =
-  total === 0 ? "n/a" : `${((highConfidence / total) * 100).toFixed(1)}%`;
-const anyRate =
-  total === 0 ? "n/a" : `${((anyDomain / total) * 100).toFixed(1)}%`;
+writeFileSync(outputPath, `${JSON.stringify(document, null, 2)}\n`);
 console.log("---");
-console.log(`names: ${total}`);
-console.log(`high-confidence domains: ${highConfidence} (${hitRate})`);
-console.log(`any-domain guesses: ${anyDomain} (${anyRate})`);
-console.log(`low-confidence fetches skipped: ${skippedLow}`);
-console.log(`errors: ${errors}`);
 console.log(
-  `total Exa spend: $${totalSpendUsd.toFixed(3)} ` +
-    `(search ${EXA_SEARCH_COST_USD}/call, contents $${EXA_CONTENTS_COST_USD}/page)`,
+  `cases=${document.totals.cases} source_domains=${document.totals.sourceDomains} ` +
+    `candidates=${document.totals.candidates} unresolved=${document.totals.unresolved} ` +
+    `errors=${document.totals.errors} publisher_failures=${document.totals.publisherFailures} ` +
+    `website_failures=${document.totals.websiteFailures} ` +
+    `excluded_website_pages=${document.totals.excludedWebsitePages} ` +
+    `cost_usd=${totalCostUsd.toFixed(3)}`,
 );
-console.log(`wrote ${outPath}`);
+console.log(`wrote ${outputPath}`);

@@ -14,7 +14,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import process from "node:process";
 
-import { getPool } from "../packages/database/src/client.js";
+import { getDatabase, getPool } from "../packages/database/src/client.js";
 import {
   ORIGIN_CURATED,
   ORIGIN_DISCOVERY,
@@ -23,6 +23,10 @@ import {
   parsePopulateArgs,
   populateUnifiedTargets,
 } from "../packages/database/src/unified-targets/populate.js";
+import {
+  currentFaaReviewInputContract,
+  drainCurrentReviewInputs,
+} from "../packages/research/src/faa-ensemble/runner.js";
 
 export * from "../packages/database/src/unified-targets/populate.js";
 
@@ -52,8 +56,10 @@ async function main(argv: string[]): Promise<void> {
   const { curatedPath } = parsePopulateArgs(argv);
   const pool = getPool();
   try {
+    await drainCurrentReviewInputs(getDatabase());
     const counts = await populateUnifiedTargets(pool, {
       curatedCsvPath: curatedPath,
+      expectedReviewInputContract: currentFaaReviewInputContract(),
     });
     let inserted = 0;
     let merged = 0;

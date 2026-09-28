@@ -43,3 +43,6 @@ backups/
 
 # Real workbooks (never commit; source lives in ~/Downloads)
 data/
+
+# Private investor reports and generated website evidence caches
+exports/

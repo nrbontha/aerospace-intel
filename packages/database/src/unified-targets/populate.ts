@@ -1,25 +1,24 @@
 /**
- * Populate the `unified_targets` acquisition-target table (migration 0008).
+ * Project current source and review state into `unified_targets`.
  *
- * Idempotent + rerunnable: every row is keyed by `normalized_name` and merged
- * on conflict (origins/evidence array-union, first-non-null scalars, tier
- * never downgrades). Uses raw SQL only — never DELETE/UPDATEs pipeline
- * tables, so it is safe to run while the FAA ensemble benchmark writes
- * `faa_ensemble_*` rows concurrently.
+ * Reconciliation removes only attributable stale ensemble assessments.
+ * Source identity, evidence, reference membership, and investor-entered facts
+ * remain durable across every population pass.
  *
- * Sources, in order:
- *   (a) `golden_examples` DB rows            → tier reference, golden_v1_member true
- *   (b) `exports/curated-aerospace-targets-evidence.csv`
- *   (c) `companies` JOIN `candidates` (skip rejected/archived)
- *   (d) `faa_ensemble_results` JOIN `source_signals` (research/high_priority only)
- *
- * Library entry point: `populateUnifiedTargets(db, opts?)`.
+ * Library entry point: `populateUnifiedTargets(db, opts)`.
  * CLI lives in `scripts/populate-unified-targets.mts` (thin wrapper).
  */
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 
 import type { Database } from "../client.js";
+import {
+  assessPromotionEvidence,
+  hasResearchSupportEvidence,
+  normalizeTargetDomain,
+  parseSignalResearchEvidence,
+  type ExpectedFaaReviewInputContract,
+} from "./records.js";
 
 // ---------------------------------------------------------------------------
 // Query surface (pg Pool works directly; drizzle Database via $client)
@@ -61,6 +60,181 @@ export function queryFnFor(db: QueryableDb): PopulateQueryFn {
   throw new Error(
     "populateUnifiedTargets: db must be a pg Pool or a drizzle Database (expected query() or $client.query())",
   );
+}
+
+export interface MachineProjectionReconciliation {
+  staleMachineAssessments: number;
+  correctedFalseInference: number;
+}
+
+const MACHINE_ONLY_PROJECTION_SQL = `
+  unified_targets.origins <@ '["faa_ensemble"]'::jsonb
+  AND unified_targets.golden_v1_member = false
+  AND COALESCE(unified_targets.pipeline_decision, 'unreviewed') = 'unreviewed'
+  AND NOT EXISTS (
+    SELECT 1 FROM candidates candidate
+    WHERE candidate.id = unified_targets.candidate_id
+      AND candidate.tier_source::text = 'human'
+  )`;
+const STALE_MACHINE_ONLY_PROJECTION_SQL =
+  MACHINE_ONLY_PROJECTION_SQL.replaceAll("unified_targets.", "ut.");
+
+/**
+ * Clear ensemble-owned assessment columns that have no current review matching
+ * the expected input contract, without touching durable identity, source
+ * evidence, list membership, or investor judgments. Legacy Infinite
+ * Electronics leaks are bounded to exact names, the known conflicting domain
+ * or inferred value pair, and FAA provenance; the feedback repair also refuses
+ * to cross any source-level human-review marker.
+ */
+export async function reconcileUnifiedTargetMachineProjections(
+  db: QueryableDb,
+  expectedReviewInputContract: ExpectedFaaReviewInputContract,
+): Promise<MachineProjectionReconciliation> {
+  if (expectedReviewInputContract === undefined) {
+    throw new TypeError(
+      "reconcileUnifiedTargetMachineProjections requires expectedReviewInputContract",
+    );
+  }
+  const query = queryFnFor(db);
+  const stale = await query(
+    `UPDATE unified_targets ut
+     SET tier = CASE
+           WHEN ${STALE_MACHINE_ONLY_PROJECTION_SQL}
+             AND ut.ensemble_decision IN ('high_priority', 'research')
+             AND ut.tier IN ('high_interest', 'evaluate')
+           THEN 'needs_research'
+           ELSE ut.tier
+         END,
+         investor_priority = CASE WHEN ${STALE_MACHINE_ONLY_PROJECTION_SQL}
+           THEN NULL ELSE ut.investor_priority END,
+         proprietary_basis = CASE WHEN ${STALE_MACHINE_ONLY_PROJECTION_SQL}
+           THEN 'unknown' ELSE ut.proprietary_basis END,
+         oversize_flag = CASE WHEN ${STALE_MACHINE_ONLY_PROJECTION_SQL}
+           THEN false ELSE ut.oversize_flag END,
+         ensemble_decision = NULL,
+         ensemble_confidence = NULL,
+         pipeline_status = CASE
+           WHEN ut.pipeline_status IN ('ready', 'diligence_hold', 'excluded', 'jev_complete')
+             THEN NULL
+           ELSE ut.pipeline_status
+         END,
+         why_interesting = CASE WHEN ${STALE_MACHINE_ONLY_PROJECTION_SQL}
+           THEN NULL ELSE ut.why_interesting END,
+         risks = CASE WHEN ${STALE_MACHINE_ONLY_PROJECTION_SQL}
+           THEN NULL ELSE ut.risks END,
+         unknowns = CASE WHEN ${STALE_MACHINE_ONLY_PROJECTION_SQL}
+           THEN NULL ELSE ut.unknowns END,
+         updated_at = now()
+     WHERE ut.origins ? $1
+       AND (
+         ut.ensemble_decision IS NOT NULL
+         OR ut.ensemble_confidence IS NOT NULL
+         OR ut.pipeline_status IN ('ready', 'diligence_hold', 'excluded', 'jev_complete')
+         OR ut.why_interesting IS NOT NULL
+         OR ut.risks IS NOT NULL
+         OR ut.unknowns IS NOT NULL
+       )
+       AND NOT EXISTS (
+         SELECT 1
+         FROM signal_review_state st
+         JOIN source_signals s
+           ON s.id = st.signal_id
+          AND s.review_revision = st.source_revision
+         JOIN faa_ensemble_evaluations jev
+           ON jev.id = st.jev_evaluation_id
+          AND jev.signal_id = st.signal_id
+          AND jev.input_hash = st.input_hash
+          AND jev.error IS NULL
+          AND jev.decision IN ('research', 'high_priority')
+         WHERE st.signal_id = ut.signal_id
+           AND st.phase = 'settled'
+           AND st.input_hash IS NOT NULL
+           AND st.input_manifest->'sourceRevision' = to_jsonb(st.source_revision)
+           AND st.input_manifest->>'version' = $2
+           AND st.input_manifest->'policy'->>'ladder' = $3
+           AND st.input_manifest->'policy'->>'jevModel' = $4
+           AND st.input_manifest->'policy'->>'museModel' = $5
+           AND st.input_manifest->'policy'->>'evaluatorPrompt' = $6
+           AND st.input_manifest->'policy'->>'jevAuditSampleRate' = $7
+       )
+     RETURNING ut.id`,
+    [
+      ORIGIN_FAA_ENSEMBLE,
+      expectedReviewInputContract.version,
+      expectedReviewInputContract.policy.ladder,
+      expectedReviewInputContract.policy.jevModel,
+      expectedReviewInputContract.policy.museModel,
+      expectedReviewInputContract.policy.evaluatorPrompt,
+      String(expectedReviewInputContract.policy.jevAuditSampleRate),
+    ],
+  );
+  const correctedIdentity = await query(
+    `UPDATE unified_targets ut
+     SET domain = NULL,
+         website_url = NULL,
+         tier = CASE
+           WHEN ut.tier = 'high_interest' THEN 'needs_research'
+           ELSE ut.tier
+         END,
+         proprietary_basis = 'unknown',
+         pipeline_status = NULL,
+         evidence_urls = (
+           SELECT COALESCE(jsonb_agg(url), '[]'::jsonb)
+           FROM jsonb_array_elements_text(ut.evidence_urls) AS evidence(url)
+           WHERE lower(url) NOT LIKE '%infiniteelectronics.com%'
+         ),
+         updated_at = now()
+     WHERE ut.normalized_name = $1
+       AND ut.origins ? $2
+       AND lower(regexp_replace(rtrim(ut.domain, '.'), '^www\\.', '', 'i'))
+         = $3
+     RETURNING ut.id`,
+    [
+      normalizeUnifiedName("Electronics International"),
+      ORIGIN_FAA_ENSEMBLE,
+      "infiniteelectronics.com",
+    ],
+  );
+  const correctedFeedback = await query(
+    `UPDATE unified_targets ut
+     SET ownership_status = 'unknown',
+         pipeline_decision = 'unreviewed',
+         updated_at = now()
+     WHERE ut.normalized_name = $1
+       AND ut.origins ? $2
+       AND ut.signal_id IS NOT NULL
+       AND ut.ownership_status = 'independent'
+       AND ut.pipeline_decision = 'add'
+       AND NOT EXISTS (
+         SELECT 1
+         FROM source_signals ss
+         WHERE ss.id = ut.signal_id
+           AND COALESCE(
+             ss.qualification ?| ARRAY[
+               'humanDecision',
+               'humanOverride',
+               'reviewedByUserId',
+               'reviewedBy',
+               'humanReviewedAt',
+               'humanReviewNote'
+             ]
+             OR ss.qualification->>'decisionSource' = 'human'
+             OR ss.qualification->>'reviewSource' = 'human',
+             false
+           )
+       )
+     RETURNING ut.id`,
+    [
+      normalizeUnifiedName("Infinite Electronics International"),
+      ORIGIN_FAA_ENSEMBLE,
+    ],
+  );
+  return {
+    staleMachineAssessments: stale.rows.length,
+    correctedFalseInference:
+      correctedIdentity.rows.length + correctedFeedback.rows.length,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -131,14 +305,9 @@ export function isSubsidiaryName(name: string): boolean {
   return /\b(subsidiary|division|unit)\s+of\b/i.test(name);
 }
 
-// ---------------------------------------------------------------------------
-// Round-2 investor verdicts (2026-09-09 Booie review of the Nikhil new-target
-// list). Ownership_observations cannot be joined here — populate rows carry
-// no company_id at load time — so the reviewed verdicts are encoded as a
-// documented constant keyed by normalized-name fragment, plus keyword rules
-// over each row's own evidence text. `add` is only ever produced from the
-// explicit add verdict below, never derived automatically.
-// ---------------------------------------------------------------------------
+// Projection vocabulary. Prior-list verdict labels are intentionally absent:
+// list membership is exported as provenance and never classified into these
+// current evidence fields.
 
 export type OwnershipStatus =
   | "independent"
@@ -156,300 +325,6 @@ export type PipelineDecision =
   | "pass_dead"
   | "pass_sector"
   | "unreviewed";
-
-export interface Round2AcquiredEntry {
-  /** Normalized-name fragments identifying the target (first hit wins). */
-  keys: string[];
-  /** Acquiring owner, exactly as named in the Booie commentary. */
-  owner: string;
-  /** Acquisition year when stated, otherwise null (see note). */
-  year: number | null;
-  note: string;
-  ownership: OwnershipStatus;
-}
-
-/**
- * Acquired-owner map: 19 entries. Relevant-but-acquired targets are retained
- * as archetype references with decision pass_acquired. TransDigm / HEICO /
- * Parker Hannifin / Ametek / Carlisle are strategics (strategic_owned);
- * Loar / TJC / Acorn / Vance Street / Stephens and the unnamed PE firms are
- * private equity (pe_owned); Butler National stays public (public).
- * Subsidiaries Avcon Industries + BNC Tempe roll up to public Butler.
- */
-export const ROUND2_ACQUIRED_MAP: Round2AcquiredEntry[] = [
-  {
-    keys: ["ametek ameron"],
-    owner: "Ametek",
-    year: 2009,
-    note: "Acquired by Ametek in 2009.",
-    ownership: "strategic_owned",
-  },
-  {
-    keys: ["smr technologies"],
-    owner: "Loar Group",
-    year: 2019,
-    note: "B/E Aerospace SMR acquired by Loar Group in 2019.",
-    ownership: "pe_owned",
-  },
-  {
-    keys: ["butler national"],
-    owner: "public (~$98M revenue, $38M EBITDA)",
-    year: null,
-    note: "Public company; stays public. Relevant via subsidiaries Avcon Industries + BNC Tempe.",
-    ownership: "public",
-  },
-  {
-    keys: ["avcon industries"],
-    owner: "Butler National Corporation (public)",
-    year: null,
-    note: "Subsidiary of public Butler National.",
-    ownership: "strategic_owned",
-  },
-  {
-    keys: ["bnc tempe"],
-    owner: "Butler National Corporation (public)",
-    year: null,
-    note: "Tempe subsidiary of public Butler National.",
-    ownership: "strategic_owned",
-  },
-  {
-    keys: ["cpi eimac", "eimac"],
-    owner: "TJC (via CPI add-on)",
-    year: null,
-    note: "Acquired as an add-on for CPI, a TJC portfolio company.",
-    ownership: "pe_owned",
-  },
-  {
-    keys: ["dart aerospace"],
-    owner: "TransDigm",
-    year: null,
-    note: "Acquired by TransDigm.",
-    ownership: "strategic_owned",
-  },
-  {
-    keys: ["jet parts engineering", "(jpe)"],
-    owner: "TransDigm",
-    year: null,
-    note: "JPE acquired by TransDigm.",
-    ownership: "strategic_owned",
-  },
-  {
-    keys: ["kirkhill"],
-    owner: "TransDigm (via Esterline)",
-    year: null,
-    note: "Acquired by TransDigm via the Esterline acquisition.",
-    ownership: "strategic_owned",
-  },
-  {
-    keys: ["precision airmotive"],
-    owner: "McFarlane Aviation (via Vance Street Capital)",
-    year: null,
-    note: "Add-on for McFarlane Aviation via Vance Street Capital.",
-    ownership: "pe_owned",
-  },
-  {
-    keys: ["raisbeck"],
-    owner: "Acorn Capital",
-    year: 2016,
-    note: "Acquired by Acorn Capital in 2016.",
-    ownership: "pe_owned",
-  },
-  {
-    keys: ["robertson fuel"],
-    owner: "HEICO",
-    year: 2016,
-    note: "Acquired by HEICO in 2016 for $255M.",
-    ownership: "strategic_owned",
-  },
-  {
-    keys: ["shadin"],
-    owner: "two PE firms",
-    year: 2020,
-    note: "Acquired by two PE firms in 2020.",
-    ownership: "pe_owned",
-  },
-  {
-    keys: ["flight display", "sirius technologies"],
-    owner: "Vance Street Partners",
-    year: 2021,
-    note: "Sirius/Flight Display acquired by Vance Street Partners in 2021.",
-    ownership: "pe_owned",
-  },
-  {
-    keys: ["turbine kinetics"],
-    owner: "HEICO",
-    year: null,
-    note: "Subsidiary of / acquired by HEICO.",
-    ownership: "strategic_owned",
-  },
-  {
-    keys: ["vibro-meter", "vibro meter"],
-    owner: "Parker Hannifin (via Meggitt)",
-    year: null,
-    note: "Acquired by Parker Hannifin via Meggitt.",
-    ownership: "strategic_owned",
-  },
-  {
-    keys: ["wellman"],
-    owner: "Carlisle",
-    year: null,
-    note: "Acquired by Carlisle Companies.",
-    ownership: "strategic_owned",
-  },
-  {
-    keys: ["meggitt thermal"],
-    owner: "Parker Hannifin",
-    year: 2022,
-    note: "Acquired by Parker Hannifin in 2022.",
-    ownership: "strategic_owned",
-  },
-  {
-    keys: ["visionsafe"],
-    owner: "Stephens Group",
-    year: 2024,
-    note: "Acquired by The Stephens Group in 2024.",
-    ownership: "pe_owned",
-  },
-];
-
-/** Sole Add-to-Pipeline=Yes verdict: Electronics International. */
-const ROUND2_ADD_KEYS = ["electronics international"];
-/** Maybe verdicts (Relevant Maybe, or Relevant Yes with Add Maybe). */
-const ROUND2_HOLD_KEYS = [
-  "alpha aviation",
-  "composite specialties",
-  "concorde battery",
-  "middle fork",
-  "m-20 oil",
-  "m20 oil",
-];
-/** Dead: Keddeg (acquired 2008, no longer exists). */
-const ROUND2_DEAD_KEYS = ["keddeg"];
-/**
- * Wrong-sector / too-large: Whelen (law-enforcement lighting + very large),
- * Delta Flight Products (Delta Air Lines), Skydweller (platform OEM,
- * already off-thesis by scale).
- */
-const ROUND2_SECTOR_ENTRIES: Array<{
-  keys: string[];
-  ownership: OwnershipStatus;
-}> = [
-  { keys: ["whelen"], ownership: "independent" },
-  { keys: ["delta flight products"], ownership: "strategic_owned" },
-  { keys: ["skydweller"], ownership: "unknown" },
-];
-
-const PUBLIC_EVIDENCE = /\bnasdaq\b|\bnyse\b|\bpublicly traded\b/i;
-const PE_EVIDENCE =
-  /\bprivate equity\b|\bpe-backed\b|\bpe backed\b|\bportfolio company of\b/i;
-const ACQUIRED_EVIDENCE =
-  /\bacquired by\b|\bsubsidiary of\b|\bdivision of\b|\bowned by\b/i;
-
-export interface Round2Verdict {
-  ownershipStatus: OwnershipStatus;
-  pipelineDecision: PipelineDecision;
-  /** Acquiring owner from the map, when the target is a known acquisition. */
-  owner: string | null;
-}
-
-function includesKey(normalized: string, keys: readonly string[]): boolean {
-  // Prefix match on word boundaries: "jet parts engineering, inc. (jpe)"
-  // matches, but "infinite electronics international" must not match
-  // "electronics international".
-  return keys.some(
-    (k) =>
-      normalized === k ||
-      (normalized.startsWith(k) && /^[\s,(]/.test(normalized.slice(k.length))),
-  );
-}
-
-/**
- * Derive round-2 ownership + pipeline decision for a target name, with
- * optional evidence text (feedback/ownership facts when present).
- * Precedence: acquired map → explicit add → hold → dead → sector →
- * subsidiary-name → evidence keywords → unknown/unreviewed.
- */
-export function deriveRound2Verdict(
-  name: string,
-  evidence?: string | null,
-): Round2Verdict {
-  const normalized = normalizeUnifiedName(name);
-  for (const entry of ROUND2_ACQUIRED_MAP) {
-    if (includesKey(normalized, entry.keys)) {
-      return {
-        ownershipStatus: entry.ownership,
-        pipelineDecision: "pass_acquired",
-        owner: entry.owner,
-      };
-    }
-  }
-  if (includesKey(normalized, ROUND2_ADD_KEYS)) {
-    return {
-      ownershipStatus: "independent",
-      pipelineDecision: "add",
-      owner: null,
-    };
-  }
-  if (includesKey(normalized, ROUND2_HOLD_KEYS)) {
-    return {
-      ownershipStatus: "unknown",
-      pipelineDecision: "hold",
-      owner: null,
-    };
-  }
-  if (includesKey(normalized, ROUND2_DEAD_KEYS)) {
-    return {
-      ownershipStatus: "dead",
-      pipelineDecision: "pass_dead",
-      owner: null,
-    };
-  }
-  for (const entry of ROUND2_SECTOR_ENTRIES) {
-    if (includesKey(normalized, entry.keys)) {
-      return {
-        ownershipStatus: entry.ownership,
-        pipelineDecision: "pass_sector",
-        owner: null,
-      };
-    }
-  }
-  if (isSubsidiaryName(name)) {
-    return {
-      ownershipStatus: "strategic_owned",
-      pipelineDecision: "unreviewed",
-      owner: null,
-    };
-  }
-  const text = (evidence ?? "").trim();
-  if (text !== "") {
-    if (PUBLIC_EVIDENCE.test(text)) {
-      return {
-        ownershipStatus: "public",
-        pipelineDecision: "unreviewed",
-        owner: null,
-      };
-    }
-    if (PE_EVIDENCE.test(text)) {
-      return {
-        ownershipStatus: "pe_owned",
-        pipelineDecision: "unreviewed",
-        owner: null,
-      };
-    }
-    if (ACQUIRED_EVIDENCE.test(text)) {
-      return {
-        ownershipStatus: "strategic_owned",
-        pipelineDecision: "unreviewed",
-        owner: null,
-      };
-    }
-  }
-  return {
-    ownershipStatus: "unknown",
-    pipelineDecision: "unreviewed",
-    owner: null,
-  };
-}
 
 /** Ownership merge: any non-unknown value wins; both known keeps existing. */
 export function mergeOwnershipStatus(
@@ -529,12 +404,20 @@ export function mapCandidateTier(status: string | null): string | null {
   return "evaluate";
 }
 
-/** Ensemble final_decision → tier. Rejects are excluded (null). */
-export function mapEnsembleTier(decision: string | null): string | null {
-  const d = (decision ?? "").trim().toLowerCase();
-  if (d === "high_priority") return "high_interest";
-  if (d === "research") return "needs_research";
-  return null;
+export function mapCandidateProjectionTier(
+  status: string | null,
+  tierOverride: string | null,
+  tierSource: string | null,
+): string | null {
+  if (tierSource !== "human" || tierOverride === null) {
+    return mapCandidateTier(status);
+  }
+  if (tierOverride === "high_interest") return "high_interest";
+  if (tierOverride === "evaluate") return "evaluate";
+  if (tierOverride === "watchlist" || tierOverride === "low_interest") {
+    return "needs_research";
+  }
+  return mapCandidateTier(status);
 }
 
 export type InvestorPriority = 1 | 2 | 3;
@@ -613,22 +496,6 @@ export function mapDiscoveryInvestorAssessment(
           ? 3
           : 2;
   return deriveInvestorAssessment(defaultPriority, evidence);
-}
-
-export function mapEnsembleInvestorAssessment(
-  decision: string | null,
-  thesisSignals: readonly string[],
-): InvestorAssessment | null {
-  const normalizedDecision = (decision ?? "").trim().toLowerCase();
-  if (normalizedDecision === "high_priority") {
-    return deriveInvestorAssessment(1, thesisSignals.join(" "));
-  }
-  if (normalizedDecision !== "research") return null;
-  const evidence = thesisSignals.join(" ");
-  return deriveInvestorAssessment(
-    mapProprietaryBasis(evidence) === "product" ? 2 : 3,
-    evidence,
-  );
 }
 
 /** Extract a bare lowercase domain from a website URL (null when absent). */
@@ -882,6 +749,18 @@ function firstNonNull<T>(a: T | null, b: T | null): T | null {
   return a ?? b;
 }
 
+export function hasConflictingTargetDomains(
+  existing: string | null,
+  incoming: string | null,
+): boolean {
+  const existingDomain = normalizeTargetDomain(existing);
+  const incomingDomain = normalizeTargetDomain(incoming);
+  return (
+    existingDomain !== null &&
+    incomingDomain !== null &&
+    existingDomain !== incomingDomain
+  );
+}
 /**
  * Fold rows sharing a normalized name so a single INSERT batch never hits
  * the same conflict target twice (e.g. one company with two candidate rows).
@@ -901,6 +780,9 @@ export function mergeBatchDuplicates(
         pipelineDecision: row.pipelineDecision ?? "unreviewed",
         evidenceUrls: [...row.evidenceUrls],
       });
+      continue;
+    }
+    if (hasConflictingTargetDomains(existing.domain, row.domain)) {
       continue;
     }
     const rank = (t: string): number => TIER_RANK[t] ?? 0;
@@ -975,22 +857,56 @@ const CONFLICT_CLAUSE = `ON CONFLICT (normalized_name) DO UPDATE SET
   origins = (SELECT COALESCE(jsonb_agg(DISTINCT e), '[]'::jsonb)
              FROM jsonb_array_elements_text(unified_targets.origins || EXCLUDED.origins) AS e),
   golden_v1_member = unified_targets.golden_v1_member OR EXCLUDED.golden_v1_member,
-  tier = CASE WHEN (${EXCLUDED_RANK_SQL}) > (${EXISTING_RANK_SQL})
-              THEN EXCLUDED.tier ELSE unified_targets.tier END,
+  tier = CASE
+    WHEN EXCLUDED.origins ? 'faa_ensemble'
+      AND EXISTS (
+        SELECT 1
+        FROM candidates candidate
+        WHERE candidate.id = unified_targets.candidate_id
+          AND candidate.tier_source::text = 'human'
+      )
+      THEN unified_targets.tier
+    WHEN EXCLUDED.origins ? 'faa_ensemble'
+      AND unified_targets.origins <@ '["faa_ensemble"]'::jsonb
+      THEN EXCLUDED.tier
+    WHEN (${EXCLUDED_RANK_SQL}) > (${EXISTING_RANK_SQL})
+      THEN EXCLUDED.tier
+    ELSE unified_targets.tier
+  END,
   investor_priority = CASE
+    WHEN EXCLUDED.origins ? 'faa_ensemble'
+      AND EXISTS (
+        SELECT 1
+        FROM candidates candidate
+        WHERE candidate.id = unified_targets.candidate_id
+          AND candidate.tier_source::text = 'human'
+      )
+      THEN unified_targets.investor_priority
+    WHEN EXCLUDED.origins ? 'faa_ensemble'
+      AND unified_targets.origins <@ '["faa_ensemble"]'::jsonb
+      THEN EXCLUDED.investor_priority
     WHEN unified_targets.investor_priority IS NULL THEN EXCLUDED.investor_priority
     WHEN EXCLUDED.investor_priority IS NULL THEN unified_targets.investor_priority
     WHEN EXCLUDED.investor_priority < unified_targets.investor_priority THEN EXCLUDED.investor_priority
     ELSE unified_targets.investor_priority
   END,
-  oversize_flag = COALESCE(unified_targets.oversize_flag, false) OR COALESCE(EXCLUDED.oversize_flag, false),
+  oversize_flag = CASE
+    WHEN EXCLUDED.origins ? 'faa_ensemble' AND ${MACHINE_ONLY_PROJECTION_SQL}
+      THEN EXCLUDED.oversize_flag
+    ELSE COALESCE(unified_targets.oversize_flag, false) OR COALESCE(EXCLUDED.oversize_flag, false)
+  END,
   proprietary_basis = CASE
+    WHEN EXCLUDED.origins ? 'faa_ensemble' AND ${MACHINE_ONLY_PROJECTION_SQL}
+      THEN EXCLUDED.proprietary_basis
     WHEN (CASE EXCLUDED.proprietary_basis WHEN 'product' THEN 3 WHEN 'process_only' THEN 2 WHEN 'unknown' THEN 1 ELSE 0 END)
        > (CASE unified_targets.proprietary_basis WHEN 'product' THEN 3 WHEN 'process_only' THEN 2 WHEN 'unknown' THEN 1 ELSE 0 END)
       THEN EXCLUDED.proprietary_basis
     ELSE COALESCE(unified_targets.proprietary_basis, EXCLUDED.proprietary_basis)
   END,
-  pipeline_status = COALESCE(unified_targets.pipeline_status, EXCLUDED.pipeline_status),
+  pipeline_status = CASE
+    WHEN EXCLUDED.origins ? 'faa_ensemble' THEN EXCLUDED.pipeline_status
+    ELSE COALESCE(unified_targets.pipeline_status, EXCLUDED.pipeline_status)
+  END,
   ownership_status = CASE
     WHEN unified_targets.ownership_status IS NULL OR unified_targets.ownership_status = 'unknown' THEN COALESCE(EXCLUDED.ownership_status, unified_targets.ownership_status)
     WHEN EXCLUDED.ownership_status IS NULL OR EXCLUDED.ownership_status = 'unknown' THEN unified_targets.ownership_status
@@ -1002,17 +918,39 @@ const CONFLICT_CLAUSE = `ON CONFLICT (normalized_name) DO UPDATE SET
   novelty = COALESCE(unified_targets.novelty, EXCLUDED.novelty),
   confidence = COALESCE(unified_targets.confidence, EXCLUDED.confidence),
   actionability = COALESCE(unified_targets.actionability, EXCLUDED.actionability),
-  ensemble_decision = COALESCE(unified_targets.ensemble_decision, EXCLUDED.ensemble_decision),
-  ensemble_confidence = COALESCE(unified_targets.ensemble_confidence, EXCLUDED.ensemble_confidence),
-  why_interesting = COALESCE(unified_targets.why_interesting, EXCLUDED.why_interesting),
-  risks = COALESCE(unified_targets.risks, EXCLUDED.risks),
-  unknowns = COALESCE(unified_targets.unknowns, EXCLUDED.unknowns),
+  ensemble_decision = CASE
+    WHEN EXCLUDED.origins ? 'faa_ensemble' THEN EXCLUDED.ensemble_decision
+    ELSE COALESCE(EXCLUDED.ensemble_decision, unified_targets.ensemble_decision)
+  END,
+  ensemble_confidence = CASE
+    WHEN EXCLUDED.origins ? 'faa_ensemble' THEN EXCLUDED.ensemble_confidence
+    ELSE COALESCE(EXCLUDED.ensemble_confidence, unified_targets.ensemble_confidence)
+  END,
+  why_interesting = CASE
+    WHEN EXCLUDED.origins ? 'faa_ensemble' AND ${MACHINE_ONLY_PROJECTION_SQL}
+      THEN EXCLUDED.why_interesting
+    ELSE COALESCE(unified_targets.why_interesting, EXCLUDED.why_interesting)
+  END,
+  risks = CASE
+    WHEN EXCLUDED.origins ? 'faa_ensemble' AND ${MACHINE_ONLY_PROJECTION_SQL}
+      THEN EXCLUDED.risks
+    ELSE COALESCE(unified_targets.risks, EXCLUDED.risks)
+  END,
+  unknowns = CASE
+    WHEN EXCLUDED.origins ? 'faa_ensemble' AND ${MACHINE_ONLY_PROJECTION_SQL}
+      THEN EXCLUDED.unknowns
+    ELSE COALESCE(unified_targets.unknowns, EXCLUDED.unknowns)
+  END,
   evidence_urls = (SELECT COALESCE(jsonb_agg(DISTINCT e), '[]'::jsonb)
                    FROM jsonb_array_elements_text(unified_targets.evidence_urls || EXCLUDED.evidence_urls) AS e),
   company_id = COALESCE(unified_targets.company_id, EXCLUDED.company_id),
   signal_id = COALESCE(unified_targets.signal_id, EXCLUDED.signal_id),
   candidate_id = COALESCE(unified_targets.candidate_id, EXCLUDED.candidate_id),
-  updated_at = now()`;
+  updated_at = now()
+WHERE unified_targets.domain IS NULL
+   OR EXCLUDED.domain IS NULL
+   OR lower(regexp_replace(rtrim(unified_targets.domain, '.'), '^www\\.', '', 'i'))
+      = lower(regexp_replace(rtrim(EXCLUDED.domain, '.'), '^www\\.', '', 'i'))`;
 
 /**
  * Bulk upsert one source batch. Returns per-source inserted/merged counts
@@ -1107,6 +1045,7 @@ async function upsertChunk(
 export interface SourceCounts {
   inserted: number;
   merged: number;
+  reconciliation?: MachineProjectionReconciliation;
 }
 
 async function loadGolden(
@@ -1116,40 +1055,46 @@ async function loadGolden(
   ) => Promise<{ rows: Record<string, unknown>[] }>,
 ): Promise<UnifiedTargetRow[]> {
   const { rows } = await query(
-    `SELECT g.name, g.domain, g.company_id,
-            COALESCE(NULLIF(g.review_notes, ''), g.description_raw) AS why_interesting,
+    `SELECT m.raw_name AS name,
+            m.normalized_domain AS domain,
+            COALESCE(
+              m.company_id,
+              CASE
+                WHEN m.match_status::text = 'exact' THEN m.matched_company_id
+                ELSE NULL
+              END
+            ) AS company_id,
             c.website_url, c.headquarters_country_code
-     FROM golden_examples g
-     LEFT JOIN companies c ON c.id = g.company_id
-     WHERE COALESCE(g.golden_example_type::text, '') <> 'known_non_target'`,
+     FROM known_universe_snapshots snapshot
+     JOIN known_universe_members m ON m.snapshot_id = snapshot.id
+     LEFT JOIN companies c
+       ON c.id = COALESCE(
+         m.company_id,
+         CASE
+           WHEN m.match_status::text = 'exact' THEN m.matched_company_id
+           ELSE NULL
+         END
+       )
+     WHERE snapshot.key = 'golden-set-v01'
+       AND snapshot.active = true`,
     [],
   );
   return rows.flatMap((r) => {
     const name = String(r["name"] ?? "").trim();
     if (name === "") return [];
+    const domain = normalizeTargetDomain(
+      typeof r["domain"] === "string" ? r["domain"] : null,
+    );
     const websiteUrl =
       typeof r["website_url"] === "string" && r["website_url"] !== ""
         ? (r["website_url"] as string)
-        : null;
-    const investorAssessment = deriveInvestorAssessment(
-      1,
-      typeof r["why_interesting"] === "string"
-        ? (r["why_interesting"] as string)
-        : null,
-    );
-    const verdict = deriveRound2Verdict(
-      name,
-      typeof r["why_interesting"] === "string"
-        ? (r["why_interesting"] as string)
-        : null,
-    );
+        : domain === null
+          ? null
+          : `https://${domain}`;
     return [
       {
         companyName: name,
-        domain:
-          typeof r["domain"] === "string" && r["domain"] !== ""
-            ? (r["domain"] as string).toLowerCase()
-            : domainFromUrl(websiteUrl),
+        domain,
         websiteUrl,
         city: null,
         stateCode: null,
@@ -1160,10 +1105,11 @@ async function loadGolden(
         origin: ORIGIN_GOLDEN_V1,
         goldenV1Member: true,
         tier: "reference",
-        ...investorAssessment,
+        investorPriority: 3,
+        proprietaryBasis: "unknown",
         oversizeFlag: false,
-        ownershipStatus: verdict.ownershipStatus,
-        pipelineDecision: verdict.pipelineDecision,
+        ownershipStatus: "unknown",
+        pipelineDecision: "unreviewed",
         pipelineStatus: null,
         fit: null,
         novelty: null,
@@ -1171,14 +1117,10 @@ async function loadGolden(
         actionability: null,
         ensembleDecision: null,
         ensembleConfidence: null,
-        whyInteresting:
-          typeof r["why_interesting"] === "string" &&
-          r["why_interesting"] !== ""
-            ? (r["why_interesting"] as string)
-            : null,
+        whyInteresting: null,
         risks: null,
         unknowns: null,
-        evidenceUrls: [] as string[],
+        evidenceUrls: [],
         companyId:
           typeof r["company_id"] === "string"
             ? (r["company_id"] as string)
@@ -1210,10 +1152,6 @@ function loadCurated(csvPath: string): UnifiedTargetRow[] {
       r["screen_status"] ?? "",
       [r["fit_summary"], r["key_risk"]].join(" "),
     );
-    const verdict = deriveRound2Verdict(
-      name,
-      [r["fit_summary"], r["key_risk"]].join(" "),
-    );
     return [
       {
         companyName: name,
@@ -1228,8 +1166,8 @@ function loadCurated(csvPath: string): UnifiedTargetRow[] {
         ...investorAssessment,
         oversizeFlag: false,
         pipelineStatus: null,
-        ownershipStatus: verdict.ownershipStatus,
-        pipelineDecision: verdict.pipelineDecision,
+        ownershipStatus: "unknown",
+        pipelineDecision: "unreviewed",
         fit: null,
         novelty: null,
         confidence: null,
@@ -1259,10 +1197,13 @@ async function loadDiscovery(
             COALESCE(NULLIF(c.display_name, ''), c.legal_name) AS name,
             c.website_url, c.headquarters_country_code,
             cand.status::text AS status,
+            cand.tier_override::text AS tier_override,
+            cand.tier_source::text AS tier_source,
             cand.current_scores, cand.rationale
      FROM candidates cand
      JOIN companies c ON c.id = cand.company_id
-     WHERE cand.status::text NOT IN ('rejected', 'archived')`,
+     WHERE cand.status::text NOT IN ('rejected', 'archived')
+        OR cand.tier_source::text = 'human'`,
     [],
   );
   return rows.flatMap((r) => {
@@ -1270,7 +1211,15 @@ async function loadDiscovery(
     if (name === "" || isOffThesisName(name)) return [];
     const status =
       typeof r["status"] === "string" ? (r["status"] as string) : null;
-    const tier = mapCandidateTier(status);
+    const tierOverride =
+      typeof r["tier_override"] === "string"
+        ? (r["tier_override"] as string)
+        : null;
+    const tierSource =
+      typeof r["tier_source"] === "string"
+        ? (r["tier_source"] as string)
+        : null;
+    const tier = mapCandidateProjectionTier(status, tierOverride, tierSource);
     if (tier === null) return [];
     const scores = (r["current_scores"] ?? {}) as Record<string, unknown>;
     const rationale = (r["rationale"] ?? {}) as Record<string, unknown>;
@@ -1282,14 +1231,6 @@ async function loadDiscovery(
       status,
       scoreNumber(scores["confidence"]),
       websiteUrl,
-      [
-        rationaleText(rationale["whyInteresting"]),
-        rationaleText(rationale["risks"]),
-        rationaleText(rationale["unknowns"]),
-      ].join(" "),
-    );
-    const verdict = deriveRound2Verdict(
-      name,
       [
         rationaleText(rationale["whyInteresting"]),
         rationaleText(rationale["risks"]),
@@ -1311,6 +1252,14 @@ async function loadDiscovery(
         goldenV1Member: false,
         tier,
         ...investorAssessment,
+        investorPriority:
+          tierSource === "human"
+            ? tier === "high_interest"
+              ? 1
+              : tier === "evaluate"
+                ? 2
+                : 3
+            : investorAssessment.investorPriority,
         oversizeFlag: isSubsidiaryName(name),
         pipelineStatus: status,
         fit: scoreNumber(scores["fit"]),
@@ -1319,8 +1268,8 @@ async function loadDiscovery(
         actionability: scoreNumber(scores["actionability"]),
         ensembleDecision: null,
         ensembleConfidence: null,
-        ownershipStatus: verdict.ownershipStatus,
-        pipelineDecision: verdict.pipelineDecision,
+        ownershipStatus: "unknown",
+        pipelineDecision: "unreviewed",
         whyInteresting: rationaleText(rationale["whyInteresting"]),
         risks: rationaleText(rationale["risks"]),
         unknowns: rationaleText(rationale["unknowns"]),
@@ -1339,48 +1288,155 @@ async function loadDiscovery(
   });
 }
 
+export function mapEnsembleProjectionTier(
+  decision: string | null,
+  promotionStatus: "ready" | "diligence_hold" | "excluded",
+  hasSupportedProductFit: boolean,
+): "high_interest" | "evaluate" | "needs_research" {
+  if (decision === "high_priority") {
+    return promotionStatus === "ready" ? "high_interest" : "evaluate";
+  }
+  return hasSupportedProductFit ? "evaluate" : "needs_research";
+}
+
 async function loadEnsemble(
   query: (
     text: string,
     params: unknown[],
   ) => Promise<{ rows: Record<string, unknown>[] }>,
+  expectedReviewInputContract: ExpectedFaaReviewInputContract,
 ): Promise<UnifiedTargetRow[]> {
   const { rows } = await query(
-    `SELECT r.signal_id, r.final_decision, r.final_confidence, r.reason,
-            s.raw_name, s.raw_domain, s.city, s.state, s.country, s.source_payload,
-            COALESCE((
-              SELECT jsonb_agg(DISTINCT ts.signal)
-              FROM faa_ensemble_evaluations eval
-              CROSS JOIN LATERAL jsonb_array_elements_text(
-                COALESCE(eval.thesis_signals, '[]'::jsonb)
-              ) AS ts(signal)
-              WHERE eval.signal_id = r.signal_id
-            ), '[]'::jsonb) AS thesis_signals
-     FROM faa_ensemble_results r
-     JOIN source_signals s ON s.id = r.signal_id
-     WHERE r.final_decision IN ('research', 'high_priority')`,
-    [],
+    `SELECT st.signal_id, r.final_decision, r.final_confidence, r.reason,
+            r.muse_evaluation_id,
+            st.research_evidence,
+            jev.decision AS jev_decision,
+            jev.disqualifiers AS jev_disqualifiers,
+            jev.missing_evidence AS jev_missing_evidence,
+            muse.decision AS muse_decision,
+            muse.disqualifiers AS muse_disqualifiers,
+            muse.missing_evidence AS muse_missing_evidence,
+            s.raw_name, s.source_payload
+     FROM signal_review_state st
+     JOIN source_signals s ON s.id = st.signal_id
+     JOIN faa_ensemble_evaluations jev
+       ON jev.id = st.jev_evaluation_id
+      AND jev.signal_id = st.signal_id
+      AND jev.input_hash = st.input_hash
+      AND jev.error IS NULL
+      AND jev.decision IS NOT NULL
+     LEFT JOIN faa_ensemble_results r
+       ON r.signal_id = st.signal_id
+      AND r.input_hash = st.input_hash
+      AND r.jev_evaluation_id = st.jev_evaluation_id
+     LEFT JOIN faa_ensemble_evaluations muse
+       ON muse.id = r.muse_evaluation_id
+      AND muse.signal_id = st.signal_id
+      AND muse.input_hash = st.input_hash
+      AND muse.error IS NULL
+      AND muse.decision IS NOT NULL
+     WHERE st.phase = 'settled'
+       AND st.input_hash IS NOT NULL
+       AND st.source_revision = s.review_revision
+       AND st.input_manifest->'sourceRevision' = to_jsonb(st.source_revision)
+       AND st.input_manifest->>'version' = $1
+       AND st.input_manifest->'policy'->>'ladder' = $2
+       AND st.input_manifest->'policy'->>'jevModel' = $3
+       AND st.input_manifest->'policy'->>'museModel' = $4
+       AND st.input_manifest->'policy'->>'evaluatorPrompt' = $5
+       AND st.input_manifest->'policy'->>'jevAuditSampleRate' = $6
+       AND jev.decision IN ('research', 'high_priority')`,
+    [
+      expectedReviewInputContract.version,
+      expectedReviewInputContract.policy.ladder,
+      expectedReviewInputContract.policy.jevModel,
+      expectedReviewInputContract.policy.museModel,
+      expectedReviewInputContract.policy.evaluatorPrompt,
+      String(expectedReviewInputContract.policy.jevAuditSampleRate),
+    ],
   );
   return rows.flatMap((r) => {
     const name = String(r["raw_name"] ?? "").trim();
-    if (name === "") return [];
-    const decision =
+    const signalId =
+      typeof r["signal_id"] === "string" ? (r["signal_id"] as string) : null;
+    if (name === "" || signalId === null) return [];
+    const finalDecision =
       typeof r["final_decision"] === "string"
         ? (r["final_decision"] as string)
-        : "";
-    const tier = mapEnsembleTier(decision);
-    if (tier === null) return [];
-    const thesisSignals = Array.isArray(r["thesis_signals"])
-      ? (r["thesis_signals"] as unknown[]).filter(
-          (signal): signal is string =>
-            typeof signal === "string" && signal.trim() !== "",
-        )
-      : [];
-    const investorAssessment = mapEnsembleInvestorAssessment(
-      decision,
-      thesisSignals,
+        : null;
+    const jevDecision =
+      typeof r["jev_decision"] === "string"
+        ? (r["jev_decision"] as string)
+        : null;
+    const museDecision =
+      typeof r["muse_decision"] === "string"
+        ? (r["muse_decision"] as string)
+        : null;
+    const hasMuseResult =
+      finalDecision !== null &&
+      museDecision !== null &&
+      typeof r["muse_evaluation_id"] === "string";
+    const decision = hasMuseResult ? finalDecision : jevDecision;
+    const asStringList = (value: unknown): string[] =>
+      Array.isArray(value)
+        ? value.filter(
+            (item): item is string =>
+              typeof item === "string" && item.trim() !== "",
+          )
+        : [];
+    const jevDisqualifiers = asStringList(r["jev_disqualifiers"]);
+    const museDisqualifiers = asStringList(r["muse_disqualifiers"]);
+    const researchEvidence = parseSignalResearchEvidence(
+      r["research_evidence"],
     );
-    if (investorAssessment === null) return [];
+    const promotion = assessPromotionEvidence({
+      finalDecision: hasMuseResult ? finalDecision : null,
+      jevDecision,
+      museDecision,
+      researchEvidence: r["research_evidence"],
+      jevDisqualifiers,
+      museDisqualifiers,
+    });
+    const evidenceRefs = researchEvidence.evidenceRefs ?? [];
+    const revenueIndicatorIds = (
+      researchEvidence.size?.indicators ?? []
+    ).flatMap((indicator) =>
+      indicator.kind === "revenue" && indicator.evidenceId !== undefined
+        ? [indicator.evidenceId]
+        : [],
+    );
+    const sizeSupported = hasResearchSupportEvidence(
+      revenueIndicatorIds,
+      "size",
+      evidenceRefs,
+    );
+    const sizeAssessment = sizeSupported
+      ? researchEvidence.size?.assessment
+      : "unknown";
+    // Evidence supports promotion assessment but cannot create human facts.
+    const namedProductIds = new Set(
+      researchEvidence.website?.namedProductEvidenceIds ?? [],
+    );
+    const hasProductProof = evidenceRefs.some(
+      (ref) =>
+        ref.role === "support" &&
+        ref.firstParty === true &&
+        ref.stage === "website" &&
+        ref.evidenceId !== undefined &&
+        namedProductIds.has(ref.evidenceId),
+    );
+    const hasSupportedProductFit =
+      promotion.verifiedDomain !== null && hasProductProof;
+    const missing = [
+      ...(researchEvidence.missingFacts ?? []),
+      ...asStringList(r["jev_missing_evidence"]),
+      ...asStringList(r["muse_missing_evidence"]),
+      ...promotion.reasons,
+    ];
+    const disqualifiers = [...jevDisqualifiers, ...museDisqualifiers];
+    const evidenceUrls = (researchEvidence.evidenceRefs ?? []).flatMap((ref) =>
+      ref.url === undefined ? [] : [ref.url],
+    );
     const payload = (r["source_payload"] ?? {}) as Record<string, unknown>;
     const guidUrl =
       typeof payload["guid_url"] === "string" && payload["guid_url"] !== ""
@@ -1388,69 +1444,69 @@ async function loadEnsemble(
         : typeof payload["guidUrl"] === "string" && payload["guidUrl"] !== ""
           ? (payload["guidUrl"] as string)
           : null;
-    const makes = Array.isArray(payload["makes"])
-      ? (payload["makes"] as unknown[])
-          .filter((m): m is string => typeof m === "string" && m.trim() !== "")
-          .slice(0, 12)
-      : [];
-    const address =
-      typeof payload["address"] === "string" && payload["address"].trim() !== ""
-        ? (payload["address"] as string).trim()
-        : null;
-    const bits = [
-      makes.length > 0 ? `makes: ${makes.join(", ")}` : null,
-      address,
-    ].filter((b): b is string => b !== null);
+    if (guidUrl !== null) evidenceUrls.push(guidUrl);
+    const hq = researchEvidence.headquarters;
+    const hqSupportedByEvidence = hasResearchSupportEvidence(
+      hq?.supportEvidenceIds ?? [],
+      "hq",
+      evidenceRefs,
+    );
+    const supportedHq = hq?.status === "supported" && hqSupportedByEvidence;
+    const confidenceValue = hasMuseResult ? r["final_confidence"] : null;
+    const conf =
+      typeof confidenceValue === "number"
+        ? confidenceValue
+        : typeof confidenceValue === "string" && confidenceValue.trim() !== ""
+          ? Number(confidenceValue)
+          : Number.NaN;
     const reason =
-      typeof r["reason"] === "string" && r["reason"].trim() !== ""
+      hasMuseResult &&
+      typeof r["reason"] === "string" &&
+      r["reason"].trim() !== ""
         ? (r["reason"] as string).trim()
         : null;
-    const whyInteresting =
-      bits.length > 0
-        ? `FAA PMA holder (${bits.join("; ")})${reason ? ` — ${reason}` : ""}`
-        : reason;
-    const rawDomain =
-      typeof r["raw_domain"] === "string" && r["raw_domain"] !== ""
-        ? (r["raw_domain"] as string).toLowerCase()
-        : null;
-    const conf =
-      typeof r["final_confidence"] === "number"
-        ? (r["final_confidence"] as number)
-        : Number(r["final_confidence"]);
-    const verdict = deriveRound2Verdict(name, whyInteresting);
+    const tier = mapEnsembleProjectionTier(
+      decision,
+      promotion.status,
+      hasSupportedProductFit,
+    );
     return [
       {
         companyName: name,
-        domain: rawDomain,
-        websiteUrl: null,
-        city: typeof r["city"] === "string" ? (r["city"] as string) : null,
-        stateCode:
-          typeof r["state"] === "string" ? (r["state"] as string) : null,
-        countryCode:
-          typeof r["country"] === "string" ? (r["country"] as string) : null,
+        domain: promotion.verifiedDomain,
+        websiteUrl:
+          promotion.verifiedDomain === null
+            ? null
+            : `https://${promotion.verifiedDomain}`,
+        city: supportedHq ? (hq.city ?? null) : null,
+        stateCode: supportedHq ? (hq.state ?? null) : null,
+        countryCode: supportedHq ? (hq.country ?? null) : null,
         origin: ORIGIN_FAA_ENSEMBLE,
         goldenV1Member: false,
         tier,
-        ...investorAssessment,
-        oversizeFlag: isSubsidiaryName(name),
-        pipelineStatus: null,
+        investorPriority:
+          promotion.status === "ready" ? 1 : tier === "evaluate" ? 2 : 3,
+        proprietaryBasis: hasProductProof ? "product" : "unknown",
+        oversizeFlag: sizeAssessment === "over_50m",
+        pipelineStatus: hasMuseResult ? promotion.status : "jev_complete",
         fit: null,
         novelty: null,
         confidence: null,
         actionability: null,
         ensembleDecision: decision,
         ensembleConfidence: Number.isFinite(conf) ? conf : null,
-        ownershipStatus: verdict.ownershipStatus,
-        pipelineDecision: verdict.pipelineDecision,
-        whyInteresting,
-        risks: null,
-        unknowns: null,
-        evidenceUrls: guidUrl ? [guidUrl] : [],
+        ownershipStatus: "unknown",
+        pipelineDecision: "unreviewed",
+        whyInteresting: reason,
+        risks:
+          disqualifiers.length === 0
+            ? null
+            : [...new Set(disqualifiers)].join("; "),
+        unknowns:
+          missing.length === 0 ? null : [...new Set(missing)].join("; "),
+        evidenceUrls: [...new Set(evidenceUrls)],
         companyId: null,
-        signalId:
-          typeof r["signal_id"] === "string"
-            ? (r["signal_id"] as string)
-            : null,
+        signalId,
         candidateId: null,
       } satisfies UnifiedTargetRow,
     ];
@@ -1481,6 +1537,8 @@ export function parsePopulateArgs(argv: readonly string[]): {
 }
 
 export interface PopulateUnifiedTargetsOptions {
+  /** Exact current model/prompt/policy contract. */
+  expectedReviewInputContract: ExpectedFaaReviewInputContract;
   /** Curated CSV path; defaults to `exports/curated-aerospace-targets-evidence.csv`. */
   curatedCsvPath?: string;
 }
@@ -1492,30 +1550,41 @@ export type PopulateSourceKey =
   | typeof ORIGIN_FAA_ENSEMBLE;
 
 /**
- * Run the full unified-targets refresh: load all four sources and upsert
- * each batch. Idempotent and rerunnable; safe while the FAA ensemble
- * benchmark writes concurrently. Returns per-source inserted/merged counts.
- *
- * A missing curated CSV is treated as an empty source (keeps the nightly
- * refresh autonomous) rather than failing the whole run.
+ * Run the full refresh. Only attributable stale ensemble assessments are
+ * invalidated before reference, curated, candidate, and current-review replay.
+ * Durable identity, evidence, membership, and human facts remain unchanged,
+ * and the same entrypoint is idempotent on retry.
  */
 export async function populateUnifiedTargets(
   db: QueryableDb,
-  opts: PopulateUnifiedTargetsOptions = {},
+  opts: PopulateUnifiedTargetsOptions,
 ): Promise<Record<PopulateSourceKey, SourceCounts>> {
+  const expectedReviewInputContract = opts?.expectedReviewInputContract;
+  if (expectedReviewInputContract === undefined) {
+    throw new TypeError(
+      "populateUnifiedTargets requires expectedReviewInputContract",
+    );
+  }
   const query = queryFnFor(db);
   const curatedPath = opts.curatedCsvPath ?? DEFAULT_CURATED_CSV_PATH;
+  const reconciliation = await reconcileUnifiedTargetMachineProjections(
+    db,
+    expectedReviewInputContract,
+  );
   const goldenV1 = await upsertBatch(query, await loadGolden(query));
   const curated = await upsertBatch(
     query,
     existsSync(curatedPath) ? loadCurated(curatedPath) : [],
   );
   const discovery = await upsertBatch(query, await loadDiscovery(query));
-  const faaEnsemble = await upsertBatch(query, await loadEnsemble(query));
+  const faaEnsemble = await upsertBatch(
+    query,
+    await loadEnsemble(query, expectedReviewInputContract),
+  );
   return {
     [ORIGIN_GOLDEN_V1]: goldenV1,
     [ORIGIN_CURATED]: curated,
     [ORIGIN_DISCOVERY]: discovery,
-    [ORIGIN_FAA_ENSEMBLE]: faaEnsemble,
+    [ORIGIN_FAA_ENSEMBLE]: { ...faaEnsemble, reconciliation },
   };
 }

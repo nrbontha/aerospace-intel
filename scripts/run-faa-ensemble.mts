@@ -1,42 +1,29 @@
 /**
- * High-recall filter over queued source signals. By default it drains every
- * queued source key; pass `--source-key faa_pma_database` to limit to FAA PMA
- * holders. Each signal is evaluated independently by two models; the
- * deterministic ensemble rule accepts agreements, defaults research +
- * high_priority pairs to research, and adjudicates every other disagreement
- * (including malformed model output). API failures are recorded as errors
- * with retry — NEVER as decisions.
+ * Current-input FAA signal review CLI.
  *
- * The runner persists `faa_ensemble_evaluations` + `faa_ensemble_results`
- * rows only. It deliberately does NOT write candidates, leads, or
- * `source_signals.status` — promotion wiring is a later decision.
+ * Persisting runs claim evidence-ready review state, execute the complete JEv
+ * ladder, then verify due Muse claims against the same frozen canonical input.
+ * Provider failures remain retryable and no unlinked historical evaluation can
+ * suppress or replace a current result. `--limit` is a per-stage batch cap;
+ * zero uses the bounded production default.
  *
  * Usage:
- *   npx tsx scripts/run-faa-ensemble.mts [--limit N] [--status S]
- *     [--source-key K[,K...]] [--dry-run] [--sample N] [--concurrency N]
- *     [--include-known] [--benchmark-names a,b,c] [--failed-only]
+ *   npx tsx scripts/run-faa-ensemble.mts [--limit N] [--dry-run]
+ *     [--concurrency N] [--delay-ms N]
  *
- * `--source-key` accepts a comma-separated list; omit it, use an empty value,
- * or pass `all` to select every queued source key.
- *
- * Thin CLI wrapper: all ensemble logic lives in
- * `packages/research/src/faa-ensemble/runner.js` and is re-exported below so
- * existing importers (including tests) keep working untouched.
+ * Thin CLI wrapper: production logic lives in
+ * `packages/research/src/faa-ensemble/runner.js`.
  */
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import process from "node:process";
 
-import {
-  closeDatabase,
-  getDatabase,
-} from "../packages/database/src/index.js";
+import { closeDatabase } from "../packages/database/src/index.js";
 
 export * from "../packages/research/src/faa-ensemble/runner.js";
 import {
   DEFAULT_FAA_STATUS,
-  loadKnownNames,
   resolveEnsembleConfig,
   runFaaEnsemble,
   type FaaEnsembleCliOptions,
@@ -73,6 +60,11 @@ function flagValue(argv: readonly string[], flag: string): string | undefined {
 function hasFlag(argv: readonly string[], flag: string): boolean {
   return argv.includes(flag);
 }
+function hasOption(argv: readonly string[], flag: string): boolean {
+  return argv.some(
+    (argument) => argument === flag || argument.startsWith(`${flag}=`),
+  );
+}
 
 function parseNonNegativeInt(
   raw: string | undefined,
@@ -94,6 +86,23 @@ export function parseEnsembleArgs(
   const status = flagValue(argv, "--status") ?? DEFAULT_FAA_STATUS;
   const sourceKeys = parseSourceKeys(flagValue(argv, "--source-key"));
   const dryRun = hasFlag(argv, "--dry-run");
+  if (!dryRun) {
+    const unsupported = [
+      "--status",
+      "--source-key",
+      "--sample",
+      "--include-known",
+      "--benchmark-names",
+      "--failed-only",
+    ].filter((flag) => hasOption(argv, flag));
+    if (unsupported.length > 0) {
+      throw new Error(
+        `${unsupported.join(", ")} ${
+          unsupported.length === 1 ? "is" : "are"
+        } supported only with --dry-run; live work is selected atomically from review claims`,
+      );
+    }
+  }
   const sample = parseNonNegativeInt(flagValue(argv, "--sample"), "--sample");
   const concurrencyOverride = parseNonNegativeInt(
     flagValue(argv, "--concurrency"),
@@ -140,20 +149,12 @@ function parseSourceKeys(raw: string | undefined): readonly string[] {
 
 async function main(): Promise<void> {
   const options = parseEnsembleArgs(process.argv.slice(2));
-  if (!options.includeKnown && !options.dryRun) {
-    // Surface the known-name filter size without disturbing the hot path.
-    const db = getDatabase();
-    try {
-      const known = await loadKnownNames(db);
-      console.log(
-        `known-name filter: ${known.size} names (golden_examples + companies)`,
-      );
-    } finally {
-      await closeDatabase();
-    }
-  }
   const summary = await runFaaEnsemble(options);
-  console.log(`signals=${summary.signals}`);
+  console.log(
+    summary.dryRunCandidates === null
+      ? JSON.stringify({ jev: summary.jev, muse: summary.muse })
+      : `dry_run_candidates=${summary.dryRunCandidates}`,
+  );
   await closeDatabase();
 }
 

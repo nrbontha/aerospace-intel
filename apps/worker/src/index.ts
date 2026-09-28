@@ -299,20 +299,15 @@ export async function startWorker(): Promise<WorkerRuntime> {
     });
     log("info", "campaign.sweep_started", {});
 
-    // Autonomous sourcing loops: a fast JEv sweep+ladder loop (60s) plus the
-    // slow verify/enrich/unify/promote loop (30min), both in one scheduler.
-    // Never throws: the scheduler logs and skips per step, the loops share
-    // nothing but DB state, and both stay off without an API key.
-    if (env.OPENROUTER_API_KEY !== undefined) {
-      ensembleScheduler = startEnsembleScheduler({
-        logger: log,
-        apiKey: env.OPENROUTER_API_KEY,
-        model: env.FAA_MODEL_A,
-      });
-      log("info", "ensemble.scheduler_started", { model: env.FAA_MODEL_A });
-    } else {
-      log("warn", "ensemble.scheduler_disabled", { reason: "missing_api_key" });
-    }
+    // Autonomous, lease-fenced review loops start even when one optional
+    // provider is unavailable. Each stage owns its actual dependency and
+    // durable defer/retry policy; database-only reconciliation must never be
+    // held behind OpenRouter or Muse health.
+    ensembleScheduler = startEnsembleScheduler({ logger: log });
+    log("info", "ensemble.scheduler_started", {
+      exaConfigured: process.env.EXA_API_KEY !== undefined,
+      openRouterConfigured: env.OPENROUTER_API_KEY !== undefined,
+    });
   } catch (error) {
     try {
       await stopComponents(healthServer, queue, supervisor);

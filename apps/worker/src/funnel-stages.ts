@@ -1,19 +1,21 @@
 import type { Database } from "@asi/database/client";
 import { populateUnifiedTargets, promoteEnsembleLeads } from "@asi/database";
 import {
+  currentFaaReviewInputContract,
+  reconcileCurrentReviewInputs,
   canSpendExa,
   EXA_CONTENTS_COST_USD,
   EXA_SEARCH_COST_USD,
   getExaDailySpendUsd,
   OWNERSHIP_CHECK_TICK_CAP,
-  runJevSweep,
-  runLadderRescreen,
-  runMuseVerification,
+  runSignalEvidenceResearch,
+  runJevReviews,
+  runMuseReviews,
   runOwnershipChecks,
   runWebsiteEnrichment,
 } from "@asi/research";
 
-/** Max website enrichments per tick (unvetted HP/P1 without website evidence). */
+/** Max website enrichments per tick across the bounded research backlog. */
 export const WEBSITE_ENRICHMENT_TICK_CAP = 10;
 
 export interface FunnelStageConfig {
@@ -21,10 +23,10 @@ export interface FunnelStageConfig {
   batchLimit: number;
   concurrency: number;
   delayMs: number;
-  sweepLimit: number;
-  sweepConcurrency: number;
   ladderConcurrency: number;
   verifyLimit: number;
+  evidenceLimit: number;
+  evidenceConcurrency: number;
 }
 
 export interface FunnelStageContext {
@@ -45,89 +47,73 @@ export interface FunnelStage {
 }
 
 /**
- * BACKFILL INVARIANT: every stage below selects work by artifact ABSENCE, not
- * by recency or by "created since last tick". A target qualifies when an
- * upstream artifact exists (or the source row exists) AND the stage's own
- * output artifact is missing. Consequence: adding a brand-new stage step
- * automatically backfills it over all existing targets on the next tick, with
- * no migration and no catch-up job.
+ * REVIEW INVARIANT: raw signals are first registered in signal_review_state,
+ * then each network/model stage claims a bounded, lease-fenced phase. Stage
+ * ordering is a prompt handoff only; durable review state is authoritative,
+ * so one stage failing cannot let a downstream stage consume incomplete
+ * input or block independent reconciliation.
  *
- * Per-stage examples:
- * - jev-sweep: a signal with no JEv evaluation row gets screened, even if it
- *   was ingested months before this stage existed.
- * - muse-verify: a JEv-flagged signal with no Muse evaluation row gets
- *   verified, even if flagged long ago.
- * - ownership: an HP-unified name with no ownership observation gets checked,
- *   even if unified before ownership checks were added.
- * - website-enrich: an unvetted HP/P1 name with no website evidence rows gets
- *   enriched, even if it predates the enricher.
- * - unify-refresh: per-source upserts are idempotent, so a newly added source
- *   key backfills every one of its rows on the next tick.
- * - promote: an HP result row that was never promoted becomes a lead, even if
- *   it qualified before promotion existed.
- *
- * Keep this property when adding stages: gate on the absence of YOUR output
- * artifact, never on timestamps or tick cursors.
+ * Legacy enrichment stages still select by artifact absence. The new review
+ * lifecycle instead owns currentness, retry backoff, and same-signal
+ * exclusion in the database.
  */
 
 /**
- * Fast loop: JEv sweep + ladder rescreen. Both are ~100ms/call local-model
- * steps gated on artifact absence, so they crunch the backlog on a short
- * interval while Muse verification follows at its own pace. Handoff between
- * the loops is DB state only — no shared tick lock.
+ * Fast loop: bounded sourced evidence research (including review-state
+ * bootstrap), then current-input JEv review. Each stage owns its real
+ * dependency/budget checks and durable retry state; the scheduler does not
+ * probe or globally gate them.
  */
 export const FAST_STAGES: readonly FunnelStage[] = [
   {
-    key: "jev-sweep",
-    label: "JEv sweep",
+    key: "signal-evidence",
+    label: "Signal evidence research",
     async run(ctx) {
-      const sweep = await runJevSweep(ctx.db, {
-        limit: ctx.config.sweepLimit,
-        concurrency: ctx.config.sweepConcurrency,
+      const research = await runSignalEvidenceResearch({
+        db: ctx.db,
+        limit: ctx.config.evidenceLimit,
+        concurrency: ctx.config.evidenceConcurrency,
       });
       return {
-        done: sweep.screened,
-        note: `screened=${sweep.screened} flagged=${sweep.flagged} errors=${sweep.errors}`,
-        screened: sweep.screened,
-        flagged: sweep.flagged,
-        errors: sweep.errors,
+        done: research.completed,
+        note:
+          `claimed=${research.claimed} completed=${research.completed} ` +
+          `retryableFailures=${research.retryableFailures} deferred=${research.deferred} ` +
+          `ambiguous=${research.ambiguous} noFinding=${research.noFinding} ` +
+          `skipped=${research.skipped ?? "none"} costUsd=${research.costUsd}`,
+        ...research,
       };
     },
   },
   {
     key: "jev-ladder",
-    label: "JEv ladder rescreen",
+    label: "Current-input JEv review",
     async run(ctx) {
-      const ladder = await runLadderRescreen(ctx.db, {
-        limit: ctx.config.sweepLimit,
+      const review = await runJevReviews(ctx.db, {
+        limit: ctx.config.batchLimit,
         concurrency: ctx.config.ladderConcurrency,
       });
       return {
-        done: ladder.screened,
+        done: review.screened,
         note:
-          `screened=${ladder.screened} hp=${ladder.hp} ` +
-          `research=${ladder.research} rejected=${ladder.rejected} ` +
-          `costUsd=${ladder.costUsd}`,
-        screened: ladder.screened,
-        hp: ladder.hp,
-        research: ladder.research,
-        rejected: ladder.rejected,
-        costUsd: ladder.costUsd,
+          `screened=${review.screened} hp=${review.hp} ` +
+          `research=${review.research} rejected=${review.rejected} ` +
+          `errors=${review.errors} stale=${review.stale} costUsd=${review.costUsd}`,
+        ...review,
       };
     },
   },
 ];
-
 /**
- * Slow loop: Muse verification + ownership + website enrichment + unified
- * refresh + promotion. Keeps the existing 30-minute cadence and concurrency.
+ * Muse has its own loop so provider latency/outage cannot delay Exa
+ * maintenance or database-only reconciliation.
  */
-export const SLOW_STAGES: readonly FunnelStage[] = [
+export const MUSE_STAGES: readonly FunnelStage[] = [
   {
     key: "muse-verify",
     label: "Muse verification",
     async run(ctx) {
-      const verification = await runMuseVerification(ctx.db, {
+      const verification = await runMuseReviews(ctx.db, {
         limit: ctx.config.verifyLimit,
         concurrency: ctx.config.concurrency,
       });
@@ -135,14 +121,19 @@ export const SLOW_STAGES: readonly FunnelStage[] = [
         done: verification.verified,
         note:
           `verified=${verification.verified} confirmed=${verification.confirmed} ` +
-          `overruled=${verification.overruled} errors=${verification.errors}`,
-        verified: verification.verified,
-        confirmed: verification.confirmed,
-        overruled: verification.overruled,
-        errors: verification.errors,
+          `overruled=${verification.overruled} errors=${verification.errors} ` +
+          `stale=${verification.stale}`,
+        ...verification,
       };
     },
   },
+];
+
+/**
+ * Slow independent maintenance/projection loop. Promotion remains safe when
+ * Muse is unavailable because it consumes only lease-fenced settled reviews.
+ */
+export const SLOW_STAGES: readonly FunnelStage[] = [
   {
     key: "ownership",
     label: "Ownership checks",
@@ -209,7 +200,10 @@ export const SLOW_STAGES: readonly FunnelStage[] = [
     key: "unify-refresh",
     label: "Unified refresh",
     async run(ctx) {
-      const refreshed = await populateUnifiedTargets(ctx.db);
+      await reconcileCurrentReviewInputs(ctx.db);
+      const refreshed = await populateUnifiedTargets(ctx.db, {
+        expectedReviewInputContract: currentFaaReviewInputContract(),
+      });
       const sourceCount = Object.keys(refreshed).length;
       return {
         done: sourceCount,
@@ -222,19 +216,25 @@ export const SLOW_STAGES: readonly FunnelStage[] = [
     key: "promote",
     label: "Lead promotion",
     async run(ctx) {
-      const promotion = await promoteEnsembleLeads(ctx.db);
+      await reconcileCurrentReviewInputs(ctx.db);
+      const promotion = await promoteEnsembleLeads(ctx.db, {
+        expectedReviewInputContract: currentFaaReviewInputContract(),
+      });
       return {
         done: promotion.promoted,
-        note: `promoted=${promotion.promoted} skipped=${promotion.skipped}`,
-        promoted: promotion.promoted,
-        skipped: promotion.skipped,
+        note:
+          `promoted=${promotion.promoted} eligible=${promotion.eligible} ` +
+          `held=${promotion.held} excluded=${promotion.excluded} ` +
+          `skipped=${promotion.skipped}`,
+        ...promotion,
       };
     },
   },
 ];
 
-/** Full registry in run order (fast stages first, then slow). */
+/** Full registry in durable lifecycle order. */
 export const FUNNEL_STAGES: readonly FunnelStage[] = [
   ...FAST_STAGES,
+  ...MUSE_STAGES,
   ...SLOW_STAGES,
 ];

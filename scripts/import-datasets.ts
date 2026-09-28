@@ -4,19 +4,29 @@
  *   npx tsx scripts/import-datasets.ts [--data-dir data] [--effective-date YYYY-MM-DD]
  *
  * Imports, in order:
- *   1. golden-set-v01          — 'Golden Set Targets' sheet (18 members)
- *   2. grata-enrichment-v01    — 'Grata Data' sheet (18 members)
- *   3. preliminary-pipeline-v01— 'M&A Pipeline' sheet (246 MEMBERS ONLY;
- *                                Priority preserved verbatim in raw_payload;
- *                                pipeline rows are NEVER leads)
- *   + Database Sources sheet   → data_sources (5 nominated sources)
- *   + golden examples          → 18 proposed-label rows
+ *   1. golden-set-v01                   — 'Golden Set Targets' sheet (18 members)
+ *   2. grata-enrichment-v01             — 'Grata Data' sheet (18 members)
+ *   3. preliminary-pipeline-v01         — 'M&A Pipeline' sheet (246 MEMBERS ONLY;
+ *                                         Priority preserved verbatim in raw_payload;
+ *                                         pipeline rows are NEVER leads)
+ *   4. booie-original29-2026-09-09      — all 29 pre-pipeline review names
+ *                                         (membership only; no guessed domains)
+ *   5. ma-priorities-sample36-2026-09-09— dated 36-name SAMPLE, not the full 303
+ *                                         (membership only; no priority labels)
+ *   + Database Sources sheet            → data_sources (5 nominated sources)
+ *   + golden examples                   → 18 proposed-label rows
  *
  * Snapshots are keyed and idempotent: same key + same content sha256 skips,
  * same key + different sha errors. Real workbooks live gitignored under
  * data/ (copied from ~/Downloads when absent) and are never committed.
  */
-import { copyFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+} from "node:fs";
 import path from "node:path";
 
 import {
@@ -32,6 +42,8 @@ import {
   sha256Hex,
   type MatchBreakdown,
 } from "@asi/database";
+import { INVESTOR_VERDICTS_V1 } from "../packages/research/src/scoring-axial/fixtures/investor-verdicts.js";
+import { MA_PRIORITIES_V1 } from "../packages/research/src/scoring-axial/fixtures/ma-priorities.js";
 
 const DOWNLOAD_FALLBACKS: Record<string, string> = {
   "golden-set-v01.xlsx": "ADCO-golden-set.xlsx",
@@ -66,7 +78,9 @@ function resolveWorkbook(dataDir: string, fileName: string): Uint8Array {
   if (!existsSync(filePath)) {
     const fallback = DOWNLOAD_FALLBACKS[fileName];
     const fallbackPath =
-      fallback === undefined ? null : path.join(process.env.HOME ?? "", "Downloads", fallback);
+      fallback === undefined
+        ? null
+        : path.join(process.env.HOME ?? "", "Downloads", fallback);
     if (fallbackPath !== null && existsSync(fallbackPath)) {
       mkdirSync(dataDir, { recursive: true });
       copyFileSync(fallbackPath, filePath);
@@ -89,6 +103,22 @@ interface SummaryRow {
   status: string;
   members: number;
   breakdown: MatchBreakdown;
+}
+
+interface FrozenMembership {
+  rawName: string;
+  rawDomain: string | null;
+  sourceRow: number;
+}
+
+function frozenMembershipBytes(
+  members: readonly FrozenMembership[],
+): Uint8Array {
+  const nameDomainPairs = members.map((member) => [
+    member.rawName,
+    member.rawDomain,
+  ]);
+  return new TextEncoder().encode(JSON.stringify(nameDomainPairs));
 }
 
 function printSnapshotTable(rows: SummaryRow[]): void {
@@ -121,6 +151,20 @@ async function main(): Promise<void> {
   const grataRows = parseGrataData(goldenBytes);
   const pipeline = parsePipeline(pipelineBytes);
 
+  const booieOriginal29: FrozenMembership[] = INVESTOR_VERDICTS_V1.map(
+    (entry, index) => ({
+      rawName: entry.name,
+      rawDomain: null,
+      sourceRow: index + 1,
+    }),
+  );
+  const maPrioritiesSample36: FrozenMembership[] = MA_PRIORITIES_V1.map(
+    (entry, index) => ({
+      rawName: entry.name,
+      rawDomain: entry.domain,
+      sourceRow: index + 1,
+    }),
+  );
   const summaries: SummaryRow[] = [];
 
   const snapshotJobs = [
@@ -129,7 +173,9 @@ async function main(): Promise<void> {
       name: "Golden Set v01 (ADCO workbook)",
       sourceType: "golden_set_workbook" as const,
       bytes: goldenBytes,
-      date: effectiveDate ?? fileDate(path.join(dataDir, "golden-set-v01.xlsx")),
+      importFileName: "golden-set-v01.xlsx",
+      date:
+        effectiveDate ?? fileDate(path.join(dataDir, "golden-set-v01.xlsx")),
       notes:
         "Qualifying parameters: " +
         `${goldenSet.criteria.qualifying.length}; disqualifying: ${goldenSet.criteria.disqualifying.length}.`,
@@ -145,7 +191,9 @@ async function main(): Promise<void> {
       name: "Grata Enrichment v01",
       sourceType: "grata_enrichment" as const,
       bytes: goldenBytes,
-      date: effectiveDate ?? fileDate(path.join(dataDir, "golden-set-v01.xlsx")),
+      importFileName: "golden-set-v01.xlsx",
+      date:
+        effectiveDate ?? fileDate(path.join(dataDir, "golden-set-v01.xlsx")),
       notes: "Grata enrichment columns for the golden set.",
       members: grataRows.map((row) => ({
         rawName: row.name,
@@ -159,7 +207,10 @@ async function main(): Promise<void> {
       name: "Preliminary Pipeline v01 (ADCO workbook)",
       sourceType: "preliminary_pipeline" as const,
       bytes: pipelineBytes,
-      date: effectiveDate ?? fileDate(path.join(dataDir, "preliminary-pipeline.xlsx")),
+      importFileName: "preliminary-pipeline.xlsx",
+      date:
+        effectiveDate ??
+        fileDate(path.join(dataDir, "preliminary-pipeline.xlsx")),
       notes:
         "Known-universe members only. Pipeline rows are never leads; " +
         "Priority is preserved verbatim inside raw_payload.",
@@ -212,13 +263,47 @@ async function main(): Promise<void> {
         };
       }),
     },
+    {
+      key: "booie-original29-2026-09-09",
+      name: "Booie Original 29 (2026-09-09 membership)",
+      sourceType: "external_export" as const,
+      bytes: frozenMembershipBytes(booieOriginal29),
+      importFileName: "investor-verdicts.ts",
+      date: "2026-09-09",
+      notes:
+        "Complete membership-only reconstruction, from the frozen " +
+        "investor-verdicts-v1 fixture, of all 29 names appearing in the " +
+        "2026-09-09 Nikhil New Targets investor review before the new JEv " +
+        "pipeline. Presence is provenance only; verdict, ownership, and decision " +
+        "labels are intentionally excluded. The fixture has no verified domains, " +
+        "so none were guessed. source_row is the one-based fixture array order, " +
+        "not an unavailable source workbook row.",
+      members: booieOriginal29,
+    },
+    {
+      key: "ma-priorities-sample36-2026-09-09",
+      name: "M&A Priorities Sample 36 (2026-09-09 membership)",
+      sourceType: "external_export" as const,
+      bytes: frozenMembershipBytes(maPrioritiesSample36),
+      importFileName: "ma-priorities.ts",
+      date: "2026-09-09",
+      notes:
+        "Membership-only 36-row stratified sample (12 each from Priority 1/2/3) " +
+        "from the frozen ma-priorities-v1 fixture, sourced from the separately " +
+        "described 303-row 2026-09-09 M&A Pipeline CSV. This snapshot is not the " +
+        "complete 303-row source. Presence is provenance only; priority, " +
+        "ownership, financial, category, and expected-priority labels are " +
+        "intentionally excluded. source_row is the one-based fixture array order, " +
+        "not an unavailable source CSV row.",
+      members: maPrioritiesSample36,
+    },
   ];
   for (const job of snapshotJobs) {
     const result = await createKnownUniverseSnapshot(db, {
       key: job.key,
       name: job.name,
       sourceType: job.sourceType,
-      importFileName: path.basename(job.bytes === goldenBytes ? "golden-set-v01.xlsx" : "preliminary-pipeline.xlsx"),
+      importFileName: job.importFileName,
       effectiveDate: job.date,
       notes: job.notes,
       contentSha256: sha256Hex(job.bytes),

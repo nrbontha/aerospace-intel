@@ -36,6 +36,540 @@ export function normalizeTargetName(name: string): string {
     .replace(/[,.\s]+$/, "");
 }
 
+export const AUTHORITATIVE_PRE_JEV_SNAPSHOT_KEYS = [
+  "golden-set-v01",
+  "preliminary-pipeline-v01",
+  "ma-pipeline-20260926",
+  "booie-original29-2026-09-09",
+  "ma-priorities-sample36-2026-09-09",
+] as const;
+
+export const ORIGINAL_BOOIE_LIST_NAMES = [
+  "Ametek Ameron LLC d/b/a Mass Systems",
+  "B/E Aerospace Inc, DBA, SMR Technologies Inc",
+  "Butler National Corporation",
+  "Avcon Industries",
+  "BNC Tempe",
+  "CPI Eimac Division",
+  "Dart Aerospace",
+  "Jet Parts Engineering, Inc. (JPE)",
+  "Kirkhill Aircraft Parts Company",
+  "PRECISION AIRMOTIVE LLC",
+  "Raisbeck Engineering Inc",
+  "Robertson Fuel Systems LLC",
+  "Shadin Avionics",
+  "Sirius Technologies, Inc., DBA Flight Display System",
+  "Turbine Kinetics Inc, Subsidiary of HEICO Corp",
+  "Vibro-Meter Corp",
+  "Wellman Products Group",
+  "Meggitt Thermal Systems Inc",
+  "VisionSafe Corporation",
+  "Electronics International",
+  "Alpha Aviation",
+  "Composite Specialties",
+  "Concorde Battery",
+  "Middle Fork",
+  "M-20 Oil",
+  "Keddeg",
+  "Whelen",
+  "Delta Flight Products",
+  "Skydweller",
+] as const;
+
+const ORIGINAL_BOOIE_NORMALIZED_NAMES: Readonly<Record<string, true>> =
+  Object.fromEntries(
+    ORIGINAL_BOOIE_LIST_NAMES.map((name) => [normalizeTargetName(name), true]),
+  );
+
+/** Exact original-list presence only. It is report provenance, never evidence. */
+export function isOriginalBooieListName(name: string): boolean {
+  return ORIGINAL_BOOIE_NORMALIZED_NAMES[normalizeTargetName(name)] === true;
+}
+
+export function normalizeTargetDomain(
+  value: string | null | undefined,
+): string | null {
+  const trimmed = value?.trim();
+  if (trimmed === undefined || trimmed === "") return null;
+  try {
+    const url = new URL(
+      /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ? trimmed : `https://${trimmed}`,
+    );
+    return url.hostname
+      .toLowerCase()
+      .replace(/^www\./, "")
+      .replace(/\.$/, "");
+  } catch {
+    return null;
+  }
+}
+
+export interface KnownUniverseIdentity {
+  normalizedName: string | null;
+  normalizedDomain: string | null;
+}
+
+export type KnownUniverseMatchBasis = "exact_domain" | "exact_name" | null;
+
+/**
+ * Authoritative membership identity: exact domain, or exact name only when
+ * the source member has no usable domain. Probable aliases never auto-match.
+ */
+export function matchKnownUniverseIdentity(
+  target: KnownUniverseIdentity,
+  member: KnownUniverseIdentity,
+): KnownUniverseMatchBasis {
+  const targetDomain = normalizeTargetDomain(target.normalizedDomain);
+  const memberDomain = normalizeTargetDomain(member.normalizedDomain);
+  if (
+    targetDomain !== null &&
+    memberDomain !== null &&
+    targetDomain === memberDomain
+  ) {
+    return "exact_domain";
+  }
+  if (
+    memberDomain === null &&
+    target.normalizedName !== null &&
+    member.normalizedName !== null &&
+    normalizeTargetName(target.normalizedName) ===
+      normalizeTargetName(member.normalizedName)
+  ) {
+    return "exact_name";
+  }
+  return null;
+}
+
+export interface SignalResearchEvidence {
+  version?: string;
+  signalId?: string;
+  identity?: {
+    status?: string;
+    verifiedDomain?: string | null;
+    proofEvidenceIds?: readonly string[];
+  };
+  website?: {
+    status?: string;
+    offering?: string;
+    namedProductEvidenceIds?: readonly string[];
+  };
+  ownership?: {
+    status?: string;
+    supportEvidenceIds?: readonly string[];
+  };
+  size?: {
+    status?: string;
+    assessment?: string;
+    indicators?: readonly {
+      kind?: string;
+      evidenceId?: string;
+    }[];
+  };
+  headquarters?: {
+    status?: string;
+    city?: string | null;
+    state?: string | null;
+    country?: string | null;
+    supportEvidenceIds?: readonly string[];
+  };
+  missingFacts?: readonly string[];
+  evidenceRefs?: readonly {
+    evidenceId?: string;
+    stage?: string;
+    role?: string;
+    url?: string;
+    quote?: string;
+    firstParty?: boolean;
+  }[];
+}
+
+function recordOrNull(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
+}
+
+function stringOrUndefined(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() !== ""
+    ? value.trim()
+    : undefined;
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.flatMap((item) => {
+        const text = stringOrUndefined(item);
+        return text === undefined ? [] : [text];
+      })
+    : [];
+}
+
+/** Defensive reader for the durable, versioned signal research snapshot. */
+export function parseSignalResearchEvidence(
+  value: unknown,
+): SignalResearchEvidence {
+  const root = recordOrNull(value) ?? {};
+  const identity = recordOrNull(root["identity"]) ?? {};
+  const website = recordOrNull(root["website"]) ?? {};
+  const ownership = recordOrNull(root["ownership"]) ?? {};
+  const size = recordOrNull(root["size"]) ?? {};
+  const headquarters = recordOrNull(root["headquarters"]) ?? {};
+  const sizeIndicators = Array.isArray(size["indicators"])
+    ? size["indicators"].flatMap((item) => {
+        const indicator = recordOrNull(item);
+        if (indicator === null) return [];
+        const kind = stringOrUndefined(indicator["kind"]);
+        const evidenceId = stringOrUndefined(indicator["evidenceId"]);
+        return [
+          {
+            ...(kind === undefined ? {} : { kind }),
+            ...(evidenceId === undefined ? {} : { evidenceId }),
+          },
+        ];
+      })
+    : [];
+  const evidenceRefs = Array.isArray(root["evidenceRefs"])
+    ? root["evidenceRefs"].flatMap((item) => {
+        const ref = recordOrNull(item);
+        if (ref === null) return [];
+        const role = stringOrUndefined(ref["role"]);
+        const evidenceId = stringOrUndefined(ref["evidenceId"]);
+        const stage = stringOrUndefined(ref["stage"]);
+        const url = stringOrUndefined(ref["url"]);
+        const quote = stringOrUndefined(ref["quote"]);
+        const firstParty =
+          typeof ref["firstParty"] === "boolean"
+            ? ref["firstParty"]
+            : undefined;
+        return [
+          {
+            ...(role === undefined ? {} : { role }),
+            ...(evidenceId === undefined ? {} : { evidenceId }),
+            ...(stage === undefined ? {} : { stage }),
+            ...(url === undefined ? {} : { url }),
+            ...(quote === undefined ? {} : { quote }),
+            ...(firstParty === undefined ? {} : { firstParty }),
+          },
+        ];
+      })
+    : [];
+  const version = stringOrUndefined(root["version"]);
+  const signalId = stringOrUndefined(root["signalId"]);
+  const identityStatus = stringOrUndefined(identity["status"]);
+  const websiteStatus = stringOrUndefined(website["status"]);
+  const offering = stringOrUndefined(website["offering"]);
+  const ownershipStatus = stringOrUndefined(ownership["status"]);
+  const sizeStatus = stringOrUndefined(size["status"]);
+  const sizeAssessment = stringOrUndefined(size["assessment"]);
+  const headquartersStatus = stringOrUndefined(headquarters["status"]);
+  return {
+    ...(version === undefined ? {} : { version }),
+    ...(signalId === undefined ? {} : { signalId }),
+    identity: {
+      ...(identityStatus === undefined ? {} : { status: identityStatus }),
+      verifiedDomain: stringOrUndefined(identity["verifiedDomain"]) ?? null,
+      proofEvidenceIds: stringList(identity["proofEvidenceIds"]),
+    },
+    website: {
+      ...(websiteStatus === undefined ? {} : { status: websiteStatus }),
+      ...(offering === undefined ? {} : { offering }),
+      namedProductEvidenceIds: stringList(website["namedProductEvidenceIds"]),
+    },
+    ownership: {
+      ...(ownershipStatus === undefined ? {} : { status: ownershipStatus }),
+      supportEvidenceIds: stringList(ownership["supportEvidenceIds"]),
+    },
+    size: {
+      ...(sizeStatus === undefined ? {} : { status: sizeStatus }),
+      ...(sizeAssessment === undefined ? {} : { assessment: sizeAssessment }),
+      indicators: sizeIndicators,
+    },
+    headquarters: {
+      ...(headquartersStatus === undefined
+        ? {}
+        : { status: headquartersStatus }),
+      city: stringOrUndefined(headquarters["city"]) ?? null,
+      state: stringOrUndefined(headquarters["state"]) ?? null,
+      country: stringOrUndefined(headquarters["country"]) ?? null,
+      supportEvidenceIds: stringList(headquarters["supportEvidenceIds"]),
+    },
+    missingFacts: stringList(root["missingFacts"]),
+    evidenceRefs,
+  };
+}
+
+export interface PromotionEvidenceInput {
+  finalDecision: string | null;
+  jevDecision: string | null;
+  museDecision: string | null;
+  researchEvidence: unknown;
+  jevDisqualifiers?: readonly string[];
+  museDisqualifiers?: readonly string[];
+}
+
+export interface PromotionEvidenceAssessment {
+  status: "ready" | "diligence_hold" | "excluded";
+  reasons: string[];
+  verifiedDomain: string | null;
+}
+
+const US_COUNTRIES: Readonly<Record<string, true>> = {
+  us: true,
+  usa: true,
+  "united states": true,
+  "united states of america": true,
+};
+
+export function hasResearchSupportEvidence(
+  ids: readonly string[],
+  stage: string,
+  refs: NonNullable<SignalResearchEvidence["evidenceRefs"]>,
+): boolean {
+  const expected = new Set(ids);
+  return refs.some(
+    (ref) =>
+      ref.role === "support" &&
+      ref.stage === stage &&
+      ref.evidenceId !== undefined &&
+      expected.has(ref.evidenceId),
+  );
+}
+
+/**
+ * Final acquisition gate. Unknown ownership, size, or HQ remains a visible
+ * diligence hold; model agreement cannot manufacture any of these facts.
+ */
+export function assessPromotionEvidence(
+  input: PromotionEvidenceInput,
+): PromotionEvidenceAssessment {
+  const evidence = parseSignalResearchEvidence(input.researchEvidence);
+  const reasons: string[] = [];
+  const excluded: string[] = [];
+  const refs = evidence.evidenceRefs ?? [];
+  const identityDomain = normalizeTargetDomain(
+    evidence.identity?.verifiedDomain,
+  );
+  const identityProofIds = new Set(evidence.identity?.proofEvidenceIds ?? []);
+  const hasIdentityProof = refs.some(
+    (ref) =>
+      ref.role === "support" &&
+      ref.firstParty === true &&
+      ref.stage === "domain" &&
+      ref.evidenceId !== undefined &&
+      identityProofIds.has(ref.evidenceId),
+  );
+  const verifiedDomain =
+    evidence.identity?.status === "verified" && hasIdentityProof
+      ? identityDomain
+      : null;
+  if (verifiedDomain === null) {
+    reasons.push("verified official identity/domain missing");
+  }
+
+  const namedProductIds = new Set(
+    evidence.website?.namedProductEvidenceIds ?? [],
+  );
+  const hasFirstPartyProductProof = refs.some(
+    (ref) =>
+      ref.role === "support" &&
+      ref.firstParty === true &&
+      ref.stage === "website" &&
+      ref.evidenceId !== undefined &&
+      namedProductIds.has(ref.evidenceId),
+  );
+  if (!hasFirstPartyProductProof) {
+    reasons.push("supplier-owned named product evidence missing");
+  }
+
+  const ownership = evidence.ownership?.status;
+  const hasOwnershipProof = hasResearchSupportEvidence(
+    evidence.ownership?.supportEvidenceIds ?? [],
+    "ownership",
+    refs,
+  );
+  if (
+    hasOwnershipProof &&
+    (ownership === "acquired" ||
+      ownership === "pe_owned" ||
+      ownership === "public_parent" ||
+      ownership === "dead")
+  ) {
+    excluded.push(`ownership exclusion: ${ownership}`);
+  } else if (ownership !== "independent" || !hasOwnershipProof) {
+    reasons.push("independent ownership unverified");
+  }
+
+  const revenueIndicatorIds = (evidence.size?.indicators ?? []).flatMap(
+    (indicator) =>
+      indicator.kind === "revenue" && indicator.evidenceId !== undefined
+        ? [indicator.evidenceId]
+        : [],
+  );
+  const hasRevenueProof = hasResearchSupportEvidence(
+    revenueIndicatorIds,
+    "size",
+    refs,
+  );
+  if (evidence.size?.assessment === "over_50m" && hasRevenueProof) {
+    excluded.push("sourced revenue exceeds $50m");
+  } else if (evidence.size?.assessment !== "under_50m" || !hasRevenueProof) {
+    reasons.push("sub-$50m revenue unverified");
+  }
+
+  const hqCountry = evidence.headquarters?.country?.trim().toLowerCase();
+  const hasHqProof = hasResearchSupportEvidence(
+    evidence.headquarters?.supportEvidenceIds ?? [],
+    "hq",
+    refs,
+  );
+  if (
+    evidence.headquarters?.status !== "supported" ||
+    hqCountry === undefined ||
+    US_COUNTRIES[hqCountry] !== true ||
+    !hasHqProof
+  ) {
+    reasons.push("US headquarters unverified");
+  }
+
+  const disqualifiers = [
+    ...(input.jevDisqualifiers ?? []),
+    ...(input.museDisqualifiers ?? []),
+  ]
+    .map((item) => item.trim())
+    .filter((item) => item !== "");
+  if (disqualifiers.length > 0) {
+    excluded.push(...disqualifiers.map((item) => `review exclusion: ${item}`));
+  }
+
+  if (
+    input.finalDecision !== "high_priority" ||
+    input.jevDecision !== "high_priority" ||
+    input.museDecision !== "high_priority"
+  ) {
+    reasons.push("same-input Jev and Muse high-priority agreement missing");
+  }
+
+  if (excluded.length > 0) {
+    return {
+      status: "excluded",
+      reasons: [...excluded, ...reasons],
+      verifiedDomain,
+    };
+  }
+  if (reasons.length > 0) {
+    return { status: "diligence_hold", reasons, verifiedDomain };
+  }
+  return { status: "ready", reasons: [], verifiedDomain };
+}
+
+export interface ExpectedFaaReviewInputContract {
+  readonly version: string;
+  readonly policy: {
+    readonly ladder: string;
+    readonly jevModel: string;
+    readonly museModel: string;
+    readonly evaluatorPrompt: string;
+    readonly jevAuditSampleRate: number;
+  };
+}
+
+export function matchesExpectedReviewInputContract(
+  inputManifest: unknown,
+  expected: ExpectedFaaReviewInputContract | null,
+): boolean {
+  if (expected === null) return false;
+  const manifest = recordOrNull(inputManifest);
+  const policy = recordOrNull(manifest?.["policy"]);
+  if (manifest === null || policy === null) return false;
+  return (
+    manifest["version"] === expected.version &&
+    policy["ladder"] === expected.policy.ladder &&
+    policy["jevModel"] === expected.policy.jevModel &&
+    policy["museModel"] === expected.policy.museModel &&
+    policy["evaluatorPrompt"] === expected.policy.evaluatorPrompt &&
+    policy["jevAuditSampleRate"] === expected.policy.jevAuditSampleRate
+  );
+}
+
+export function reviewInputManifestMatchesSourceRevision(
+  inputManifest: unknown,
+  sourceRevision: number | null,
+): boolean {
+  const manifest = recordOrNull(inputManifest);
+  return (
+    sourceRevision !== null && manifest?.["sourceRevision"] === sourceRevision
+  );
+}
+
+export interface CurrentReviewLinkage {
+  phase: string | null;
+  stateInputHash: string | null;
+  stateJevEvaluationId: string | null;
+  stateSourceRevision: number | null;
+  signalSourceRevision: number | null;
+  inputManifest: unknown;
+  resultInputHash: string | null;
+  resultJevEvaluationId: string | null;
+  resultMuseEvaluationId: string | null;
+  jev: {
+    id: string | null;
+    signalId: string | null;
+    inputHash: string | null;
+    decision: string | null;
+    error: string | null;
+  };
+  muse: {
+    id: string | null;
+    signalId: string | null;
+    inputHash: string | null;
+    decision: string | null;
+    error: string | null;
+  };
+  signalId: string | null;
+}
+
+/** Source revision, hash, and evaluation pointers must all be current. */
+export function hasCurrentReviewLinkage(value: CurrentReviewLinkage): boolean {
+  const hash = value.stateInputHash;
+  return (
+    value.phase === "settled" &&
+    hash !== null &&
+    value.signalId !== null &&
+    value.stateSourceRevision !== null &&
+    value.signalSourceRevision !== null &&
+    value.stateSourceRevision === value.signalSourceRevision &&
+    reviewInputManifestMatchesSourceRevision(
+      value.inputManifest,
+      value.stateSourceRevision,
+    ) &&
+    value.resultInputHash === hash &&
+    value.stateJevEvaluationId !== null &&
+    value.resultJevEvaluationId === value.stateJevEvaluationId &&
+    value.resultMuseEvaluationId !== null &&
+    value.jev.id === value.resultJevEvaluationId &&
+    value.muse.id === value.resultMuseEvaluationId &&
+    value.jev.signalId === value.signalId &&
+    value.muse.signalId === value.signalId &&
+    value.jev.inputHash === hash &&
+    value.muse.inputHash === hash &&
+    value.jev.error === null &&
+    value.muse.error === null &&
+    value.jev.decision !== null &&
+    value.muse.decision !== null
+  );
+}
+
+/** Current review proof also requires the caller's expected model/policy contract. */
+export function isCurrentReviewLinkage(
+  value: CurrentReviewLinkage,
+  expectedContract: ExpectedFaaReviewInputContract | null,
+): boolean {
+  return (
+    hasCurrentReviewLinkage(value) &&
+    matchesExpectedReviewInputContract(value.inputManifest, expectedContract)
+  );
+}
+
 /** SQL fragment ranking a tier string without downgrading on merge. */
 export type TierRankExpr = SQL;
 
@@ -54,6 +588,18 @@ function jsonbArrayUnionExpr(column: string): JsonbArrayUnionExpr {
   );
 }
 
+const MACHINE_ONLY_PROJECTION_SQL = sql`
+  COALESCE("unified_targets"."origins", '[]'::jsonb) <@ '["faa_ensemble"]'::jsonb
+  AND "unified_targets"."golden_v1_member" = false
+  AND COALESCE("unified_targets"."pipeline_decision", 'unreviewed') = 'unreviewed'
+  AND NOT EXISTS (
+    SELECT 1
+    FROM candidates candidate
+    WHERE candidate.id = "unified_targets"."candidate_id"
+      AND candidate.tier_source::text = 'human'
+  )
+`;
+
 /**
  * Ownership merge: any non-unknown value wins over unknown. When both sides
  * are known the existing row wins (first writer retains precision).
@@ -70,12 +616,11 @@ function pipelineDecisionRankExpr(columnRef: string): SQL {
 }
 
 /**
- * Insert one unified target, merging into the existing row when
- * `normalized_name` already exists. Origins and evidence URLs are
- * array-unioned, nullable scalars keep the existing value unless the new row
- * provides one, and tier never downgrades
- * (reference > high_interest > evaluate > needs_research). Single statement,
- * safe under concurrent writers.
+ * Insert one target while keeping source identity/provenance additive.
+ * Current ensemble fields replace older machine-only projections, including
+ * with NULL. Rationale from curated/candidate, reference, or human-protected
+ * records remains durable across an ensemble refresh. The population
+ * entrypoint separately clears stale machine-only assessment state.
  */
 export async function upsertUnifiedTarget(
   db: Database,
@@ -91,6 +636,12 @@ export async function upsertUnifiedTarget(
     .values(values)
     .onConflictDoUpdate({
       target: unifiedTargets.normalizedName,
+      setWhere: sql`
+        "unified_targets"."domain" IS NULL
+        OR excluded."domain" IS NULL
+        OR lower(regexp_replace(rtrim("unified_targets"."domain", '.'), '^www\\.', '', 'i'))
+          = lower(regexp_replace(rtrim(excluded."domain", '.'), '^www\\.', '', 'i'))
+      `,
       set: {
         companyName: sql`excluded."company_name"`,
         domain: sql`COALESCE(excluded."domain", "unified_targets"."domain")`,
@@ -100,8 +651,34 @@ export async function upsertUnifiedTarget(
         countryCode: sql`COALESCE(excluded."country_code", "unified_targets"."country_code")`,
         origins: jsonbArrayUnionExpr("origins"),
         goldenV1Member: sql`"unified_targets"."golden_v1_member" OR COALESCE(excluded."golden_v1_member", false)`,
-        tier: sql`CASE WHEN ${tierRankExpr('excluded."tier"')} > ${tierRankExpr('"unified_targets"."tier"')} THEN excluded."tier" ELSE "unified_targets"."tier" END`,
+        tier: sql`CASE
+          WHEN COALESCE(excluded."origins", '[]'::jsonb) ? 'faa_ensemble'
+            AND EXISTS (
+              SELECT 1
+              FROM candidates candidate
+              WHERE candidate.id = "unified_targets"."candidate_id"
+                AND candidate.tier_source::text = 'human'
+            )
+            THEN "unified_targets"."tier"
+          WHEN COALESCE(excluded."origins", '[]'::jsonb) ? 'faa_ensemble'
+            AND COALESCE("unified_targets"."origins", '[]'::jsonb) <@ '["faa_ensemble"]'::jsonb
+            THEN excluded."tier"
+          WHEN ${tierRankExpr('excluded."tier"')} > ${tierRankExpr('"unified_targets"."tier"')}
+            THEN excluded."tier"
+          ELSE "unified_targets"."tier"
+        END`,
         investorPriority: sql`CASE
+          WHEN COALESCE(excluded."origins", '[]'::jsonb) ? 'faa_ensemble'
+            AND EXISTS (
+              SELECT 1
+              FROM candidates candidate
+              WHERE candidate.id = "unified_targets"."candidate_id"
+                AND candidate.tier_source::text = 'human'
+            )
+            THEN "unified_targets"."investor_priority"
+          WHEN COALESCE(excluded."origins", '[]'::jsonb) ? 'faa_ensemble'
+            AND COALESCE("unified_targets"."origins", '[]'::jsonb) <@ '["faa_ensemble"]'::jsonb
+            THEN excluded."investor_priority"
           WHEN "unified_targets"."investor_priority" IS NULL THEN excluded."investor_priority"
           WHEN excluded."investor_priority" IS NULL THEN "unified_targets"."investor_priority"
           WHEN excluded."investor_priority" < "unified_targets"."investor_priority" THEN excluded."investor_priority"
@@ -125,11 +702,34 @@ export async function upsertUnifiedTarget(
         novelty: sql`COALESCE(excluded."novelty", "unified_targets"."novelty")`,
         confidence: sql`COALESCE(excluded."confidence", "unified_targets"."confidence")`,
         actionability: sql`COALESCE(excluded."actionability", "unified_targets"."actionability")`,
-        ensembleDecision: sql`COALESCE(excluded."ensemble_decision", "unified_targets"."ensemble_decision")`,
-        ensembleConfidence: sql`COALESCE(excluded."ensemble_confidence", "unified_targets"."ensemble_confidence")`,
-        whyInteresting: sql`COALESCE(excluded."why_interesting", "unified_targets"."why_interesting")`,
-        risks: sql`COALESCE(excluded."risks", "unified_targets"."risks")`,
-        unknowns: sql`COALESCE(excluded."unknowns", "unified_targets"."unknowns")`,
+        ensembleDecision: sql`CASE
+          WHEN COALESCE(excluded."origins", '[]'::jsonb) ? 'faa_ensemble'
+            THEN excluded."ensemble_decision"
+          ELSE COALESCE(excluded."ensemble_decision", "unified_targets"."ensemble_decision")
+        END`,
+        ensembleConfidence: sql`CASE
+          WHEN COALESCE(excluded."origins", '[]'::jsonb) ? 'faa_ensemble'
+            THEN excluded."ensemble_confidence"
+          ELSE COALESCE(excluded."ensemble_confidence", "unified_targets"."ensemble_confidence")
+        END`,
+        whyInteresting: sql`CASE
+          WHEN COALESCE(excluded."origins", '[]'::jsonb) ? 'faa_ensemble'
+            AND ${MACHINE_ONLY_PROJECTION_SQL}
+            THEN excluded."why_interesting"
+          ELSE COALESCE("unified_targets"."why_interesting", excluded."why_interesting")
+        END`,
+        risks: sql`CASE
+          WHEN COALESCE(excluded."origins", '[]'::jsonb) ? 'faa_ensemble'
+            AND ${MACHINE_ONLY_PROJECTION_SQL}
+            THEN excluded."risks"
+          ELSE COALESCE("unified_targets"."risks", excluded."risks")
+        END`,
+        unknowns: sql`CASE
+          WHEN COALESCE(excluded."origins", '[]'::jsonb) ? 'faa_ensemble'
+            AND ${MACHINE_ONLY_PROJECTION_SQL}
+            THEN excluded."unknowns"
+          ELSE COALESCE("unified_targets"."unknowns", excluded."unknowns")
+        END`,
         evidenceUrls: jsonbArrayUnionExpr("evidence_urls"),
         companyId: sql`COALESCE(excluded."company_id", "unified_targets"."company_id")`,
         signalId: sql`COALESCE(excluded."signal_id", "unified_targets"."signal_id")`,
@@ -139,12 +739,12 @@ export async function upsertUnifiedTarget(
     })
     .returning();
   const row = rows[0];
-  if (row === undefined) {
-    throw new Error(
-      `unified_targets upsert returned no row for ${values.normalizedName}`,
-    );
-  }
-  return row;
+  if (row !== undefined) return row;
+  const preserved = await getUnifiedTarget(db, values.normalizedName);
+  if (preserved !== null) return preserved;
+  throw new Error(
+    `unified_targets upsert returned no row for ${values.normalizedName}`,
+  );
 }
 
 /** Read one target by company name (normalized before lookup). */

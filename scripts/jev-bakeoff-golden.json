@@ -1,20 +1,140 @@
-[
-  {"domain":"adpma.com","expected":"high_priority","makes":["proprietary aircraft parts line"],"modelsSample":["FAA-PMA aftermarket parts"],"name":"ADPMA","ownership":"independent","productEvidence":["proprietary aircraft parts line","FAA-PMA aftermarket supplier"],"revenue":"<5m"},
-  {"domain":"armstrong-mfg.com","expected":"high_priority","makes":["own aviation pump line"],"modelsSample":[],"name":"Armstrong Manufacturing","ownership":"independent","productEvidence":["own aviation pump line"],"revenue":"5-10m"},
-  {"domain":"fiberdynamics.net","expected":"research","makes":[],"modelsSample":[],"name":"Fiber Dynamics","note":"demonstrated PROCESS trap: must not HP","ownership":"independent","productEvidence":[],"revenue":"10-20m"},
-  {"domain":"tempestaero.com","expected":"reject","makes":["six PMA brands"],"modelsSample":["FAA-PMA parts"],"name":"Tempest Aero","note":"pe_owned veto despite strong product","ownership":"pe_owned","productEvidence":["six PMA brands"],"revenue":"20-35m"},
-  {"domain":"jay-em.com","expected":"research","makes":[],"modelsSample":[],"name":"Jay-Em Aerospace","note":"BTP-major, no product: must not reject, must not HP","ownership":"independent","productEvidence":[],"revenue":"<5m"},
-  {"domain":"aero-space.us","expected":"research","makes":["licensed drive-system fasteners"],"modelsSample":[],"name":"AMC Fasteners","note":"licensed-producer, BTP-major","ownership":"independent","productEvidence":["licensed producer of drive-system fasteners"],"revenue":"5-10m"},
-  {"domain":"skybolt.com","expected":"high_priority","makes":["patented fastener designs","registered trademarks"],"modelsSample":[],"name":"Skybolt","ownership":"independent","productEvidence":["patented designs","registered trademarks"],"revenue":"10-20m"},
-  {"domain":"acmt-usa.com","expected":"research","makes":["internally developed robotics"],"modelsSample":[],"name":"ACMT","note":"automation reads as process","ownership":"independent","productEvidence":["internally developed robotics and automation"],"revenue":"20-35m"},
-  {"domain":"thepdigroup.com","expected":"high_priority","makes":["defense spares"],"modelsSample":["ITAR-controlled spares"],"name":"PDI Group","ownership":"independent","productEvidence":["defense spares line"],"revenue":"20-35m"},
-  {"domain":"skylock.com","expected":"research","makes":[],"modelsSample":["military-approved locks (claim)"],"name":"Skylock Industries","note":"weak TBD claim: research not HP","ownership":"independent","productEvidence":[],"revenue":"20-35m"},
-  {"domain":"dac-ep.com","expected":"reject","makes":["engineered PMA brake replacements"],"modelsSample":["FAA-PMA brake parts"],"name":"DAC Engineered","note":"pe_owned veto despite strong product","ownership":"pe_owned","productEvidence":["engineered PMA brake replacements"],"revenue":"5-10m"},
-  {"domain":"mcneilindustries.com","expected":"high_priority","makes":["MAXAM bearing line (trademarked)"],"modelsSample":[],"name":"McNeil Industries","ownership":"independent","productEvidence":["trademarked MAXAM bearing line"],"revenue":"5-10m"},
-  {"domain":"romco.net","expected":"research","makes":["proprietary products for specific markets"],"modelsSample":[],"name":"Romco Manufacturing","note":"generic claim, no article","ownership":"independent","productEvidence":[],"revenue":"20-35m"},
-  {"domain":"cole-switches.com","expected":"high_priority","makes":["patented switches","part-numbered catalog"],"modelsSample":["Cole switch part numbers"],"name":"Cole Instrument","ownership":"independent","productEvidence":["patented products","published part numbers"],"revenue":"10-20m"},
-  {"domain":"rosenaviation.com","expected":"reject","makes":["cabin products"],"modelsSample":[],"name":"Rosen Aviation","note":"public_sub holdout: unactionable","ownership":"public","productEvidence":["cabin product line"],"revenue":"20-35m"},
-  {"domain":"jet-parts-engineering.com","expected":"reject","makes":["PMA parts"],"modelsSample":["FAA-PMA parts"],"name":"Jet Parts Engineering","note":"public_sub holdout despite PMA","ownership":"public","productEvidence":["PMA parts line"],"revenue":"10-20m"},
-  {"domain":"southwestantennas.com","expected":"reject","makes":["antenna product lines"],"modelsSample":[],"name":"Southwest Antennas","note":"public_sub holdout","ownership":"public","productEvidence":["antenna product lines"],"revenue":"5-10m"},
-  {"domain":"servotronics.com","expected":"reject","makes":["servo components"],"modelsSample":[],"name":"Servotronics","note":"public_sub holdout","ownership":"public","productEvidence":["servo product line"],"revenue":"20-35m"}
-]
+{
+  "version": "jev-golden-sourced-v2",
+  "cohort": "sourced_real",
+  "source": {
+    "kind": "workbook_identity",
+    "reference": "data/ADCO-golden-set.xlsx / Golden Set Targets",
+    "use": "Historical calibration/reference identities and decisions, not verified current acquisition eligibility. `referenceExpected` preserves original labels; `expected` retains those labels except the explicitly documented ADPMA conflict. Exact mismatches, false promotions and false rejects are relative to these references, not independently established current truth. This is not an untouched holdout or ownership/product evidence."
+  },
+  "inputPolicy": {
+    "ownershipStatus": "unknown unless separately sourced at runtime",
+    "awardCount": null,
+    "faaMakesAndModels": "context only; absent from these cases",
+    "websiteOffering": "never inferred from expected labels or fixture product phrases"
+  },
+  "cases": [
+    {
+      "id": "adpma",
+      "name": "ADPma, LLC",
+      "domain": "adpma.com",
+      "expected": "research",
+      "referenceExpected": "high_priority",
+      "labelBasis": "fit_archetype_only_actionability_unresolved",
+      "conflicts": [
+        "The workbook HP label preserves ADPMA as a fit archetype and describes Mollenhour Gross / independent ownership. No current sourced ownership fact is frozen, so strict current-input actionability is conservatively research; an HP decision is not rewarded as investor-ready truth."
+      ]
+    },
+    {
+      "id": "armstrong-manufacturing",
+      "name": "Armstrong Manufacturing & Engineering",
+      "domain": "armstrong-mfg.com",
+      "expected": "high_priority"
+    },
+    {
+      "id": "fiber-dynamics",
+      "name": "Fiber Dynamics, Inc.",
+      "domain": "fiberdynamics.net",
+      "expected": "research",
+      "labelNote": "A proprietary process is not a proprietary product."
+    },
+    {
+      "id": "tempest-aero",
+      "name": "Tempest Aero Group",
+      "domain": "tempestaero.com",
+      "expected": "reject",
+      "labelNote": "Workbook ownership label is scorer-only unless current sourced ownership evidence is supplied."
+    },
+    {
+      "id": "jay-em-aerospace",
+      "name": "Jay- Em Aerospace Corporation",
+      "domain": "jay-em.com",
+      "expected": "research"
+    },
+    {
+      "id": "aerospace-manufacturing",
+      "name": "Aerospace Manufacturing Corporation",
+      "domain": "aero-space.us",
+      "expected": "research"
+    },
+    {
+      "id": "skybolt",
+      "name": "Skybolt Aerospace Fasteners",
+      "domain": "skybolt.com",
+      "expected": "high_priority"
+    },
+    {
+      "id": "acmt",
+      "name": "ACMT",
+      "domain": "acmt-usa.com",
+      "expected": "research"
+    },
+    {
+      "id": "pdi-group",
+      "name": "The PDI Group",
+      "domain": "thepdigroup.com",
+      "expected": "high_priority"
+    },
+    {
+      "id": "skylock-industries",
+      "name": "Skylock Industries",
+      "domain": "skylock.com",
+      "expected": "research"
+    },
+    {
+      "id": "dac-engineered",
+      "name": "DAC Engineered Products",
+      "domain": "dac-ep.com",
+      "expected": "reject",
+      "labelNote": "Workbook ownership label is scorer-only unless current sourced ownership evidence is supplied."
+    },
+    {
+      "id": "mcneil-industries",
+      "name": "McNeil Industries",
+      "domain": "mcneilindustries.com",
+      "expected": "high_priority"
+    },
+    {
+      "id": "romco-manufacturing",
+      "name": "Romco Manufacturing",
+      "domain": "romco.net",
+      "expected": "research"
+    },
+    {
+      "id": "cole-instrument",
+      "name": "Cole Instrument Corporation",
+      "domain": "cole-switches.com",
+      "expected": "high_priority"
+    },
+    {
+      "id": "rosen-aviation",
+      "name": "Rosen Aviation",
+      "domain": "rosenaviation.com",
+      "expected": "reject",
+      "labelNote": "Workbook ownership label is scorer-only unless current sourced ownership evidence is supplied."
+    },
+    {
+      "id": "jet-parts-engineering",
+      "name": "Jet Parts Engineering, LLC",
+      "domain": "jetpartsengineering.com",
+      "expected": "reject",
+      "conflicts": [
+        "The prior bakeoff used jet-parts-engineering.com. The original workbook records jetpartsengineering.com; the alternate domain is not silently treated as the same identity."
+      ],
+      "labelNote": "Workbook ownership label is scorer-only unless current sourced ownership evidence is supplied."
+    },
+    {
+      "id": "southwest-antennas",
+      "name": "Southwest Antennas",
+      "domain": "southwestantennas.com",
+      "expected": "reject",
+      "labelNote": "Workbook ownership label is scorer-only unless current sourced ownership evidence is supplied."
+    },
+    {
+      "id": "servotronics",
+      "name": "Servotronics, Inc.",
+      "domain": "servotronics.com",
+      "expected": "reject",
+      "labelNote": "Workbook ownership label is scorer-only unless current sourced ownership evidence is supplied."
+    }
+  ]
+}

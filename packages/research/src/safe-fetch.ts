@@ -1,8 +1,15 @@
+import { isUtf8 } from "node:buffer";
 import { createHash } from "node:crypto";
 import { lookup } from "node:dns/promises";
-import { request as httpRequest, type IncomingMessage } from "node:http";
+import {
+  request as httpRequest,
+  type ClientRequest,
+  type IncomingMessage,
+  type RequestOptions,
+} from "node:http";
 import { request as httpsRequest } from "node:https";
 import { isIP, type LookupFunction } from "node:net";
+import { brotliDecompress, gunzip, inflate } from "node:zlib";
 
 const MAX_REDIRECTS = 3;
 const MAX_BYTES = 5 * 1024 * 1024;
@@ -22,10 +29,15 @@ export type SafeFetchErrorCode =
   | "too_many_redirects"
   | "http_error"
   | "unsupported_content_type"
+  | "unsupported_content_encoding"
+  | "invalid_content"
   | "content_too_large"
   | "network_error";
 export class SafeFetchError extends Error {
-  constructor(readonly code: SafeFetchErrorCode) {
+  constructor(
+    readonly code: SafeFetchErrorCode,
+    readonly status: number | null = null,
+  ) {
     super(
       {
         invalid_url: "Only credential-free HTTP(S) URLs are permitted",
@@ -36,6 +48,9 @@ export class SafeFetchError extends Error {
         too_many_redirects: "URL retrieval exceeded the redirect limit",
         http_error: "URL retrieval returned an unsuccessful response",
         unsupported_content_type: "URL response content type is not permitted",
+        unsupported_content_encoding:
+          "URL response content encoding is not supported",
+        invalid_content: "URL response content is not valid text",
         content_too_large: "URL response exceeded the byte limit",
         network_error: "URL retrieval failed",
       }[code],
@@ -43,6 +58,33 @@ export class SafeFetchError extends Error {
     this.name = "SafeFetchError";
   }
 }
+
+/** Retry only transient transport failures and explicitly transient HTTP statuses. */
+export function isRetryableSafeFetchError(error: unknown): boolean {
+  if (!(error instanceof SafeFetchError)) return true;
+  switch (error.code) {
+    case "dns_failed":
+    case "timeout":
+    case "cancelled":
+    case "network_error":
+      return true;
+    case "http_error":
+      return (
+        error.status === 408 ||
+        error.status === 429 ||
+        (error.status !== null && error.status >= 500 && error.status <= 599)
+      );
+    case "invalid_url":
+    case "blocked_destination":
+    case "too_many_redirects":
+    case "unsupported_content_type":
+    case "unsupported_content_encoding":
+    case "invalid_content":
+    case "content_too_large":
+      return false;
+  }
+}
+
 export interface SafeFetchHop {
   readonly url: string;
   readonly status: number;
@@ -60,15 +102,26 @@ export interface SafeFetchResult {
   readonly redirects: readonly SafeFetchHop[];
 }
 
+interface SafeFetchRequestOptions {
+  readonly userAgent?: string;
+  readonly accept?: string;
+}
+
+type SafeFetchRequest = (
+  url: URL,
+  options: RequestOptions,
+  callback: (response: IncomingMessage) => void,
+) => ClientRequest;
+
+interface SafeFetchOptions extends SafeFetchRequestOptions {
+  readonly signal?: AbortSignal;
+  /** Injectable transport boundary for deterministic response handling tests. */
+  readonly request?: SafeFetchRequest;
+}
+
 export async function safeFetchUrl(
   url: string,
-  options: {
-    readonly signal?: AbortSignal;
-    /** Override the default ASI-Research UA (browser-like fetches for WAF'd sites). */
-    readonly userAgent?: string;
-    /** Override the default Accept header value. */
-    readonly accept?: string;
-  } = {},
+  options: SafeFetchOptions = {},
 ): Promise<SafeFetchResult> {
   const started = Date.now();
   const controller = new AbortController();
@@ -89,27 +142,39 @@ export async function safeFetchUrl(
       redirectCount += 1
     ) {
       const addresses = await resolvePublic(current, controller.signal);
-      const response = await makeRequest(current, addresses, controller.signal, options);
+      const response = await makeRequest(
+        current,
+        addresses,
+        controller.signal,
+        options,
+        options.request,
+      );
+      const status = response.statusCode ?? null;
       if (isRedirect(response.statusCode)) {
         const location = response.headers.location;
         response.resume();
-        if (location === undefined) throw new SafeFetchError("http_error");
+        if (location === undefined)
+          throw new SafeFetchError("http_error", status);
         if (redirectCount === MAX_REDIRECTS)
-          throw new SafeFetchError("too_many_redirects");
+          throw new SafeFetchError("too_many_redirects", status);
         redirects.push({
           url: current.toString(),
           status: response.statusCode ?? 0,
           resolvedAddresses: addresses.map(({ address }) => address),
         });
-        current = parseUrl(new URL(location, current).toString());
+        try {
+          current = parseUrl(new URL(location, current).toString());
+        } catch (error) {
+          if (error instanceof SafeFetchError) {
+            throw new SafeFetchError(error.code, status);
+          }
+          throw new SafeFetchError("http_error", status);
+        }
         continue;
       }
-      if (
-        (response.statusCode ?? 0) < 200 ||
-        (response.statusCode ?? 0) >= 300
-      ) {
+      if (status === null || status < 200 || status >= 300) {
         response.resume();
-        throw new SafeFetchError("http_error");
+        throw new SafeFetchError("http_error", status);
       }
       const type = normalizeContentType(response.headers["content-type"]);
       if (type === null) {
@@ -121,12 +186,21 @@ export async function safeFetchUrl(
         response.destroy();
         throw new SafeFetchError("content_too_large");
       }
-      const body = await readBody(response);
+      let encodings: readonly SupportedContentEncoding[];
+      try {
+        encodings = parseContentEncodings(response.headers["content-encoding"]);
+      } catch (error) {
+        response.destroy();
+        throw error;
+      }
+      const wireBody = await readBody(response);
+      const body = await decodeBody(wireBody, encodings, controller.signal);
+      const content = decodeText(body);
       return {
         requestedUrl: requested.toString(),
         finalUrl: current.toString(),
         contentType: type,
-        content: body.toString("utf8"),
+        content,
         byteLength: body.byteLength,
         contentSha256: createHash("sha256").update(body).digest("hex"),
         retrievedAt: new Date().toISOString(),
@@ -202,7 +276,8 @@ function makeRequest(
   url: URL,
   addresses: readonly { address: string; family: 4 | 6 }[],
   signal: AbortSignal,
-  options: { readonly userAgent?: string; readonly accept?: string } = {},
+  options: SafeFetchRequestOptions = {},
+  request?: SafeFetchRequest,
 ): Promise<IncomingMessage> {
   const selected = addresses[0];
   if (selected === undefined) throw new SafeFetchError("dns_failed");
@@ -215,7 +290,8 @@ function makeRequest(
     else callback(null, selected.address, selected.family);
   };
   const { promise, resolve, reject } = Promise.withResolvers<IncomingMessage>();
-  const requester = url.protocol === "https:" ? httpsRequest : httpRequest;
+  const requester =
+    request ?? (url.protocol === "https:" ? httpsRequest : httpRequest);
   const req = requester(
     url,
     {
@@ -224,6 +300,7 @@ function makeRequest(
       signal,
       headers: {
         accept: options.accept ?? "text/html, text/plain, application/json",
+        "accept-encoding": "gzip, deflate, br",
         "user-agent": options.userAgent ?? "ASI-Research/1.0",
       },
     },
@@ -249,6 +326,88 @@ async function readBody(response: IncomingMessage): Promise<Buffer> {
     chunks.push(chunk);
   }
   return Buffer.concat(chunks, length);
+}
+
+type SupportedContentEncoding = "gzip" | "deflate" | "br";
+
+function parseContentEncodings(
+  value: string | string[] | undefined,
+): readonly SupportedContentEncoding[] {
+  if (value === undefined) return [];
+  const encodings = (Array.isArray(value) ? value.join(",") : value)
+    .split(",")
+    .map((encoding) => encoding.trim().toLowerCase());
+  if (encodings.some((encoding) => encoding.length === 0)) {
+    throw new SafeFetchError("invalid_content");
+  }
+  const supported: SupportedContentEncoding[] = [];
+  for (const encoding of encodings) {
+    if (encoding === "identity") continue;
+    if (encoding !== "gzip" && encoding !== "deflate" && encoding !== "br") {
+      throw new SafeFetchError("unsupported_content_encoding");
+    }
+    supported.push(encoding);
+  }
+  return supported;
+}
+
+async function decodeBody(
+  wireBody: Buffer,
+  encodings: readonly SupportedContentEncoding[],
+  signal: AbortSignal,
+): Promise<Buffer> {
+  let body = wireBody;
+  for (const encoding of encodings.toReversed()) {
+    body = await decodeLayer(body, encoding, signal);
+  }
+  return body;
+}
+
+function decodeLayer(
+  body: Buffer,
+  encoding: SupportedContentEncoding,
+  signal: AbortSignal,
+): Promise<Buffer> {
+  const decoded = new Promise<Buffer>((resolve, reject) => {
+    const complete = (error: Error | null, result: Buffer): void => {
+      if (error !== null) {
+        const code = (error as NodeJS.ErrnoException).code;
+        reject(
+          new SafeFetchError(
+            code === "ERR_BUFFER_TOO_LARGE"
+              ? "content_too_large"
+              : "invalid_content",
+          ),
+        );
+        return;
+      }
+      if (result.byteLength > MAX_BYTES) {
+        reject(new SafeFetchError("content_too_large"));
+        return;
+      }
+      resolve(result);
+    };
+    const options = { maxOutputLength: MAX_BYTES + 1 };
+    switch (encoding) {
+      case "gzip":
+        gunzip(body, options, complete);
+        break;
+      case "deflate":
+        inflate(body, options, complete);
+        break;
+      case "br":
+        brotliDecompress(body, options, complete);
+        break;
+    }
+  });
+  return abortable(decoded, signal);
+}
+
+function decodeText(body: Buffer): string {
+  if (body.includes(0) || !isUtf8(body)) {
+    throw new SafeFetchError("invalid_content");
+  }
+  return body.toString("utf8");
 }
 
 function normalizeContentType(

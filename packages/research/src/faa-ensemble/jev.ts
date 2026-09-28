@@ -5,6 +5,10 @@
  * probabilities out. No reasoning text, no JSON parsing, no repair loops.
  */
 import { z } from "zod";
+import {
+  classifyOpenRouterHttpFailure,
+  OpenRouterClientError,
+} from "../openrouter.js";
 
 export const JEV_MODEL = "typesafe/jev-1.13";
 const JEV_ENDPOINT = "https://openrouter.ai/api/alpha/decisions";
@@ -52,13 +56,17 @@ export async function callJev(
   const timeoutMs = opts?.timeoutMs ?? 60_000;
   const maxRetries = opts?.maxRetries ?? 4;
   let delayMs = 2_000;
-  let attempt = 0;
+  let retries = 0;
   // oxlint-disable-next-line no-constant-condition
   for (;;) {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, timeoutMs);
+    let response: Response;
     try {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      let response: Response;
       try {
         response = await fetch(JEV_ENDPOINT, {
           method: "POST",
@@ -72,34 +80,41 @@ export async function callJev(
       } finally {
         clearTimeout(timer);
       }
-      if (response.status === 429 || response.status >= 500) {
-        throw new Error(`jev_transient_http_${response.status}`);
-      }
-      if (!response.ok) {
-        const body = await response.text().catch(() => "");
-        throw new Error(
-          `JEv request was rejected (${response.status}): ${body.slice(0, 200)}`,
+    } catch {
+      if (retries >= maxRetries) {
+        throw new OpenRouterClientError(
+          timedOut ? "timeout" : "network_error",
+          true,
         );
       }
-      const parsed = jevResponseSchema.safeParse(await response.json());
-      if (!parsed.success) {
-        throw new Error("JEv returned an unparseable response envelope");
-      }
-      return {
-        answers: parsed.data.answers,
-        costUsd: parsed.data.usage?.cost ?? null,
-        model: parsed.data.model ?? null,
-      };
-    } catch (error) {
-      attempt += 1;
-      const message = error instanceof Error ? error.message : String(error);
-      const transient =
-        /transient|429|5\d\d|abort|ECONNRESET|ETIMEDOUT|fetch failed/i.test(
-          message,
-        );
-      if (!transient || attempt > maxRetries) throw error;
+      retries += 1;
       await sleep(delayMs);
       delayMs = Math.min(30_000, delayMs * 2);
+      continue;
     }
+    if (!response.ok) {
+      const body =
+        response.status === 403 ? await response.text().catch(() => "") : "";
+      const failure = classifyOpenRouterHttpFailure(response.status, body);
+      if (response.status !== 403) {
+        await response.body?.cancel().catch(() => undefined);
+      }
+      if (!failure.retryable || retries >= maxRetries) {
+        throw new OpenRouterClientError(failure.code, failure.retryable);
+      }
+      retries += 1;
+      await sleep(delayMs);
+      delayMs = Math.min(30_000, delayMs * 2);
+      continue;
+    }
+    const parsed = jevResponseSchema.safeParse(await response.json());
+    if (!parsed.success) {
+      throw new Error("JEv returned an unparseable response envelope");
+    }
+    return {
+      answers: parsed.data.answers,
+      costUsd: parsed.data.usage?.cost ?? null,
+      model: parsed.data.model ?? null,
+    };
   }
 }

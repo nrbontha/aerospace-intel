@@ -14,8 +14,12 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import process from "node:process";
 
-import { getPool } from "../packages/database/src/client.js";
+import { getDatabase, getPool } from "../packages/database/src/client.js";
 import { promoteEnsembleLeads } from "../packages/database/src/unified-targets/promote.js";
+import {
+  currentFaaReviewInputContract,
+  drainCurrentReviewInputs,
+} from "../packages/research/src/faa-ensemble/runner.js";
 
 // ---------------------------------------------------------------------------
 // env bootstrap (mirror scripts/run-faa-ensemble.mts: source .env.local)
@@ -50,7 +54,9 @@ export function parsePromoteArgs(argv: readonly string[]): {
     if (arg === "--limit" && i + 1 < argv.length) {
       const parsed = Number(argv[++i]!);
       if (!Number.isFinite(parsed) || parsed < 0) {
-        throw new Error(`--limit must be a non-negative number (got "${argv[i]}")`);
+        throw new Error(
+          `--limit must be a non-negative number (got "${argv[i]}")`,
+        );
       }
       limit = Math.floor(parsed);
     } else if (arg === "--dry-run") {
@@ -67,9 +73,14 @@ async function main(argv: string[]): Promise<void> {
   const { limit, dryRun } = parsePromoteArgs(argv);
   const pool = getPool();
   try {
-    const result = await promoteEnsembleLeads(pool, { limit, dryRun });
+    if (!dryRun) await drainCurrentReviewInputs(getDatabase());
+    const result = await promoteEnsembleLeads(pool, {
+      limit,
+      dryRun,
+      expectedReviewInputContract: currentFaaReviewInputContract(),
+    });
     console.log(
-      `[ensemble-promote]${dryRun ? " (dry-run)" : ""} promoted ${result.promoted}, skipped ${result.skipped} (limit=${limit})`,
+      `[ensemble-promote]${dryRun ? " (dry-run)" : ""} promoted=${result.promoted} eligible=${result.eligible} held=${result.held} excluded=${result.excluded} skipped=${result.skipped} (limit=${limit})`,
     );
   } finally {
     await pool.end();

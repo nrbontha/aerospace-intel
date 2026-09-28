@@ -2,7 +2,7 @@
 
 ## Status, purpose, and scope
 
-This policy is the planned enforcement contract for every manual entry, upload, import, web/API retrieval, and model/tool-assisted research path. It does not claim ingestion or review is implemented. A capability may be described as available only when application and database enforcement plus an observed check exist.
+This policy is the enforcement contract for manual entry, uploads, imports, web/API retrieval, and model/tool-assisted research. A capability is available only to the extent application/database enforcement and observed checks demonstrate it. `OPERATIONS.md` distinguishes the database-backed investor review path from document-byte research and records deployment constraints; this policy is not a blanket claim of complete ingestion, archival, or review coverage.
 
 The objective is traceable supplier intelligence without overstating access, certainty, identity, qualification, scarcity, or model capability. Saucer and Almanac are design references only; no data, secrets, runtime, databases, or volumes are shared.
 
@@ -18,7 +18,7 @@ Content may enter only through:
 
 The following are not permitted: bypassing authentication, paywalls, CAPTCHAs, robots/access controls, or license controls; using leaked/stolen credentials; scraping private portals without authorization; covert collection of personal data; executing document code/macros; or allowing model/tool text to authorize another source. Browser availability does not itself grant ingestion rights.
 
-All retrieved/uploaded bytes are bounded by configured size/type policy, stored durably rather than in ephemeral web storage, addressed/verified by SHA-256, and linked to their source and access basis. Duplicates are idempotent; a new version is a new immutable `source_document`, not an overwrite.
+Uploaded and document-ingestion artifacts are bounded by configured size/type policy and stored durably with relative object keys and SHA-256 digests. The raw-signal investor research path instead persists source URLs, retrieval instants, content hashes, bounded verbatim quotes, evidence links, and frozen review input in PostgreSQL; these source-document rows have no `storage_key`. It does **not** archive original HTML/PDF bytes or guarantee full-page replay. Hashes alone do not make content replayable. Duplicates are idempotent by content; a new content version is a new immutable `source_document`, not an overwrite.
 
 ## Honest source access
 
@@ -34,6 +34,22 @@ Restricted, licensed, or paywalled sources are **metadata-only unless a user sup
 
 A failed/blocked/partial retrieval remains a durable failed/partial attempt. It is not silently counted as a searched source. Redirect final URL, retrieval instant, content digest, and access method describe what was actually observed.
 
+Raw official-site research distinguishes publisher identity from a mere company mention. Complete publisher-name evidence must agree with a source identifier or location before a discovered domain is verified; generic titles, customer names, and similar-name substrings do not establish that identity. A complete standalone business-name header may omit a terminal legal suffix only with nearby first-person operational language. A third-party directory's complete target profile is not publisher-role proof.
+
+Persisted verified identities require nonempty, bounded evidence that jointly retains publisher attribution and identifier/location corroboration. A match against a full page is not enough if the stored support loses those predicates. Proof may span multiple source excerpts or pages; those excerpts are not a continuous quotation. Selected JSON-LD publisher fields are explicitly labelled normalized, non-verbatim evidence and retain their actual source role/locator rather than an earlier title or customer mention.
+
+Location corroboration treats recognized full US state names and USPS codes as equivalent, without fuzzy city matching. A state-only two-letter code still requires an immediately following ZIP code; ordinary words such as “in,” “or,” and “me” are not geographic proof.
+
+Ownership, revenue, headquarters, and own-product claims must be attributed to the target, not a quoted customer, subsidiary, supplier, or unrelated subject. Legal-name punctuation stays part of its subject. Revenue changes, equipment investments, forecasts, and employee counts are not current annual revenue totals. A named product sold or distributed for another manufacturer is not evidence of the target's own manufactured product.
+
+Affirmative ownership, size, and headquarters fields require complete support within the 500-character fact-evidence bound. Unretainable statements cannot supply positive fields, but observed contradictions still prevent false consensus. A quoted headcount or facility area remains a size indicator, not a revenue estimate. Headquarters attribution follows the target's current location, not a parent/customer's intervening “its headquarters” or a former location.
+
+Named own-product proof is extracted from bounded normalized page text, not just shortened product hints. Direct design/manufacture/redesign claims or compatible same-page manufacturer/category and named-model statements must retain the published subject, attribution, and identifier within the complete 500-character evidence bound; truncating away that support cannot leave a positive proof flag. Cross-statement evidence combines source excerpts from the same page and is not a continuous quotation. Explicit third-party inventory disables ambiguous cross-statement matching, while a separate direct own-product claim remains usable. Certificates, aircraft applicability, and unnamed capabilities are not named supplier products.
+
+An explicit acquisition by unnamed private investors establishes an acquisition claim, not a named owner or private-equity ownership. Buyer names must exclude trailing transaction prose. A historical acquisition article alone does not establish today's owner.
+
+The safe HTTP transport decodes gzip, deflate, and Brotli before text extraction, with a 5 MiB limit on both wire bytes and every decoded layer. Its byte length and SHA-256 describe the decoded entity, not the compressed transfer. Unsupported or malformed encodings, invalid UTF-8, and NUL-containing bodies fail retrieval rather than becoming evidence text. These failures do not establish anything about the company's eligibility.
+
 ## Evidence records and locators
 
 Every material observation should link to a `source_document` and an addressable `evidence` record. Evidence stores:
@@ -45,7 +61,7 @@ Every material observation should link to a `source_document` and an addressable
 - extraction method (`manual`, deterministic parser/tool and version, or model/provider/model and attempt), content/excerpt hash, and extraction status;
 - language/translation and OCR status when relevant.
 
-Locators must let an authorized reviewer find the support without storing unnecessary copyrighted or private content. Excerpts are the minimum needed to support/contest a claim; do not copy whole restricted works into excerpts, prompts, logs, or exports. Paraphrase is labeled and never represented as quotation. If a source changes or disappears, retain the authorized immutable document and original locator/digest subject to retention/legal policy.
+Locators must let an authorized reviewer find the support without storing unnecessary copyrighted or private content. Excerpts are the minimum needed to support/contest a claim; do not copy whole restricted works into excerpts, prompts, logs, or exports. Paraphrase is labeled and never represented as quotation. Retain the authorized immutable artifact when the ingestion path stores one; for database-only website research, retain its bounded quote and original locator/digest and disclose that the full source may no longer be retrievable.
 
 A citation to a homepage, search result, or document without a precise locator is insufficient when a precise location is available. Model prose is not a source. A model/tool output may identify evidence but cannot become accepted evidence without the durable underlying document and locator.
 
@@ -117,9 +133,11 @@ Tools validate inputs and outputs at runtime and enforce permission, timeout, re
 
 ## Research attempts, retry, and audit
 
-Research is bounded, queued, replayable only to the extent its durable artifacts demonstrate: prompt/model/tool/schema hashes, attempt inputs/outputs or durable references, costs, times, status/progress/errors, and source documents. Empty optional fields or TypeScript types do not justify a replayability claim.
+Research is bounded, queued, replayable only to the extent its durable artifacts demonstrate: prompt/model/tool/schema hashes, attempt inputs/outputs or durable references, costs, times, status/progress/errors, and source documents. Raw-signal Jev/Muse decisions link an exact source revision, input hash/manifest, and evaluation IDs; stale or hashless historical evaluations cannot prove a current decision. Unchanged semantic evidence can reuse a settled review only under the same current policy. Empty optional fields, hashes, or TypeScript types do not justify a replayability claim.
 
-Only transient 429/5xx/network/timeout failures may retry. Honor `Retry-After`, apply capped jitter, and cap attempts, wall time, tokens/cost, tools, redirects, and bytes. Do not retry exhausted quota, access denial, policy violations, invalid inputs, or final schema/postcondition failure. Durable jobs use stable idempotency keys and at-least-once semantics; duplicate delivery cannot duplicate observations/documents/canonical effects.
+Only transient 429/5xx/network/timeout failures may receive transport retries. Honor `Retry-After`, apply capped jitter, and cap attempts, wall time, tokens/cost, tools, redirects, and bytes. Exhausted quota, access denial, policy violations, and invalid inputs are not transient transport errors. Model-schema repair is separately bounded; final schema/postcondition failure ends that invocation without accepting a result.
+
+Durable raw-signal reviews distinguish a later operational recheck from a transport retry. Quota or configuration deferral does not consume a candidate attempt. Other review failures remain bounded and retryable without publishing a company verdict; they cannot masquerade as rejection or completion. Durable jobs use stable idempotency keys and at-least-once semantics; duplicate delivery cannot duplicate observations/documents/canonical effects.
 
 `audit_events` append actor, action, target, time, request correlation, decision/result, and redacted metadata for ingestion, review, canonical selection, merge, import, contact access changes, and administrative research actions. Audit records never contain plaintext tokens/passwords/API keys or unnecessary source excerpts/contact data and have no ordinary update/delete path.
 

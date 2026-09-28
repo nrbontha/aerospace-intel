@@ -18,6 +18,8 @@ node_modules
 backups
 storage
 uploads
+data
+exports
 fixtures
 *.log
 npm-debug.log*

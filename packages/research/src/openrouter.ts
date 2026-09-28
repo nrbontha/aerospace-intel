@@ -22,6 +22,7 @@ export type OpenRouterErrorCode =
   | "cancelled"
   | "timeout"
   | "rate_limited"
+  | "quota_exhausted"
   | "provider_unavailable"
   | "network_error"
   | "request_rejected"
@@ -93,6 +94,7 @@ export class OpenRouterClientError extends Error {
         cancelled: "OpenRouter request was cancelled",
         timeout: "OpenRouter request timed out",
         rate_limited: "OpenRouter request was rate limited",
+        quota_exhausted: "OpenRouter quota or credits are exhausted",
         provider_unavailable: "OpenRouter provider is temporarily unavailable",
         network_error: "OpenRouter network request failed",
         request_rejected: "OpenRouter request was rejected",
@@ -102,6 +104,72 @@ export class OpenRouterClientError extends Error {
     );
     this.name = "OpenRouterClientError";
   }
+}
+
+export interface OpenRouterHttpFailure {
+  readonly code: Extract<
+    OpenRouterErrorCode,
+    | "rate_limited"
+    | "quota_exhausted"
+    | "provider_unavailable"
+    | "request_rejected"
+  >;
+  readonly retryable: boolean;
+}
+
+const OPENROUTER_QUOTA_MESSAGE_PATTERNS: readonly RegExp[] = [
+  /\b(?:key|account|workspace|organization|org|usage|spend(?:ing)?|budget|quota|credit)\s+(?:hard\s+)?limit\s+(?:has\s+been\s+)?(?:exceeded|reached)\b/iu,
+  /\b(?:quota|credits?|funds)\s+(?:(?:is|are|has been|have been)\s+)?(?:exceeded|exhausted|depleted)\b/iu,
+  /\binsufficient\s+(?:credits?|funds)\b/iu,
+  /\bout of (?:credits?|funds)\b/iu,
+];
+
+function structuredOpenRouterErrorMessage(body: string): string | null {
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+      return null;
+    }
+    const error = (parsed as Record<string, unknown>)["error"];
+    if (error === null || typeof error !== "object" || Array.isArray(error)) {
+      return null;
+    }
+    const message = (error as Record<string, unknown>)["message"];
+    return typeof message === "string" ? message : null;
+  } catch {
+    return null;
+  }
+}
+
+export function classifyOpenRouterHttpFailure(
+  status: number,
+  body = "",
+): OpenRouterHttpFailure {
+  if (status === 402) {
+    return { code: "quota_exhausted", retryable: false };
+  }
+  if (status === 403) {
+    const message = structuredOpenRouterErrorMessage(body);
+    if (
+      message !== null &&
+      OPENROUTER_QUOTA_MESSAGE_PATTERNS.some((pattern) => pattern.test(message))
+    ) {
+      return { code: "quota_exhausted", retryable: false };
+    }
+  }
+  if (status === 429) return { code: "rate_limited", retryable: true };
+  if (status >= 500) {
+    return { code: "provider_unavailable", retryable: true };
+  }
+  return { code: "request_rejected", retryable: false };
+}
+
+export function isOpenRouterQuotaError(
+  error: unknown,
+): error is OpenRouterClientError {
+  return (
+    error instanceof OpenRouterClientError && error.code === "quota_exhausted"
+  );
 }
 
 const envelopeSchema = z.object({
@@ -184,58 +252,74 @@ export class OpenRouterClient {
       try {
         response = await this.#fetch(model, request, jsonSchema);
       } catch (error) {
+        const clientError =
+          error instanceof OpenRouterClientError ? error : null;
         const code: OpenRouterErrorCode = request.signal?.aborted
           ? "cancelled"
-          : error instanceof OpenRouterClientError
-            ? error.code
-            : "network_error";
-        const canRetry = code !== "cancelled" && attempt < maxAttempts;
+          : (clientError?.code ?? "network_error");
+        const retryable =
+          code !== "cancelled" && (clientError?.retryable ?? true);
+        const canRetry = retryable && attempt < maxAttempts;
         const retryDelayMs = canRetry ? jitter(attempt, maxDelay) : null;
         attempts.push(
           makeAttempt({
             attempt,
             model,
-            status: code === "cancelled" ? "cancelled" : "transient_error",
+            status:
+              code === "cancelled"
+                ? "cancelled"
+                : retryable
+                  ? "transient_error"
+                  : "failed",
             promptSha256,
             latencyMs: Date.now() - started,
             retryDelayMs,
             errorCode: code,
           }),
         );
-        if (!canRetry)
-          throw new OpenRouterClientError(code, code !== "cancelled", attempts);
+        if (!canRetry) {
+          throw new OpenRouterClientError(code, retryable, attempts);
+        }
         if (attempt === maxAttempts - 1) model = fallback;
         await wait(retryDelayMs ?? 0, request.signal);
         continue;
       }
       const latencyMs = Date.now() - started;
       if (!response.ok) {
-        const code: OpenRouterErrorCode =
-          response.status === 429
-            ? "rate_limited"
-            : response.status >= 500
-              ? "provider_unavailable"
-              : "request_rejected";
-        const transient = response.status === 429 || response.status >= 500;
-        const canRetry = transient && attempt < maxAttempts;
+        const errorBody =
+          response.status === 403
+            ? await readBounded(response).catch(() => "")
+            : "";
+        const failure = classifyOpenRouterHttpFailure(
+          response.status,
+          errorBody,
+        );
+        const canRetry = failure.retryable && attempt < maxAttempts;
         const retryDelayMs = canRetry
           ? retryAfter(response.headers.get("retry-after"), attempt, maxDelay)
           : null;
-        await response.body?.cancel().catch(() => undefined);
+        if (response.status !== 403) {
+          await response.body?.cancel().catch(() => undefined);
+        }
         attempts.push(
           makeAttempt({
             attempt,
             model,
-            status: transient ? "transient_error" : "failed",
+            status: failure.retryable ? "transient_error" : "failed",
             httpStatus: response.status,
             promptSha256,
             latencyMs,
             retryDelayMs,
-            errorCode: code,
+            errorCode: failure.code,
           }),
         );
-        if (!canRetry)
-          throw new OpenRouterClientError(code, transient, attempts);
+        if (!canRetry) {
+          throw new OpenRouterClientError(
+            failure.code,
+            failure.retryable,
+            attempts,
+          );
+        }
         if (attempt === maxAttempts - 1) model = fallback;
         await wait(retryDelayMs ?? 0, request.signal);
         continue;
@@ -251,7 +335,7 @@ export class OpenRouterClient {
         attempts.push(
           makeAttempt({
             attempt,
-            model,
+            model: parsed.model,
             provider: parsed.provider,
             status: "schema_error",
             httpStatus: response.status,
