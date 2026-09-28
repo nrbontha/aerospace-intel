@@ -126,7 +126,7 @@ export class ExaCompanyListHarvester
       for (const result of boundedResults) {
         if (signals.length >= options.limit) break;
         const candidate = normalizeExaOfficialCandidate(result);
-        if (candidate === null) {
+        if (candidate === null || candidate.title.length === 0) {
           rejected += 1;
           continue;
         }

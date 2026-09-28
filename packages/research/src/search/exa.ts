@@ -12,7 +12,7 @@ export const EXA_CONTENTS_TEXT_MAX_CHARACTERS = 8_000;
 export const EXA_CONTENTS_URL_LIMIT = 3;
 
 const exaResultSchema = z.object({
-  title: z.string().trim().min(1),
+  title: z.string().trim(),
   url: z.string().trim().url(),
   text: z.string().trim().min(1),
   score: z.number().finite().optional().default(0),
@@ -319,7 +319,7 @@ export function buildOfficialDomainQuery(
 
   const { legalName, city, state, uei, cage } = parsed.data;
   const query = [
-    `official website \"${legalName}\"`,
+    `official website "${legalName}"`,
     city,
     state,
     uei === undefined ? undefined : `UEI ${uei}`,
