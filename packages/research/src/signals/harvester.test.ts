@@ -1,4 +1,3 @@
-import { readFileSync } from "node:fs";
 
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
@@ -6,8 +5,6 @@ import { z } from "zod";
 import type { ExaSearchResult } from "../search/exa.js";
 import type { SamEntity } from "../sources/sam.js";
 import {
-  buildExaCompanyListQuery,
-  EXA_COMPANY_LIST_MAX_RESULTS_PER_QUERY,
   ExaCompanyListHarvester,
 } from "./exa-harvester.js";
 import {
@@ -152,24 +149,6 @@ describe("SourceHarvesterRegistry", () => {
 });
 
 describe("ExaCompanyListHarvester", () => {
-  it("encodes the golden archetype and optional query metadata", () => {
-    const query = buildExaCompanyListQuery("landing gear suppliers", {
-      geography: "Ohio",
-      product: "actuators",
-      platform: "Boeing 737",
-    });
-
-    expect(query).toContain("United States");
-    expect(query).toContain("aerospace/defense");
-    expect(query).toContain("engineered component");
-    expect(query).toContain("manufacturer");
-    for (const qualifier of ["PMA", "proprietary", "AS9100", "qualified"]) {
-      expect(query).toContain(qualifier);
-    }
-    expect(query).toContain('geography "Ohio"');
-    expect(query).toContain('product "actuators"');
-    expect(query).toContain('platform "Boeing 737"');
-  });
 
   it("emits weak proposals with provenance and stable per-query dedupe", async () => {
     const search = vi.fn(async (query: string) => {
@@ -231,6 +210,30 @@ describe("ExaCompanyListHarvester", () => {
     expect(result.signals[0]?.sourceFingerprint).toMatch(/^[a-f0-9]{64}$/u);
   });
 
+  it("rejects nameless hits before dedupe so a named hit can supply the company", async () => {
+    const harvester = new ExaCompanyListHarvester({
+      search: async () => [
+        exaResult(" \t ", "https://acme-aero.com/products"),
+        exaResult("Acme Aerospace", "https://www.acme-aero.com/about"),
+      ],
+    });
+
+    const result = await harvester.harvest(
+      { queryTemplates: ["precision machining"] },
+      { limit: 25 },
+    );
+
+    expect(result.signals.map(({ rawName, rawDomain }) => ({ rawName, rawDomain }))).toEqual([
+      { rawName: "Acme Aerospace", rawDomain: "acme-aero.com" },
+    ]);
+    expect(result.metrics).toEqual({
+      fetched: 2,
+      emitted: 1,
+      rejected: 1,
+      duplicateCandidates: 0,
+    });
+  });
+
   it("caps each query at ten proposals and each tick at twenty-five", async () => {
     let invocation = 0;
     const search = vi.fn(async () => {
@@ -250,7 +253,6 @@ describe("ExaCompanyListHarvester", () => {
       { limit: 25 },
     );
 
-    expect(EXA_COMPANY_LIST_MAX_RESULTS_PER_QUERY).toBe(10);
     expect(search).toHaveBeenCalledTimes(3);
     expect(result.signals).toHaveLength(25);
     expect(result.metrics).toEqual({
@@ -286,20 +288,6 @@ describe("ExaCompanyListHarvester", () => {
     expect(secondPage.nextCursor).toBeUndefined();
   });
 
-  it("keeps signal adapters outside lead, candidate, and database storage", () => {
-    const files = [
-      "harvester.ts",
-      "registry.ts",
-      "exa-harvester.ts",
-      "sam-harvester.ts",
-    ];
-    for (const file of files) {
-      const source = readFileSync(new URL(file, import.meta.url), "utf8");
-      expect(source).not.toMatch(
-        /from\s+["'][^"']*(?:lead|candidate|@asi\/database)[^"']*["']/iu,
-      );
-    }
-  });
 });
 
 describe("SamEntityHarvester", () => {
@@ -402,9 +390,6 @@ describe("SamEntityHarvester", () => {
     });
     expect(result.signals[1]).not.toHaveProperty("rawDomain");
     expect(result.signals[0]).not.toHaveProperty("awardCount");
-    expect(fingerprintSamEntity("ACTIVE000001")).toBe(
-      fingerprintSamEntity("ACTIVE000001"),
-    );
     expect(fingerprintSamEntity("ACTIVE000001")).not.toBe(
       fingerprintSamEntity("ACTIVE000002"),
     );

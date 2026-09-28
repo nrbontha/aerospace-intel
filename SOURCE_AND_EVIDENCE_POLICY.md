@@ -34,6 +34,8 @@ Restricted, licensed, or paywalled sources are **metadata-only unless a user sup
 
 A failed/blocked/partial retrieval remains a durable failed/partial attempt. It is not silently counted as a searched source. Redirect final URL, retrieval instant, content digest, and access method describe what was actually observed.
 
+Exa search titles are display metadata: a blank string does not invalidate an otherwise usable URL and nonempty text result. Such hits remain discovery candidates, not verified company identities. Company-list harvesting rejects nameless hits before deduplication rather than inventing a company name or suppressing a later named hit for the same domain.
+
 Raw official-site research distinguishes publisher identity from a mere company mention. Complete publisher-name evidence must agree with a source identifier or location before a discovered domain is verified; generic titles, customer names, and similar-name substrings do not establish that identity. A complete standalone business-name header may omit a terminal legal suffix only with nearby first-person operational language. A third-party directory's complete target profile is not publisher-role proof.
 
 Persisted verified identities require nonempty, bounded evidence that jointly retains publisher attribution and identifier/location corroboration. A match against a full page is not enough if the stored support loses those predicates. Proof may span multiple source excerpts or pages; those excerpts are not a continuous quotation. Selected JSON-LD publisher fields are explicitly labelled normalized, non-verbatim evidence and retain their actual source role/locator rather than an earlier title or customer mention.

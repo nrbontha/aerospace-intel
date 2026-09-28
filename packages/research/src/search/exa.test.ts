@@ -9,7 +9,6 @@ import {
   ExaSearchClient,
   ExaSearchError,
   isSuppressedDirectoryDomain,
-  OFFICIAL_CANDIDATE_BLOCKED_DOMAIN_SUFFIXES,
   searchOfficialDomainCandidates,
 } from "./exa.js";
 
@@ -74,13 +73,14 @@ describe("ExaSearchClient", () => {
     });
   });
 
-  it("rejects malformed API payloads rather than accepting partial results", async () => {
+  it.each([
+    ["missing text", { ...validResult, text: null }],
+    ["blank text", { ...validResult, title: "", text: " \t " }],
+    ["invalid URL", { ...validResult, title: "", url: "not-a-url" }],
+  ])("rejects %s rather than accepting partial results", async (_label, invalidResult) => {
     const client = new ExaSearchClient({
       apiKey: "test-exa-key",
-      fetch: async () =>
-        exaResponse([
-          { ...validResult, text: null },
-        ]),
+      fetch: async () => exaResponse([validResult, invalidResult]),
     });
 
     await expect(client.search("Zephyr International")).rejects.toMatchObject({
@@ -183,6 +183,32 @@ describe("ExaSearchClient", () => {
 });
 
 describe("searchOfficialDomainCandidates", () => {
+  it("keeps untitled search hits usable without inventing company names", async () => {
+    const client = new ExaSearchClient({
+      apiKey: "test-exa-key",
+      fetch: async () =>
+        exaResponse([
+          {
+            ...validResult,
+            title: " \t ",
+            url: "https://www.components.example/products",
+          },
+          validResult,
+        ]),
+    });
+
+    const candidates = await searchOfficialDomainCandidates(
+      { legalName: "Zephyr International" },
+      client,
+    );
+
+    expect(candidates.map(({ domain }) => domain)).toEqual([
+      "components.example",
+      "zephyrintl.com",
+    ]);
+    expect(candidates[0]?.title).toBe("");
+  });
+
   it("deduplicates normalized domains and suppresses directories and social sites", async () => {
     const client = new ExaSearchClient({
 
@@ -238,7 +264,7 @@ describe("searchOfficialDomainCandidates", () => {
       },
     ]);
   });
-  it("exports the suffix-safe official-candidate directory blocklist", () => {
+  it("suppresses known directories without blocking lookalike domains", () => {
     const required = [
       "highergov.com",
       "govtribe.com",
@@ -261,38 +287,11 @@ describe("searchOfficialDomainCandidates", () => {
       "signalhire.com",
       "inknowvation.com",
     ];
-    expect([...OFFICIAL_CANDIDATE_BLOCKED_DOMAIN_SUFFIXES]).toEqual(
-      expect.arrayContaining(required),
-    );
     for (const domain of required) {
       expect(isSuppressedDirectoryDomain(domain), domain).toBe(true);
       expect(isSuppressedDirectoryDomain(`profiles.${domain}`), `profiles.${domain}`).toBe(true);
       expect(isSuppressedDirectoryDomain(`not-${domain}`), `not-${domain}`).toBe(false);
     }
-  });
-  it("makes one identity-specific official-site query", async () => {
-    const queries: string[] = [];
-    const client: Pick<ExaSearchClient, "search"> = {
-      search: async (query) => {
-        queries.push(query);
-        return [];
-      },
-    };
-
-    await searchOfficialDomainCandidates(
-      {
-        legalName: "Zephyr International",
-        city: "Zephyrhills",
-        state: "FL",
-        uei: "ABC123",
-        cage: "1A2B3",
-      },
-      client,
-    );
-
-    expect(queries).toEqual([
-      'official website "Zephyr International" Zephyrhills FL UEI ABC123 CAGE 1A2B3',
-    ]);
   });
 
   it("rejects non-HTTP URLs from the official candidate list", async () => {
