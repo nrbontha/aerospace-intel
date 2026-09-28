@@ -1,277 +1,186 @@
 import { describe, expect, it } from "vitest";
 
-import { normalizeUnifiedName } from "../scripts/populate-unified-targets.mts";
 import {
-  INVESTOR_VERDICT_SPLIT,
-  INVESTOR_VERDICTS_V1,
-} from "../packages/research/src/scoring-axial/fixtures/investor-verdicts.js";
-import {
-  MA_PRIORITIES_V1,
-  MA_PRIORITY_SPLIT,
-} from "../packages/research/src/scoring-axial/fixtures/ma-priorities.js";
-import {
-  ALL_GOLDEN_ENTRIES_V1,
-  GOLDEN_DATASET_V1,
-} from "../packages/research/src/scoring-axial/fixtures/golden-set.js";
-import { DATASET_LABEL_VALUES } from "../packages/research/src/scoring-axial/evaluate.js";
-import {
-  DEV_PRIORITY_VOCAB,
-  VERDICT_VOCAB,
-  computeAccuracy,
-  confusionMatrix,
-  ensembleProbes,
-  evaluateThreshold,
-  goldenOwnershipText,
+  parseBenchmarkResultDocument,
   parseValidationArgs,
-  perClassMetrics,
-  predictGoldenType,
-  predictInvestorPriority,
-  summarizeSplit,
-  type ScoredOutcome,
+  summarizeBenchmark,
+  type BenchmarkOutcome,
 } from "../scripts/run-validation.mts";
 
-// ---------------------------------------------------------------------------
-// Fixture integrity: frozen splits, valid vocab, no test/dev overlap
-// ---------------------------------------------------------------------------
-
-describe("frozen eval fixtures", () => {
-  it("investor-verdicts test set covers all 29 rows with valid verdicts", () => {
-    expect(INVESTOR_VERDICT_SPLIT).toBe("test");
-    expect(INVESTOR_VERDICTS_V1).toHaveLength(29);
-    for (const row of INVESTOR_VERDICTS_V1) {
-      expect(row.name.trim()).not.toBe("");
-      expect(VERDICT_VOCAB.includes(row.verdict)).toBe(true);
-      expect(row.split).toBe("test");
-      expect(VERDICT_VOCAB.includes(row.expectedPipelineDecision)).toBe(true);
-    }
-  });
-
-  it("ma-priorities dev set covers all 36 rows with valid priorities", () => {
-    expect(MA_PRIORITY_SPLIT).toBe("dev");
-    expect(MA_PRIORITIES_V1).toHaveLength(36);
-    for (const row of MA_PRIORITIES_V1) {
-      expect(row.name.trim()).not.toBe("");
-      expect([1, 2, 3]).toContain(row.priority);
-      expect([1, 2, 3]).toContain(row.expectedInvestorPriority);
-      expect(row.split).toBe("dev");
-    }
-  });
-
-  it("dev sample is stratified across Priority 1/2/3", () => {
-    const counts = new Map<number, number>();
-    for (const row of MA_PRIORITIES_V1) {
-      counts.set(row.priority, (counts.get(row.priority) ?? 0) + 1);
-    }
-    expect(counts.get(1)).toBeGreaterThan(0);
-    expect(counts.get(2)).toBeGreaterThan(0);
-    expect(counts.get(3)).toBeGreaterThan(0);
-  });
-
-  it("no company appears in both the test and dev splits", () => {
-    const testNames: Record<string, true> = {};
-    for (const row of INVESTOR_VERDICTS_V1) {
-      testNames[normalizeUnifiedName(row.name)] = true;
-    }
-    const overlap = MA_PRIORITIES_V1.map((row) => row.name).filter(
-      (name) => testNames[normalizeUnifiedName(name)] === true,
-    );
-    expect(overlap).toEqual([]);
-  });
-
-  it("golden-set entries carry valid dataset labels", () => {
-    expect(ALL_GOLDEN_ENTRIES_V1.length).toBeGreaterThan(0);
-    for (const entry of ALL_GOLDEN_ENTRIES_V1) {
-      expect(DATASET_LABEL_VALUES.includes(entry.label)).toBe(true);
-    }
-    // Golden strong_positives exist so HP-equivalent recall has a denominator.
-    expect(
-      ALL_GOLDEN_ENTRIES_V1.filter((e) => e.label === "strong_positive").length,
-    ).toBeGreaterThan(0);
-    expect(GOLDEN_DATASET_V1.name).toBe("golden-v1");
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Runner metric math on synthetic outcomes
-// ---------------------------------------------------------------------------
-
-const SYNTHETIC: ScoredOutcome[] = [
-  { id: "a", actual: "add", predicted: "add" },
-  { id: "b", actual: "add", predicted: "hold" },
-  { id: "c", actual: "hold", predicted: "hold" },
-  { id: "d", actual: "hold", predicted: "hold" },
+const OUTCOMES: BenchmarkOutcome[] = [
+  {
+    id: "sourced-hp",
+    cohort: "sourced_real",
+    expected: "high_priority",
+    actual: "high_priority",
+    costUsd: 0.1,
+    callCount: 4,
+  },
+  {
+    id: "research-promoted",
+    cohort: "sourced_real",
+    expected: "research",
+    actual: "high_priority",
+    costUsd: 0.2,
+    callCount: 4,
+  },
+  {
+    id: "negative-promoted",
+    cohort: "sourced_real",
+    expected: "reject",
+    actual: "high_priority",
+    costUsd: 0.3,
+    callCount: 4,
+  },
+  {
+    id: "positive-rejected",
+    cohort: "investor_review_report_only",
+    expected: "high_priority",
+    actual: "reject",
+    costUsd: 0.4,
+    callCount: 2,
+  },
+  {
+    id: "research-rejected",
+    cohort: "investor_review_report_only",
+    expected: "research",
+    actual: "reject",
+    costUsd: 0.5,
+    callCount: 2,
+  },
+  {
+    id: "negative-abstained",
+    cohort: "synthetic_control",
+    expected: "reject",
+    actual: "research",
+    costUsd: 0.6,
+    callCount: 3,
+  },
+  {
+    id: "research-abstained",
+    cohort: "synthetic_control",
+    expected: "research",
+    actual: "research",
+    costUsd: 0.7,
+    callCount: 3,
+  },
+  {
+    id: "positive-error",
+    cohort: "sourced_real",
+    expected: "high_priority",
+    actual: "error",
+    costUsd: 0.8,
+    callCount: 1,
+  },
 ];
 
-describe("computeAccuracy", () => {
-  it("scores exact-match fraction", () => {
-    expect(computeAccuracy(SYNTHETIC)).toBe(0.75);
-  });
+describe("production benchmark summary", () => {
+  it("separately reports harmful promotions, rejects, abstentions, and errors", () => {
+    const summary = summarizeBenchmark(OUTCOMES);
 
-  it("returns NaN on zero outcomes", () => {
-    expect(Number.isNaN(computeAccuracy([]))).toBe(true);
-  });
-});
-
-describe("perClassMetrics", () => {
-  it("computes precision/recall/f1 per class", () => {
-    const metrics = perClassMetrics(SYNTHETIC, ["add", "hold"]);
-    expect(metrics["add"]).toMatchObject({
-      support: 2,
-      predicted: 1,
-      tp: 1,
-      fp: 0,
-      fn: 1,
-      precision: 1,
-      recall: 0.5,
+    expect(summary).toMatchObject({
+      caseCount: 8,
+      exactMatches: 2,
+      exactMatchRate: 0.25,
+      falsePromotions: 2,
+      falseRejects: 2,
+      missedHighPriority: 2,
+      expectedResearchPromotions: 1,
+      abstentions: 2,
+      errors: 1,
+      decisiveCases: 5,
+      coverage: 0.625,
+      totalCallCount: 23,
     });
-    expect(metrics["add"]!.f1).toBeCloseTo(2 / 3, 10);
-    expect(metrics["hold"]).toMatchObject({
-      support: 2,
-      predicted: 3,
-      tp: 2,
-      fp: 1,
-      fn: 0,
-      precision: 2 / 3,
-      recall: 1,
-    });
+    expect(summary.totalCostUsd).toBeCloseTo(3.6, 10);
+    expect(summary.averageCostUsd).toBeCloseTo(0.45, 10);
   });
 
-  it("yields 0 on zero-division (never predicted / never actual)", () => {
-    const metrics = perClassMetrics(SYNTHETIC, ["add", "pass_dead"]);
-    expect(metrics["pass_dead"]).toMatchObject({
-      support: 0,
-      predicted: 0,
-      tp: 0,
-      precision: 0,
-      recall: 0,
-      f1: 0,
-    });
-  });
-});
-
-describe("confusionMatrix", () => {
-  it("counts actual->predicted cells over the sorted label union", () => {
-    const matrix = confusionMatrix(SYNTHETIC);
-    expect(matrix.classes).toEqual(["add", "hold"]);
-    expect(matrix.cells).toEqual([
-      { actual: "add", predicted: "add", count: 1 },
-      { actual: "add", predicted: "hold", count: 1 },
-      { actual: "hold", predicted: "hold", count: 2 },
+  it("does not treat expected research promoted to HP as correct", () => {
+    const summary = summarizeBenchmark([
+      {
+        id: "research-to-hp",
+        cohort: "sourced_real",
+        expected: "research",
+        actual: "high_priority",
+        costUsd: 0,
+        callCount: 1,
+      },
     ]);
+
+    expect(summary.exactMatches).toBe(0);
+    expect(summary.falsePromotions).toBe(1);
+    expect(summary.expectedResearchPromotions).toBe(1);
+    expect(summary.coverage).toBe(1);
   });
 
-  it("includes predicted-only labels in the union", () => {
-    const matrix = confusionMatrix([
-      { id: "x", actual: "add", predicted: "unreviewed" },
-    ]);
-    expect(matrix.classes).toEqual(["add", "unreviewed"]);
-    expect(matrix.cells).toEqual([
-      { actual: "add", predicted: "unreviewed", count: 1 },
-    ]);
-  });
-});
+  it("keeps sourced, synthetic, and prior-review cohorts distinct", () => {
+    const summary = summarizeBenchmark(OUTCOMES);
 
-describe("summarizeSplit", () => {
-  it("bundles n, accuracy, per-class metrics, and confusion", () => {
-    const summary = summarizeSplit("synthetic", SYNTHETIC, ["add", "hold"]);
-    expect(summary.n).toBe(4);
-    expect(summary.accuracy).toBe(0.75);
-    expect(Object.keys(summary.perClass).sort()).toEqual(["add", "hold"]);
-    expect(summary.confusion.cells).toHaveLength(3);
-  });
-
-  it("reports null accuracy on zero outcomes", () => {
-    const summary = summarizeSplit("empty", [], ["add"]);
-    expect(summary.n).toBe(0);
-    expect(summary.accuracy).toBeNull();
-  });
-});
-
-describe("evaluateThreshold", () => {
-  it("passes at the boundary, fails below, fails on missing accuracy", () => {
-    expect(evaluateThreshold(0.5, 0.5).passed).toBe(true);
-    expect(evaluateThreshold(0.49, 0.5).passed).toBe(false);
-    expect(evaluateThreshold(null, 0.5).passed).toBe(false);
-  });
-});
-
-describe("parseValidationArgs", () => {
-  it("defaults min-accuracy to 0.5 with no JSON path", () => {
-    expect(parseValidationArgs([])).toEqual({
-      minAccuracy: 0.5,
-      jsonPath: null,
+    expect(summary.byCohort.sourced_real).toMatchObject({
+      caseCount: 4,
+      falsePromotions: 2,
+      falseRejects: 0,
+      errors: 1,
+    });
+    expect(summary.byCohort.synthetic_control).toMatchObject({
+      caseCount: 2,
+      abstentions: 2,
+      coverage: 0,
+    });
+    expect(summary.byCohort.investor_review_report_only).toMatchObject({
+      caseCount: 2,
+      falseRejects: 2,
     });
   });
 
-  it("accepts --min-accuracy and --json", () => {
-    expect(
-      parseValidationArgs(["--min-accuracy", "0.9", "--json", "out/r.json"]),
-    ).toEqual({ minAccuracy: 0.9, jsonPath: "out/r.json" });
-  });
-
-  it("rejects out-of-range, missing, and unknown flags", () => {
-    expect(() => parseValidationArgs(["--min-accuracy", "2"])).toThrow();
-    expect(() => parseValidationArgs(["--min-accuracy"])).toThrow();
-    expect(() => parseValidationArgs(["--json"])).toThrow();
-    expect(() => parseValidationArgs(["--bogus"])).toThrow();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Deterministic-logic wiring (current behavior, pinned against live imports)
-// ---------------------------------------------------------------------------
-
-describe("golden ownership bridge", () => {
-  it("maps feature ownership types to rule-classified text", () => {
-    expect(goldenOwnershipText("public_sub")).toBe("Public Subsidiary");
-    expect(goldenOwnershipText("pe_owned")).toBe("Private Equity Add-On");
-    expect(goldenOwnershipText("independent_founder")).toBe(
-      "Private Independent",
+  it("rejects duplicate cases and invalid cost accounting", () => {
+    expect(() => summarizeBenchmark([OUTCOMES[0]!, OUTCOMES[0]!])).toThrow(
+      /duplicate benchmark outcome id/u,
     );
-    expect(goldenOwnershipText("unknown")).toBeNull();
-  });
-
-  it("predicts HP-equivalent types through proposeLabels", () => {
-    expect(predictGoldenType("public_sub")).toBe(
-      "ideal_archetype_but_unactionable",
-    );
-    expect(predictGoldenType("pe_owned")).toBe("positive_with_caveat");
-    expect(predictGoldenType("independent_founder")).toBe("strong_positive");
+    expect(() =>
+      summarizeBenchmark([
+        {
+          ...OUTCOMES[0]!,
+          id: "negative-cost",
+          costUsd: -0.1,
+        },
+      ]),
+    ).toThrow(/invalid cost\/call count/u);
   });
 });
 
-describe("investor-rank prediction", () => {
-  it("returns a Priority 1-3 rank for thin pipeline rows", () => {
-    const rank = predictInvestorPriority({
-      name: "Synthetic Co",
-      domain: "synthetic.example.com",
-      priority: 1,
-      ownership: null,
-      expectedInvestorPriority: 1,
+describe("benchmark result boundary", () => {
+  it("accepts the portable bakeoff result shape", () => {
+    const document = parseBenchmarkResultDocument({
+      version: "jev-bakeoff-v2",
+      outcomes: OUTCOMES,
     });
-    expect([1, 2, 3]).toContain(rank);
-    expect(DEV_PRIORITY_VOCAB).toEqual(["1", "2", "3"]);
+
+    expect(document.version).toBe("jev-bakeoff-v2");
+    expect(document.outcomes).toHaveLength(8);
   });
 
-  it("demotes identity-thin rows without a website to Priority 3", () => {
-    expect(
-      predictInvestorPriority({
-        name: "Thin Co",
-        domain: null,
-        priority: 1,
-        ownership: null,
-        expectedInvestorPriority: 1,
+  it("rejects unknown cohorts and decisions", () => {
+    expect(() =>
+      parseBenchmarkResultDocument({
+        version: "bad",
+        outcomes: [
+          {
+            ...OUTCOMES[0],
+            cohort: "holdout",
+            actual: "maybe",
+          },
+        ],
       }),
-    ).toBe(3);
+    ).toThrow();
   });
 });
 
-describe("ensembleProbes", () => {
-  it("documents current mapper behavior without scoring it", () => {
-    const probes = ensembleProbes();
-    const high = probes.find((p) => p.decision === "high_priority");
-    const rejected = probes.find((p) => p.decision === "reject");
-    expect(high!.predicted).toMatch(/^priority-1\//);
-    expect(rejected!.predicted).toBe("excluded(null)");
+describe("validation CLI", () => {
+  it("rejects missing paths and unknown options", () => {
+    expect(() => parseValidationArgs(["--input"])).toThrow();
+    expect(() => parseValidationArgs(["--json"])).toThrow();
+    expect(() => parseValidationArgs(["--minimum", "0.5"])).toThrow();
   });
 });

@@ -1,1 +1,0 @@
-{"order": "ladder", "r1Threshold": 0.2, "r2Mode": "choice", "vetoStatuses": ["strategic_owned", "pe_owned", "public", "dead"], "vetoFirst": true, "enriched": true, "r2Continue": true, "r3Mode": "default", "r4Mode": "sector-sharp", "r1Mode": "broad", "flipRule": true}

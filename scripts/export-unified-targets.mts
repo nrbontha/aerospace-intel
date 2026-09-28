@@ -26,6 +26,7 @@ import {
   exportUnifiedTargets,
   parseExportArgs,
 } from "../packages/database/src/unified-targets/export.js";
+import { currentFaaReviewInputContract } from "../packages/research/src/faa-ensemble/runner.js";
 
 export * from "../packages/database/src/unified-targets/export.js";
 
@@ -55,7 +56,14 @@ async function main(argv: string[]): Promise<void> {
   const options = parseExportArgs(argv);
   const pool = getPool();
   try {
-    const body = await exportUnifiedTargets(pool, options.format, options.tier);
+    const body = await exportUnifiedTargets(
+      pool,
+      options.format,
+      options.tier,
+      {
+        expectedReviewInputContract: currentFaaReviewInputContract(),
+      },
+    );
     await mkdir(path.dirname(options.out), { recursive: true });
     await writeFile(options.out, body, "utf8");
     const rowCount =

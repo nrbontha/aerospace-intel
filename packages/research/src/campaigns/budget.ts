@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 
-import { getDatabase } from "@asi/database/client";
+import { getDatabase, type Database } from "@asi/database/client";
 import { researchCampaigns } from "@asi/database";
 
 import type { CampaignView } from "./types.js";
@@ -14,7 +14,9 @@ export function dailyBudgetCapUsd(): number {
     return DEFAULT_DAILY_BUDGET_USD;
   }
   const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_DAILY_BUDGET_USD;
+  return Number.isFinite(parsed) && parsed > 0
+    ? parsed
+    : DEFAULT_DAILY_BUDGET_USD;
 }
 
 export type BudgetRejection = "campaign_budget_exceeded" | "daily_cap_exceeded";
@@ -34,10 +36,7 @@ export function evaluateBudgets(
   dailySpendUsd: number,
   maxDailyUsd: number,
 ): BudgetDecision {
-  if (
-    campaign.budgetUsd !== null &&
-    campaign.spendUsd >= campaign.budgetUsd
-  ) {
+  if (campaign.budgetUsd !== null && campaign.spendUsd >= campaign.budgetUsd) {
     return { ok: false, rejection: "campaign_budget_exceeded" };
   }
   if (dailySpendUsd >= maxDailyUsd) {
@@ -47,18 +46,46 @@ export function evaluateBudgets(
 }
 
 /**
- * Total model_usage spend recorded since UTC midnight. Strategies that make
- * model calls must persist model_usage rows; this reads them back.
+ * Total recorded model spend for the UTC calendar day containing `now`.
+ *
+ * `model_usage` is the generic research ledger. FAA review provider responses
+ * are recorded independently in `faa_review_model_usage`; evaluation costs are
+ * retained only as diagnostic history and are not summed again.
  */
-export async function getDailySpendUsd(now: Date = new Date()): Promise<number> {
-  const result = await getDatabase().execute<{ total: string | null }>(sql`
-    SELECT COALESCE(SUM(cost_usd), 0)::text AS total
-    FROM model_usage
-    WHERE created_at >= date_trunc('day', ${now.toISOString()}::timestamptz)
+export async function getDailySpendUsd(
+  now: Date = new Date(),
+  db: Database = getDatabase(),
+): Promise<number> {
+  if (!Number.isFinite(now.getTime())) {
+    throw new TypeError("now must be a valid date");
+  }
+  const utcDayStart = new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()),
+  );
+  const utcDayEnd = new Date(utcDayStart.getTime() + 24 * 60 * 60 * 1_000);
+  const result = await db.execute<{ total: string | null }>(sql`
+    SELECT COALESCE(SUM(recorded.cost_usd), 0)::text AS total
+    FROM (
+      SELECT cost_usd
+      FROM model_usage
+      WHERE created_at >= ${utcDayStart.toISOString()}::timestamptz
+        AND created_at < ${utcDayEnd.toISOString()}::timestamptz
+        AND cost_usd IS NOT NULL
+      UNION ALL
+      SELECT cost_usd
+      FROM faa_review_model_usage
+      WHERE observed_at >= ${utcDayStart.toISOString()}::timestamptz
+        AND observed_at < ${utcDayEnd.toISOString()}::timestamptz
+        AND cost_usd IS NOT NULL
+    ) recorded
   `);
-  const total = result.rows[0]?.total ?? "0";
-  const parsed = Number(total);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
+  const total = result.rows[0]?.total;
+  const parsed =
+    total === null || total === undefined ? Number.NaN : Number(total);
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error("Daily model spend accounting returned an invalid total");
+  }
+  return parsed;
 }
 
 export interface SpendRecorded {
@@ -105,7 +132,6 @@ export async function recordSpend(
   return {
     spendUsd: Number(row.spendUsd),
     status: row.status,
-    flippedToBudgetExhausted:
-      row.status === "budget_exhausted" && deltaUsd > 0,
+    flippedToBudgetExhausted: row.status === "budget_exhausted" && deltaUsd > 0,
   };
 }

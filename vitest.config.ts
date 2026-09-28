@@ -16,7 +16,7 @@ export default defineConfig({
       "apps/**/*.{test,spec}.{ts,tsx}",
       "packages/**/*.{test,spec}.{ts,tsx}",
     ],
-    exclude: [...configDefaults.exclude, "tests/e2e/**"],
+    exclude: [...configDefaults.exclude, "**/.next/**", "tests/e2e/**"],
     setupFiles: ["./tests/setup.ts"],
   },
 });

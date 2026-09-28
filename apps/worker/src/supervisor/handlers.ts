@@ -12,30 +12,23 @@ import {
   ensureAgentMonthlyQueries,
   failAgentQuery,
   candidates,
-  claimQueuedSourceSignals,
+  bootstrapSignalReviewStates,
   companies,
   companySourceLinks,
-  companyDomains,
   companyIdentifiers,
   dataSources,
   evidence,
   getDatabase,
   goldenExamples,
-  leadNameTokens,
-  ingestLeadCandidates,
-  identityMatchCandidates,
   mapResearchRunInput,
   observations,
   ownershipObservations,
-  recordSourceSignalQualification,
   researchRuns,
   sourceSignals,
   sourceDocuments,
   upsertHarvestedSourceSignal,
   leads,
   resolveLeadDomain,
-  synthesizeQualifiedSourceSignal,
-  MIN_JUDGE_CONFIDENCE,
   type AgentType,
   type Database,
   type DomainJudge,
@@ -46,7 +39,6 @@ import {
   type ResearchAgent,
   type ResolutionLogger,
   type ResolutionResult,
-  type SourceSignal,
 } from "@asi/database";
 import {
   AEROSPACE_NAICS,
@@ -61,8 +53,6 @@ import {
   rescoreCandidateAfterResearch,
   safeFetchUrl,
   SafeFetchError,
-  isSuppressedDirectoryDomain,
-  searchOfficialDomainCandidates,
   UsaspendingDiscoveryStrategy,
   SamEntityClient,
   SamEntityHarvester,
@@ -74,7 +64,6 @@ import {
   type CampaignView,
   type FrontierItemView,
   type FrontierProposal,
-  type OfficialDomainCandidate,
   type ExaSearchResult,
   type OpenRouterAttemptTelemetry,
   type OpenRouterModelRouting,
@@ -130,91 +119,11 @@ export interface DiscoveredRecipient {
   readonly sourceLocator: string;
 }
 
-export type SourceSignalTargetDecision =
-  | "yes_target"
-  | "no_target"
-  | "needs_more_research";
-
-export interface PageGroundedClaim {
-  readonly excerpt: string;
-  readonly url: string;
-}
-
-export type GroundedTargetClaim = "manufacturer" | "aerospace" | "headquarters";
-
-export interface AuthoritativeSourceEvidence {
-  readonly sourceKey: string;
-  readonly url: string;
-  readonly text: string;
-  readonly allowedClaims: readonly GroundedTargetClaim[];
-  readonly metadata: Record<string, unknown>;
-}
-
-export interface SourceSignalClassification {
-  readonly manufacturer: boolean;
-  readonly aerospaceDefenseRelevance: boolean;
-  readonly businessModel: "manufacturer" | "distributor" | "service" | "btp" | "unknown";
-  readonly headquartersCountry: string;
-  readonly ownershipType:
-    | "independent"
-    | "founder_family"
-    | "pe_owned"
-    | "strategic_parent"
-    | "public"
-    | "unknown";
-  readonly sizeFit: "likely_under_50m" | "likely_over_50m" | "unknown";
-  readonly proprietarySignals: readonly string[];
-  readonly manufacturerEvidence: PageGroundedClaim | null;
-  readonly aerospaceDefenseEvidence: PageGroundedClaim | null;
-  readonly targetDecision: SourceSignalTargetDecision;
-  readonly reasons: readonly string[];
-  readonly confidence: number;
-}
-
-export interface SourceSignalClassifierInput {
-  readonly legalName: string;
-  readonly pageText: string;
-  readonly pageUrl: string;
-  readonly authoritativeEvidence: readonly AuthoritativeSourceEvidence[];
-}
-
-export type SourceSignalClassifier = (
-  input: SourceSignalClassifierInput,
-) => Promise<SourceSignalClassification>;
-
-export type OfficialDomainSearcher = (
-  identity: {
-    readonly legalName: string;
-    readonly city?: string;
-    readonly state?: string;
-    readonly uei?: string;
-    readonly cage?: string;
-  },
-) => Promise<readonly OfficialDomainCandidate[]>;
-
-export interface IdentityPage {
-  readonly finalUrl: string;
-  readonly text: string;
-  readonly identityLinks: readonly string[];
-}
-
-export type IdentityPageProbeResult =
-  | ({ readonly ok: true } & IdentityPage)
-  | { readonly ok: false; readonly error: string };
-
-export interface IdentityPageProber {
-  fetchIdentityPage(url: string): Promise<IdentityPageProbeResult>;
-}
-
 export interface TickHandlerDeps {
   /** OpenRouter gateway; defaults to one built from OPENROUTER_API_KEY. */
   readonly client?: OpenRouterClient;
   readonly models?: OpenRouterModelRouting;
   /** USAspending search override (tests); default is the real client. */
-  /** Exa official-domain proposal override (tests). */
-  readonly searchOfficialDomains?: OfficialDomainSearcher;
-  /** Generic official-site source-signal classifier override (tests). */
-  readonly classifySourceSignal?: SourceSignalClassifier;
   readonly searchRecipients?: UsaspendingSearchClient["searchRecipients"];
   readonly searchRecipientsPage?: UsaspendingSearchClient["searchRecipientsPage"];
   /** SAM v4 search override (tests); default is the credentialed public client. */
@@ -237,8 +146,6 @@ export interface TickHandlerDeps {
   readonly researchForceRefresh?: boolean;
   /** Domain-prober override (tests); default probes with browser-like headers. */
   readonly domainProber?: DomainProber;
-  /** Multi-page official-site identity probe override (tests). */
-  readonly identityPageProber?: IdentityPageProber;
   /** Domain-judge override (tests); default is the OpenRouter prompt-contract judge. */
   readonly domainJudge?: DomainJudge;
   /**
@@ -253,8 +160,6 @@ export interface TickHandlerDeps {
     resolutionDeps: LeadDomainDeps,
     options?: { readonly maxCandidates?: number },
   ) => Promise<ResolutionResult>;
-  /** Qualified-source synthesis override (tests); default is deterministic persistence. */
-  readonly synthesizeSourceSignal?: typeof synthesizeQualifiedSourceSignal;
 }
 
 /** safe-fetch takes an options bag; normalize the handler-side signature. */
@@ -262,7 +167,9 @@ function defaultFetchDocument(
   url: string,
   signal?: AbortSignal,
 ): Promise<SafeFetchResult> {
-  return signal === undefined ? safeFetchUrl(url) : safeFetchUrl(url, { signal });
+  return signal === undefined
+    ? safeFetchUrl(url)
+    : safeFetchUrl(url, { signal });
 }
 
 /** Deep-research job request (same shape the pg-boss payload carries). */
@@ -525,7 +432,8 @@ function discoverSourceKey(agent: ResearchAgent): string {
     );
     if (first !== undefined) return canonicalDiscoverSource(first);
   }
-  if (agent.key.toLowerCase().includes("source-catalog")) return "source_catalog";
+  if (agent.key.toLowerCase().includes("source-catalog"))
+    return "source_catalog";
   if (agent.key.toLowerCase() === "faa-pma-targeted") return "faa_pma_targeted";
   if (agent.key.toLowerCase().includes("sam")) return "sam";
   return "usaspending";
@@ -535,13 +443,22 @@ const SAM_API_KEY_ENV = "SAM_API_KEY";
 const FAA_DRS_BROWSER_ENABLED_ENV = "FAA_DRS_BROWSER_ENABLED";
 const FAA_DRS_CHROMIUM_PATH_ENV = "FAA_DRS_CHROMIUM_PATH";
 const FAA_DRS_CACHE_TTL_MS = 24 * 60 * 60 * 1_000;
-const STRICT_SAM_NAICS = ["336411", "336412", "336413", "336419", "334511"] as const;
+const STRICT_SAM_NAICS = [
+  "336411",
+  "336412",
+  "336413",
+  "336419",
+  "334511",
+] as const;
 
 interface DiscoveryExpansion {
   readonly queryValue: string;
   readonly month: string | null;
   readonly page: number;
-  readonly cursor: { readonly sortValue: string; readonly uniqueId: number } | null;
+  readonly cursor: {
+    readonly sortValue: string;
+    readonly uniqueId: number;
+  } | null;
   readonly fetched: number;
   readonly harvested: number;
   readonly duplicates: number;
@@ -607,10 +524,15 @@ async function runUsaspendingExpansion(
       depth: 0,
       payload: { source: "usaspending" },
     };
-    const expanded = await strategy.proposeFrontierItems(campaignStub, sourceView);
+    const expanded = await strategy.proposeFrontierItems(
+      campaignStub,
+      sourceView,
+    );
     const monthlyQueries = expanded
       .filter(
-        (proposal): proposal is FrontierProposal & { readonly itemType: "query" } =>
+        (
+          proposal,
+        ): proposal is FrontierProposal & { readonly itemType: "query" } =>
           proposal.itemType === "query",
       )
       // The strategy's inclusive trailing-365-day range has two partial edge
@@ -654,7 +576,10 @@ async function runUsaspendingExpansion(
       : null;
 
   try {
-    const allProposals = await strategy.proposeFrontierItems(campaignStub, queryView);
+    const allProposals = await strategy.proposeFrontierItems(
+      campaignStub,
+      queryView,
+    );
     const companyProposals = allProposals.filter(
       (proposal) => proposal.itemType === "company",
     );
@@ -665,15 +590,24 @@ async function runUsaspendingExpansion(
     );
     // Production fetches at most 25 rows. An oversized injected client is
     // bounded explicitly and every excess proposal is reported as rejected.
-    const harvestable = companyProposals.slice(0, MAX_SOURCE_SIGNALS_PER_HARVEST_TICK);
-    const harvest = await harvestUsaspendingSourceSignals(db, agent, harvestable);
+    const harvestable = companyProposals.slice(
+      0,
+      MAX_SOURCE_SIGNALS_PER_HARVEST_TICK,
+    );
+    const harvest = await harvestUsaspendingSourceSignals(
+      db,
+      agent,
+      harvestable,
+    );
 
     const transitioned =
       continuation === undefined
         ? await completeAgentQuery(claimed.id)
         : await continueAgentQuery(claimed.id, continuation.payload ?? {});
     if (transitioned === null) {
-      throw new Error(`USAspending query ${claimed.id} lost its in-progress claim`);
+      throw new Error(
+        `USAspending query ${claimed.id} lost its in-progress claim`,
+      );
     }
 
     const progress = await agentFrontierProgress(agent.id);
@@ -684,7 +618,9 @@ async function runUsaspendingExpansion(
       strictRejected.excludedServiceWithoutManufacturing;
     const timePeriod = claimed.payload["timePeriod"];
     const startDate =
-      typeof timePeriod === "object" && timePeriod !== null && !Array.isArray(timePeriod)
+      typeof timePeriod === "object" &&
+      timePeriod !== null &&
+      !Array.isArray(timePeriod)
         ? (timePeriod as Record<string, unknown>)["startDate"]
         : null;
     return {
@@ -696,8 +632,10 @@ async function runUsaspendingExpansion(
       page,
       cursor,
       fetched:
-        Math.max(strategy.qualificationFindings.qualified, companyProposals.length) +
-        strictRejectedCount,
+        Math.max(
+          strategy.qualificationFindings.qualified,
+          companyProposals.length,
+        ) + strictRejectedCount,
       harvested: harvest.harvested,
       duplicates: harvest.duplicate,
       rejected: {
@@ -723,35 +661,52 @@ async function runUsaspendingExpansion(
   }
 }
 
-
 async function harvestUsaspendingSourceSignals(
   db: Database,
   agent: ResearchAgent,
   proposals: readonly FrontierProposal[],
-): Promise<{ readonly harvested: number; readonly duplicate: number; readonly rejected: number }> {
+): Promise<{
+  readonly harvested: number;
+  readonly duplicate: number;
+  readonly rejected: number;
+}> {
   let harvested = 0;
   let duplicate = 0;
   let rejected = 0;
   for (const proposal of proposals) {
     const payload = proposal.payload ?? {};
-    const rawName = typeof payload.rawName === "string" ? payload.rawName.trim() : "";
+    const rawName =
+      typeof payload.rawName === "string" ? payload.rawName.trim() : "";
     const sourceLocator =
-      typeof payload.sourceLocator === "string" ? payload.sourceLocator.trim() : "";
-    if (proposal.itemType !== "company" || rawName === "" || sourceLocator === "") {
+      typeof payload.sourceLocator === "string"
+        ? payload.sourceLocator.trim()
+        : "";
+    if (
+      proposal.itemType !== "company" ||
+      rawName === "" ||
+      sourceLocator === ""
+    ) {
       rejected += 1;
       continue;
     }
-    const awardCount = typeof payload.awardCount === "number" ? payload.awardCount : 0;
+    const awardCount =
+      typeof payload.awardCount === "number" ? payload.awardCount : 0;
     const awardValue =
-      typeof payload.totalAwardValueUsd === "number" ? payload.totalAwardValueUsd : 0;
+      typeof payload.totalAwardValueUsd === "number"
+        ? payload.totalAwardValueUsd
+        : 0;
     const result = await upsertHarvestedSourceSignal(db, {
       sourceKey: "usaspending",
       sourceLocator,
       agentId: agent.id,
       rawName,
-      ...(typeof payload.domain === "string" ? { rawDomain: payload.domain } : {}),
+      ...(typeof payload.domain === "string"
+        ? { rawDomain: payload.domain }
+        : {}),
       ...(typeof payload.uei === "string" ? { uei: payload.uei } : {}),
-      ...(typeof payload.cageCode === "string" ? { cage: payload.cageCode } : {}),
+      ...(typeof payload.cageCode === "string"
+        ? { cage: payload.cageCode }
+        : {}),
       ...(typeof payload.city === "string" ? { city: payload.city } : {}),
       ...(typeof payload.state === "string" ? { state: payload.state } : {}),
       awardCount,
@@ -783,13 +738,19 @@ async function persistSourceSignalProposals(
         sourceFingerprint: proposal.sourceFingerprint,
         agentId,
         rawName: proposal.rawName,
-        ...(proposal.rawDomain === undefined ? {} : { rawDomain: proposal.rawDomain }),
+        ...(proposal.rawDomain === undefined
+          ? {}
+          : { rawDomain: proposal.rawDomain }),
         ...(proposal.uei === undefined ? {} : { uei: proposal.uei }),
         ...(proposal.cage === undefined ? {} : { cage: proposal.cage }),
         ...(proposal.city === undefined ? {} : { city: proposal.city }),
         ...(proposal.state === undefined ? {} : { state: proposal.state }),
-        ...(proposal.country === undefined ? {} : { country: proposal.country }),
-        ...(proposal.awardCount === undefined ? {} : { awardCount: proposal.awardCount }),
+        ...(proposal.country === undefined
+          ? {}
+          : { country: proposal.country }),
+        ...(proposal.awardCount === undefined
+          ? {}
+          : { awardCount: proposal.awardCount }),
         ...(proposal.awardValue === undefined
           ? {}
           : { awardValue: String(proposal.awardValue) }),
@@ -833,7 +794,11 @@ async function harvestSamSourceSignals(
     },
     { limit: MAX_SOURCE_SIGNALS_PER_HARVEST_TICK, signal },
   );
-  const persisted = await persistSourceSignalProposals(db, agent.id, harvested.signals);
+  const persisted = await persistSourceSignalProposals(
+    db,
+    agent.id,
+    harvested.signals,
+  );
   return {
     fetched: harvested.metrics.fetched,
     harvested: persisted.harvested,
@@ -863,7 +828,9 @@ interface FaaTargetCandidate {
   readonly displayName: string;
 }
 
-async function selectFaaTargetCandidate(db: Database): Promise<FaaTargetCandidate | null> {
+async function selectFaaTargetCandidate(
+  db: Database,
+): Promise<FaaTargetCandidate | null> {
   const rows = await db
     .select({
       candidateId: candidates.id,
@@ -967,8 +934,7 @@ async function upsertFaaSearchCheckpoint(
     .insert(sourceSignals)
     .values({
       sourceKey: "faa_drs_pma_search",
-      sourceLocator:
-        `${FAA_DRS_PUBLIC_PMA_URL}?holderName=${encodeURIComponent(candidate.legalName)}`,
+      sourceLocator: `${FAA_DRS_PUBLIC_PMA_URL}?holderName=${encodeURIComponent(candidate.legalName)}`,
       sourceFingerprint,
       agentId,
       rawName: candidate.legalName,
@@ -976,9 +942,7 @@ async function upsertFaaSearchCheckpoint(
       sourcePayload,
       status,
       qualification,
-      ...(hasRecords
-        ? { qualifiedAt: checkedAt }
-        : { rejectedAt: checkedAt }),
+      ...(hasRecords ? { qualifiedAt: checkedAt } : { rejectedAt: checkedAt }),
     })
     .onConflictDoUpdate({
       target: sourceSignals.sourceFingerprint,
@@ -996,7 +960,8 @@ async function upsertFaaSearchCheckpoint(
 }
 
 function faaBrowserEnabled(): boolean {
-  const normalized = process.env[FAA_DRS_BROWSER_ENABLED_ENV]?.trim().toLowerCase();
+  const normalized =
+    process.env[FAA_DRS_BROWSER_ENABLED_ENV]?.trim().toLowerCase();
   return normalized === "true" || normalized === "1";
 }
 
@@ -1019,26 +984,29 @@ async function harvestTargetedFaaSignals(
   const candidate = await selectFaaTargetCandidate(db);
   if (candidate === null) return { candidate: null };
 
-  const cacheKey = candidate.legalName.normalize("NFKC").trim().toLocaleLowerCase("en-US");
+  const cacheKey = candidate.legalName
+    .normalize("NFKC")
+    .trim()
+    .toLocaleLowerCase("en-US");
   const now = Date.now();
   const cached = cache.get(cacheKey);
-  const cacheHit = cached !== undefined && now - cached.cachedAt < FAA_DRS_CACHE_TTL_MS;
+  const cacheHit =
+    cached !== undefined && now - cached.cachedAt < FAA_DRS_CACHE_TTL_MS;
   const chromiumPath = process.env[FAA_DRS_CHROMIUM_PATH_ENV]?.trim();
-  const result =
-    cacheHit
-      ? cached.result
-      : await (
-          deps.searchFaaPma ??
-          ((query) =>
-            new FaaDrsBrowserClient(
-              chromiumPath === undefined || chromiumPath === ""
-                ? {}
-                : { chromiumPath },
-            ).search(query))
-        )({
-          holderName: candidate.legalName,
-          maxRecords: MAX_SOURCE_SIGNALS_PER_HARVEST_TICK,
-        });
+  const result = cacheHit
+    ? cached.result
+    : await (
+        deps.searchFaaPma ??
+        ((query) =>
+          new FaaDrsBrowserClient(
+            chromiumPath === undefined || chromiumPath === ""
+              ? {}
+              : { chromiumPath },
+          ).search(query))
+      )({
+        holderName: candidate.legalName,
+        maxRecords: MAX_SOURCE_SIGNALS_PER_HARVEST_TICK,
+      });
   if (!cacheHit) cache.set(cacheKey, { cachedAt: now, result });
   const checkpointStatus = await upsertFaaSearchCheckpoint(
     db,
@@ -1129,7 +1097,11 @@ async function scoutSourceCatalog(
   db: Database,
   searchClient: Pick<ExaSearchClient, "search">,
   signal: AbortSignal,
-): Promise<{ readonly cataloged: number; readonly duplicates: number; readonly rejected: number }> {
+): Promise<{
+  readonly cataloged: number;
+  readonly duplicates: number;
+  readonly rejected: number;
+}> {
   let cataloged = 0;
   let duplicates = 0;
   let rejected = 0;
@@ -1189,7 +1161,9 @@ async function scoutSourceCatalog(
   return { cataloged, duplicates, rejected };
 }
 
-function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandler {
+function createDiscoverSourceHandler(
+  deps: Partial<TickHandlerDeps>,
+): TickHandler {
   const faaCache = new Map<string, FaaCacheEntry>();
   return async (context): Promise<TickResult> => {
     const agent = context.agent;
@@ -1199,8 +1173,15 @@ function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandle
     if (sourceKey === "sam" && !process.env[SAM_API_KEY_ENV]?.trim()) {
       return {
         outcome: "stuck",
-        plan: { reasoning: `source ${sourceKey} requires SAM_API_KEY`, actions: [] },
-        findings: { idle: true, idleReason: "missing_sam_api_key", source: sourceKey },
+        plan: {
+          reasoning: `source ${sourceKey} requires SAM_API_KEY`,
+          actions: [],
+        },
+        findings: {
+          idle: true,
+          idleReason: "missing_sam_api_key",
+          source: sourceKey,
+        },
       };
     }
     if (sourceKey === "faa_pma_targeted" && !faaBrowserEnabled()) {
@@ -1226,7 +1207,12 @@ function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandle
     const db = getDatabase();
     if (sourceKey === "sam") {
       try {
-        const harvest = await harvestSamSourceSignals(db, agent, deps, context.signal);
+        const harvest = await harvestSamSourceSignals(
+          db,
+          agent,
+          deps,
+          context.signal,
+        );
         return {
           outcome: "executed",
           plan: planJson,
@@ -1257,7 +1243,12 @@ function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandle
       }
     }
     if (sourceKey === "faa_pma_targeted") {
-      const harvest = await harvestTargetedFaaSignals(db, agent, deps, faaCache);
+      const harvest = await harvestTargetedFaaSignals(
+        db,
+        agent,
+        deps,
+        faaCache,
+      );
       if (harvest.candidate === null) {
         return {
           outcome: "done",
@@ -1290,10 +1281,18 @@ function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandle
         return {
           outcome: "stuck",
           plan: planJson,
-          findings: { idle: true, idleReason: "missing_exa_api_key", source: sourceKey },
+          findings: {
+            idle: true,
+            idleReason: "missing_exa_api_key",
+            source: sourceKey,
+          },
         };
       }
-      const catalog = await scoutSourceCatalog(db, exaSearchClient(deps), context.signal);
+      const catalog = await scoutSourceCatalog(
+        db,
+        exaSearchClient(deps),
+        context.signal,
+      );
       return {
         outcome: "executed",
         plan: planJson,
@@ -1332,7 +1331,10 @@ function createDiscoverSourceHandler(deps: Partial<TickHandlerDeps>): TickHandle
         outcome: "stuck",
         plan: planJson,
         findings: {
-          idleReason: progress.pendingMonths === 0 ? "frontier_exhausted" : "frontier_backoff",
+          idleReason:
+            progress.pendingMonths === 0
+              ? "frontier_exhausted"
+              : "frontier_backoff",
           source: "usaspending",
           pendingMonths: progress.pendingMonths,
           completedMonths: progress.completedMonths,
@@ -1381,7 +1383,11 @@ function defaultRunResearch(
 /** seed_scope.candidateFilters → SQL (allowlisted primitive equality only). */
 function seedFilterCondition(agent: ResearchAgent): SQL | undefined {
   const filters = agent.seedScope?.["candidateFilters"];
-  if (typeof filters !== "object" || filters === null || Array.isArray(filters)) {
+  if (
+    typeof filters !== "object" ||
+    filters === null ||
+    Array.isArray(filters)
+  ) {
     return undefined;
   }
   const entries = Object.entries(filters as Record<string, unknown>).filter(
@@ -1397,18 +1403,25 @@ function seedFilterCondition(agent: ResearchAgent): SQL | undefined {
         sql`upper(${companies.headquartersCountryCode}) = ${String(value).toUpperCase()}`,
       );
     } else if (key === "noveltyStatus") {
-      conditions.push(sql`${candidates.noveltyStatus}::text = ${String(value)}`);
+      conditions.push(
+        sql`${candidates.noveltyStatus}::text = ${String(value)}`,
+      );
     }
   }
   if (conditions.length === 0) return undefined;
   return sql.join(conditions, sql` AND `);
 }
 
-function createEnrichCandidateHandler(deps: Partial<TickHandlerDeps>): TickHandler {
+function createEnrichCandidateHandler(
+  deps: Partial<TickHandlerDeps>,
+): TickHandler {
   return async (context): Promise<TickResult> => {
     const model = resolveModelDeps(deps);
     if (model === null) {
-      return { outcome: "stuck", findings: { idleReason: "openrouter_not_configured" } };
+      return {
+        outcome: "stuck",
+        findings: { idleReason: "openrouter_not_configured" },
+      };
     }
 
     const planned = await planAgentTick(deps, context, async (db) => {
@@ -1482,7 +1495,8 @@ function createEnrichCandidateHandler(deps: Partial<TickHandlerDeps>): TickHandl
             metadata: {
               kind: "company",
               candidateId: target.candidateId,
-              domain: hostOf(target.websiteUrl) ?? target.primaryDomain ?? "unknown",
+              domain:
+                hostOf(target.websiteUrl) ?? target.primaryDomain ?? "unknown",
               agentId: context.agent.id,
               agentKey: context.agent.key,
             },
@@ -1491,18 +1505,27 @@ function createEnrichCandidateHandler(deps: Partial<TickHandlerDeps>): TickHandl
           }),
         )
         .returning({ id: researchRuns.id });
-      if (run === undefined) throw new Error("research run insert returned no row");
+      if (run === undefined)
+        throw new Error("research run insert returned no row");
 
       try {
         const result = await (deps.runResearch === undefined
           ? defaultRunResearch(
               { researchRunId: run.id, companyId: target.companyId },
-              { client: model.client, models: model.models, signal: context.signal },
+              {
+                client: model.client,
+                models: model.models,
+                signal: context.signal,
+              },
               deps.researchForceRefresh,
             )
           : deps.runResearch(
               { researchRunId: run.id, companyId: target.companyId },
-              { client: model.client, models: model.models, signal: context.signal },
+              {
+                client: model.client,
+                models: model.models,
+                signal: context.signal,
+              },
             ));
         costUsd += result.costUsd ?? 0;
         results.push({
@@ -1526,7 +1549,9 @@ function createEnrichCandidateHandler(deps: Partial<TickHandlerDeps>): TickHandl
       }
     }
 
-    const succeeded = results.filter((result) => result["status"] === "research_ready");
+    const succeeded = results.filter(
+      (result) => result["status"] === "research_ready",
+    );
     const failed = results.filter((result) => result["status"] === "failed");
     const outcome: TickOutcomeReported =
       succeeded.length > 0 || failed.length === 0 ? "executed" : "stuck";
@@ -1538,7 +1563,10 @@ function createEnrichCandidateHandler(deps: Partial<TickHandlerDeps>): TickHandl
         enriched: succeeded,
         failed,
         invalidActions,
-        skippedActions: Math.max(0, plan.actions.length - executedActions.length),
+        skippedActions: Math.max(
+          0,
+          plan.actions.length - executedActions.length,
+        ),
       },
       costUsd,
     };
@@ -1682,17 +1710,24 @@ async function persistOwnershipEvidenceChain(
         .from(dataSources)
         .where(eq(dataSources.baseUrl, baseUrl))
         .limit(1);
-      if (existing === undefined) throw new Error("unable to resolve data source");
+      if (existing === undefined)
+        throw new Error("unable to resolve data source");
       dataSourceId = existing.id;
     }
     await db
       .insert(companySourceLinks)
-      .values({ dataSourceId, companyId: input.companyId, relationship: "mentions" })
+      .values({
+        dataSourceId,
+        companyId: input.companyId,
+        relationship: "mentions",
+      })
       .onConflictDoNothing();
   }
 
   const canonicalUrl = input.fetch?.finalUrl ?? input.document.url;
-  const retrievedAt = input.fetch ? new Date(input.fetch.retrievedAt) : new Date();
+  const retrievedAt = input.fetch
+    ? new Date(input.fetch.retrievedAt)
+    : new Date();
   const documentMetadata = {
     promptVersion: "ownership-monitor.v1",
     agentKey: input.agentKey,
@@ -1704,7 +1739,10 @@ async function persistOwnershipEvidenceChain(
     .select({ id: sourceDocuments.id })
     .from(sourceDocuments)
     .where(
-      and(eq(sourceDocuments.dataSourceId, dataSourceId), eq(sourceDocuments.canonicalUrl, canonicalUrl)),
+      and(
+        eq(sourceDocuments.dataSourceId, dataSourceId),
+        eq(sourceDocuments.canonicalUrl, canonicalUrl),
+      ),
     )
     .limit(1);
   let documentId: string;
@@ -1716,7 +1754,7 @@ async function persistOwnershipEvidenceChain(
         contentSha256: input.contentSha256,
         byteLength: input.fetch?.byteLength ?? null,
         metadata: {
-          ...(documentMetadata),
+          ...documentMetadata,
           refreshedByAgentKey: input.agentKey,
           refreshedAt: new Date().toISOString(),
         },
@@ -1739,7 +1777,8 @@ async function persistOwnershipEvidenceChain(
           metadata: documentMetadata,
         })
         .returning({ id: sourceDocuments.id });
-      if (created === undefined) throw new Error("source document insert returned no row");
+      if (created === undefined)
+        throw new Error("source document insert returned no row");
       documentId = created.id;
     } catch (error) {
       // Identical bytes already stored under a different data source: link
@@ -1763,7 +1802,10 @@ async function persistOwnershipEvidenceChain(
       quote: input.excerpt,
       extractionMethod: "ownership-monitor.v1",
       contentSha256: input.contentSha256,
-      metadata: { promptVersion: "ownership-monitor.v1", agentKey: input.agentKey },
+      metadata: {
+        promptVersion: "ownership-monitor.v1",
+        agentKey: input.agentKey,
+      },
     })
     .returning({ id: evidence.id });
   if (evidenceRow === undefined) throw new Error("unable to persist evidence");
@@ -1791,8 +1833,16 @@ async function monitorOneCompany(input: {
 
   // ≤3 safe fetches: homepage first, then up to two about/products-style pages.
   const homepage = await fetchDocument(target.fetchUrl!, signal);
-  const linkedUrls = collectCandidatePageLinks(homepage.content, homepage.finalUrl, 2);
-  const documents: Array<{ url: string; text: string; fetch?: SafeFetchResult }> = [
+  const linkedUrls = collectCandidatePageLinks(
+    homepage.content,
+    homepage.finalUrl,
+    2,
+  );
+  const documents: Array<{
+    url: string;
+    text: string;
+    fetch?: SafeFetchResult;
+  }> = [
     {
       url: homepage.finalUrl,
       text: stripHtmlToText(homepage.content, homepage.contentType).slice(
@@ -1891,7 +1941,8 @@ async function monitorOneCompany(input: {
           (prior.type !== observation.ownershipType ||
             (prior.ownerName !== null &&
               observation.ownerName !== undefined &&
-              normalizeText(prior.ownerName) !== normalizeText(observation.ownerName)))
+              normalizeText(prior.ownerName) !==
+                normalizeText(observation.ownerName)))
         ) {
           conflicts.push({
             candidateId: target.candidateId,
@@ -1946,7 +1997,10 @@ function createMonitorOwnershipHandler(
   return async (context): Promise<TickResult> => {
     const model = resolveModelDeps(deps);
     if (model === null) {
-      return { outcome: "stuck", findings: { idleReason: "openrouter_not_configured" } };
+      return {
+        outcome: "stuck",
+        findings: { idleReason: "openrouter_not_configured" },
+      };
     }
 
     const planned = await planAgentTick(deps, context, async (db) => {
@@ -1959,8 +2013,13 @@ function createMonitorOwnershipHandler(
 
     const db = getDatabase();
     const targets = await selectStaleOwnershipTargets(db);
-    const byCandidateId = new Map(targets.map((target) => [target.candidateId, target] as const));
-    const executedActions = plan.actions.slice(0, 2) as MonitorOwnershipAction[];
+    const byCandidateId = new Map(
+      targets.map((target) => [target.candidateId, target] as const),
+    );
+    const executedActions = plan.actions.slice(
+      0,
+      2,
+    ) as MonitorOwnershipAction[];
 
     let writtenCount = 0;
     const conflicts: Array<Record<string, unknown>> = [];
@@ -1975,7 +2034,10 @@ function createMonitorOwnershipHandler(
         continue;
       }
       if (target.fetchUrl === null) {
-        failures.push({ candidateId: target.candidateId, reason: "missing_url" });
+        failures.push({
+          candidateId: target.candidateId,
+          reason: "missing_url",
+        });
         continue;
       }
       try {
@@ -2009,7 +2071,10 @@ function createMonitorOwnershipHandler(
         conflicts,
         failures,
         invalidActions,
-        skippedActions: Math.max(0, plan.actions.length - executedActions.length),
+        skippedActions: Math.max(
+          0,
+          plan.actions.length - executedActions.length,
+        ),
       },
       costUsd,
     };
@@ -2032,7 +2097,10 @@ async function refreshStaleEvidence(
   input: {
     agentKey: string;
     evidenceId: string;
-    fetchDocument: (url: string, signal?: AbortSignal) => Promise<SafeFetchResult>;
+    fetchDocument: (
+      url: string,
+      signal?: AbortSignal,
+    ) => Promise<SafeFetchResult>;
     signal: AbortSignal;
     onRescore: (candidateId: string) => void;
   },
@@ -2042,7 +2110,8 @@ async function refreshStaleEvidence(
     .from(evidence)
     .where(eq(evidence.id, input.evidenceId))
     .limit(1);
-  if (evidenceRow === undefined) throw new EvidenceNotFoundError(input.evidenceId);
+  if (evidenceRow === undefined)
+    throw new EvidenceNotFoundError(input.evidenceId);
 
   const [doc] = await db
     .select()
@@ -2065,14 +2134,20 @@ async function refreshStaleEvidence(
     .select({ id: sourceDocuments.id })
     .from(sourceDocuments)
     .where(
-      and(eq(sourceDocuments.contentSha256, fresh.contentSha256), sql`${sourceDocuments.id} <> ${doc.id}`),
+      and(
+        eq(sourceDocuments.contentSha256, fresh.contentSha256),
+        sql`${sourceDocuments.id} <> ${doc.id}`,
+      ),
     )
     .limit(1);
   if (hashOwner !== undefined) return "unchanged";
 
   // Only carry observations whose supporting quote survives in the fresh text.
   const freshText = stripHtmlToText(fresh.content, fresh.contentType);
-  if (evidenceRow.quote !== null && !normalizedContains(freshText, evidenceRow.quote)) {
+  if (
+    evidenceRow.quote !== null &&
+    !normalizedContains(freshText, evidenceRow.quote)
+  ) {
     return "dropped";
   }
 
@@ -2109,10 +2184,14 @@ async function refreshStaleEvidence(
       endOffset: evidenceRow.endOffset,
       extractionMethod: "refresh-stale.v1",
       contentSha256: fresh.contentSha256,
-      metadata: { refreshedFromEvidenceId: evidenceRow.id, agentKey: input.agentKey },
+      metadata: {
+        refreshedFromEvidenceId: evidenceRow.id,
+        agentKey: input.agentKey,
+      },
     })
     .returning({ id: evidence.id });
-  if (newEvidence === undefined) throw new Error("unable to persist refreshed evidence");
+  if (newEvidence === undefined)
+    throw new Error("unable to persist refreshed evidence");
 
   for (const observation of childObservations) {
     await db.insert(observations).values({
@@ -2142,7 +2221,9 @@ async function refreshStaleEvidence(
   return "refreshed";
 }
 
-function createRefreshStaleHandler(deps: Partial<TickHandlerDeps>): TickHandler {
+function createRefreshStaleHandler(
+  deps: Partial<TickHandlerDeps>,
+): TickHandler {
   return async (context): Promise<TickResult> => {
     const planned = await planAgentTick(deps, context, async (db) => {
       const result = await db.execute<{ evidence_id: string }>(sql`
@@ -2214,7 +2295,10 @@ function createRefreshStaleHandler(deps: Partial<TickHandlerDeps>): TickHandler 
         invalidActions,
         rescoredCandidates: [...rescoredCandidateIds],
         errors,
-        skippedActions: Math.max(0, plan.actions.length - executedActions.length),
+        skippedActions: Math.max(
+          0,
+          plan.actions.length - executedActions.length,
+        ),
       },
     };
   };
@@ -2254,7 +2338,10 @@ async function selectPositiveGoldenExamples(
         inArray(goldenExamples.reviewStatus, ["proposed", "reviewed"]),
         or(
           inArray(goldenExamples.archetypeFit, ["strong_positive", "positive"]),
-          inArray(goldenExamples.currentActionability, ["strong_positive", "positive"]),
+          inArray(goldenExamples.currentActionability, [
+            "strong_positive",
+            "positive",
+          ]),
           inArray(goldenExamples.goldenExampleType, [
             "strong_positive",
             "positive_with_caveat",
@@ -2295,7 +2382,9 @@ function goldenNeighborQueryTemplates(
       return;
     }
     if (typeof value === "object" && value !== null) {
-      for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+      for (const [key, entry] of Object.entries(
+        value as Record<string, unknown>,
+      )) {
         visit(entry, `${path} ${key.toLowerCase()}`);
       }
       return;
@@ -2318,7 +2407,8 @@ function goldenNeighborQueryTemplates(
   };
 
   for (const example of examples) {
-    if (example.descriptionRaw !== null) visit(example.descriptionRaw, "description");
+    if (example.descriptionRaw !== null)
+      visit(example.descriptionRaw, "description");
     visit(example.grataPayload, "payload");
   }
   if (keywords.size === 0) {
@@ -2338,13 +2428,18 @@ async function persistGoldenNeighborSignals(
 ): Promise<{ readonly harvested: number; readonly duplicate: number }> {
   let harvested = 0;
   let duplicate = 0;
-  for (const proposal of proposals.slice(0, MAX_SOURCE_SIGNALS_PER_HARVEST_TICK)) {
+  for (const proposal of proposals.slice(
+    0,
+    MAX_SOURCE_SIGNALS_PER_HARVEST_TICK,
+  )) {
     const result = await upsertHarvestedSourceSignal(db, {
       sourceKey: "exa_golden_neighbor",
       sourceLocator: proposal.sourceLocator,
       agentId: agent.id,
       rawName: proposal.rawName,
-      ...(proposal.rawDomain === undefined ? {} : { rawDomain: proposal.rawDomain }),
+      ...(proposal.rawDomain === undefined
+        ? {}
+        : { rawDomain: proposal.rawDomain }),
       ...(proposal.country === undefined ? {} : { country: proposal.country }),
       awardCount: 0,
       awardValue: 0,
@@ -2359,7 +2454,9 @@ async function persistGoldenNeighborSignals(
   return { harvested, duplicate };
 }
 
-function createGoldenNeighborHandler(deps: Partial<TickHandlerDeps>): TickHandler {
+function createGoldenNeighborHandler(
+  deps: Partial<TickHandlerDeps>,
+): TickHandler {
   return async (context): Promise<TickResult> => {
     const planned = await planAgentTick(deps, context, async (db) => {
       const examples = await selectPositiveGoldenExamples(db);
@@ -2389,7 +2486,9 @@ function createGoldenNeighborHandler(deps: Partial<TickHandlerDeps>): TickHandle
     }
 
     const queryTemplates = goldenNeighborQueryTemplates(examples).slice(0, 3);
-    const harvest = await new ExaCompanyListHarvester(exaSearchClient(deps)).harvest(
+    const harvest = await new ExaCompanyListHarvester(
+      exaSearchClient(deps),
+    ).harvest(
       { queryTemplates },
       { limit: MAX_SOURCE_SIGNALS_PER_HARVEST_TICK, signal: context.signal },
     );
@@ -2474,7 +2573,7 @@ function decodeEntities(value: string): string {
  * chars); falls back to stripped body text for JS-shell pages whose markup
  * carries nothing else.
  */
-export function homepageIdentityText(html: string): string {
+function homepageIdentityText(html: string): string {
   const parts = [
     ...matchAll(html, /<title[^>]*>([\s\S]*?)<\/title/giu),
     ...matchAll(
@@ -2493,63 +2592,8 @@ export function homepageIdentityText(html: string): string {
   return collapse(stripTags(html)).slice(0, MAX_IDENTITY_TEXT_CHARS);
 }
 
-const MAX_IDENTITY_PAGE_TEXT_CHARS = 4_000;
-
-function identityPageText(html: string): string {
-  const headings = [
-    ...matchAll(html, /<title[^>]*>([\s\S]*?)<\/title/giu),
-    ...matchAll(
-      html,
-      /<meta[^>]+name\s*=\s*["']description["'][^>]*content\s*=\s*["']([^"']*)["']/giu,
-    ),
-    ...matchAll(html, /<h[1-3][^>]*>([\s\S]*?)<\/h[1-3]>/giu),
-    ...matchAll(html, /<footer[^>]*>([\s\S]*?)<\/footer>/giu),
-  ];
-  return collapse(`${headings.join(" ")} ${stripTags(html)}`).slice(
-    0,
-    MAX_IDENTITY_PAGE_TEXT_CHARS,
-  );
-}
-
-function identityLinksFrom(html: string, baseUrl: string): string[] {
-  const baseHost = hostOf(baseUrl);
-  if (baseHost === null) return [];
-  const candidates: Array<{ url: string; priority: number }> = [];
-  for (const match of html.matchAll(/<a\b([^>]*)>([\s\S]*?)<\/a>/giu)) {
-    const href = /\bhref\s*=\s*["']([^"']+)["']/iu.exec(match[1] ?? "")?.[1];
-    if (href === undefined) continue;
-    const label = collapse(stripTags(match[2] ?? ""));
-    const relevance = `${href} ${label}`.toLocaleLowerCase("en-US");
-    if (!/(about|contact|who[\s_-]*we[\s_-]*are)/u.test(relevance)) continue;
-    let resolved: URL;
-    try {
-      resolved = new URL(decodeEntities(href), baseUrl);
-    } catch {
-      continue;
-    }
-    if (
-      (resolved.protocol !== "https:" && resolved.protocol !== "http:") ||
-      hostOf(resolved.toString()) !== baseHost
-    ) {
-      continue;
-    }
-    resolved.hash = "";
-    const priority = /about|who[\s_-]*we[\s_-]*are/u.test(relevance) ? 0 : 1;
-    candidates.push({ url: resolved.toString(), priority });
-  }
-  candidates.sort((left, right) => left.priority - right.priority);
-  return [...new Set(candidates.map((candidate) => candidate.url))].slice(0, 2);
-}
-
-class SafeFetchDomainProber implements DomainProber, IdentityPageProber {
+class SafeFetchDomainProber implements DomainProber {
   async fetchText(url: string) {
-    const page = await this.fetchIdentityPage(url);
-    return page.ok
-      ? { ok: true as const, finalUrl: page.finalUrl, text: homepageIdentityText(page.text) }
-      : page;
-  }
-
-  async fetchIdentityPage(url: string): Promise<IdentityPageProbeResult> {
     try {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), 10_000);
@@ -2563,19 +2607,19 @@ class SafeFetchDomainProber implements DomainProber, IdentityPageProber {
       } finally {
         clearTimeout(timer);
       }
-      const html = result.content.slice(0, MAX_HTML_BYTES);
       return {
-        ok: true,
+        ok: true as const,
         finalUrl: result.finalUrl,
-        text: identityPageText(html),
-        identityLinks: identityLinksFrom(html, result.finalUrl),
+        text: homepageIdentityText(result.content.slice(0, MAX_HTML_BYTES)),
       };
     } catch (error) {
-      if (error instanceof SafeFetchError) return { ok: false, error: error.code };
-      if (error instanceof Error && error.name === "AbortError") {
-        return { ok: false, error: "timeout" };
+      if (error instanceof SafeFetchError) {
+        return { ok: false as const, error: error.code };
       }
-      return { ok: false, error: "network_error" };
+      if (error instanceof Error && error.name === "AbortError") {
+        return { ok: false as const, error: "timeout" };
+      }
+      return { ok: false as const, error: "network_error" };
     }
   }
 }
@@ -2602,12 +2646,12 @@ const identityJudgmentSchema = z.strictObject({
 const PROPOSE_SYSTEM_PROMPT =
   "You propose candidate website domains for an industrial company named by " +
   "the user. If the name starts with a brand word that likely belongs to a " +
-  "larger parent organization (e.g. \"ACME Aviation, Inc.\" under ACME " +
+  'larger parent organization (e.g. "ACME Aviation, Inc." under ACME ' +
   "Corp), ALWAYS list that parent brand's root domain FIRST — parent " +
   "companies often host their subsidiaries' web presence under one domain. " +
   "Otherwise, cover DIFFERENT compact styles: the full word-mark (all words " +
   "joined), an initialism/acronym (initials joined, optionally prefixed by " +
-  "the company's first word, e.g. \"York Precision Machining Hydraulics\" → " +
+  'the company\'s first word, e.g. "York Precision Machining Hydraulics" → ' +
   "ypmh.com or yorkpmh.com), and one other plausible variant. Reply with " +
   "exactly ONE raw JSON object (no prose, no markdown fences) of shape " +
   '{"domains":["example.com", ...]} containing at most 3 plausible domains, ' +
@@ -2671,7 +2715,12 @@ class CostTrackingOpenRouterDomainJudge implements DomainJudge {
           ? prompt
           : `${prompt}\n\nREPAIR: your previous reply failed validation (${lastError}). Reply again with exactly one raw JSON object matching the required shape.`;
       try {
-        const result = await this.callModel(schema, schemaName, systemPrompt, fullPrompt);
+        const result = await this.callModel(
+          schema,
+          schemaName,
+          systemPrompt,
+          fullPrompt,
+        );
         this.spentUsd += result.costUsd;
         return result.data;
       } catch (error) {
@@ -2681,10 +2730,15 @@ class CostTrackingOpenRouterDomainJudge implements DomainJudge {
     return null;
   }
 
-  async proposeDomains(leadName: string, locationHint?: string | null): Promise<string[]> {
+  async proposeDomains(
+    leadName: string,
+    locationHint?: string | null,
+  ): Promise<string[]> {
     const prompt =
       `Company name: ${leadName}` +
-      (locationHint === null || locationHint === undefined || locationHint.length === 0
+      (locationHint === null ||
+      locationHint === undefined ||
+      locationHint.length === 0
         ? ""
         : `\nLocation hint: ${locationHint}`) +
       "\nPropose its most likely official website domains.";
@@ -2742,11 +2796,15 @@ export function buildDomainResolutionDeps(
   const model = resolveModelDeps(deps);
   if (model === null) return null;
   const resolutionLogger: ResolutionLogger = {
-    debug: (message, meta) => console.debug(`[resolve_domain] ${message}`, meta ?? ""),
-    info: (message, meta) => console.info(`[resolve_domain] ${message}`, meta ?? ""),
-    warn: (message, meta) => console.warn(`[resolve_domain] ${message}`, meta ?? ""),
+    debug: (message, meta) =>
+      console.debug(`[resolve_domain] ${message}`, meta ?? ""),
+    info: (message, meta) =>
+      console.info(`[resolve_domain] ${message}`, meta ?? ""),
+    warn: (message, meta) =>
+      console.warn(`[resolve_domain] ${message}`, meta ?? ""),
   };
-  const judge = deps.domainJudge ?? new CostTrackingOpenRouterDomainJudge(model);
+  const judge =
+    deps.domainJudge ?? new CostTrackingOpenRouterDomainJudge(model);
   return {
     deps: {
       prober: deps.domainProber ?? new SafeFetchDomainProber(),
@@ -2759,1486 +2817,38 @@ export function buildDomainResolutionDeps(
 
 /** Model-call spend for the runtime's judge (0 for non-costing test judges). */
 export function judgeCostUsd(judge: DomainJudge): number {
-  return judge instanceof CostTrackingOpenRouterDomainJudge ? judge.totalCostUsd() : 0;
+  return judge instanceof CostTrackingOpenRouterDomainJudge
+    ? judge.totalCostUsd()
+    : 0;
 }
 
 // ---------------------------------------------------------------------------
-// Generic source-signal qualification (legacy DB agent_type: qualify_award_lead).
+// Legacy source-signal qualification handoff.
 // ---------------------------------------------------------------------------
 
-const MAX_SOURCE_SIGNALS_PER_TICK = 5;
-const MAX_EXA_PROPOSALS_PER_SIGNAL = 5;
-const MAX_CLASSIFICATION_TEXT_CHARS = 12_000;
-
-function objectRecord(value: unknown): Record<string, unknown> | null {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? (value as Record<string, unknown>)
-    : null;
-}
-
-function nullableTextField(
-  record: Record<string, unknown>,
-  key: string,
-): string | null {
-  const value = record[key];
-  return typeof value === "string" && value.trim() !== "" ? value.trim() : null;
-}
-
-function stringArrayField(
-  record: Record<string, unknown>,
-  key: string,
-): string[] {
-  const value = record[key];
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string" && item.trim() !== "")
-    : [];
-}
-
-function keyFreeSourceLocator(locator: string): string {
-  try {
-    const url = new URL(locator);
-    for (const key of [...url.searchParams.keys()]) {
-      if (/(?:api[-_]?key|token|secret|credential)/iu.test(key)) {
-        url.searchParams.delete(key);
-      }
-    }
-    return url.toString();
-  } catch {
-    return locator.replace(
-      /([?&](?:api[-_]?key|token|secret|credential)=)[^&]*/giu,
-      "$1[redacted]",
-    );
-  }
-}
-
-export function buildAuthoritativeSourceEvidence(
-  signal: SourceSignal,
-): AuthoritativeSourceEvidence[] {
-  if (signal.sourceKey === "faa_drs_pma") {
-    const record = objectRecord(signal.sourcePayload["record"]);
-    if (record === null) return [];
-    const renderedSourceText = nullableTextField(record, "renderedSourceText");
-    if (renderedSourceText === null) return [];
-    return [
-      {
-        sourceKey: signal.sourceKey,
-        url: keyFreeSourceLocator(signal.sourceLocator),
-        text: renderedSourceText,
-        allowedClaims: ["manufacturer", "aerospace", "headquarters"],
-        metadata: {
-          status: nullableTextField(record, "status"),
-          holderName: nullableTextField(record, "holderName"),
-          holderNumber: nullableTextField(record, "holderNumber"),
-          fullAddress: nullableTextField(record, "fullAddress"),
-          pmaPartNumber: nullableTextField(record, "pmaPartNumber"),
-          partName: nullableTextField(record, "partName"),
-          make: nullableTextField(record, "make"),
-          models: stringArrayField(record, "models"),
-          approvalBasis: nullableTextField(record, "approvalBasis"),
-        },
-      },
-    ];
-  }
-  if (signal.sourceKey === "sam_entity") {
-    const locator = keyFreeSourceLocator(signal.sourceLocator);
-    const sourceText = JSON.stringify(
-      {
-        matchedNaicsCodes: signal.sourcePayload["matchedNaicsCodes"] ?? [],
-        rawEntity: signal.sourcePayload["rawEntity"] ?? {},
-        identity: {
-          legalName: signal.rawName,
-          uei: signal.uei,
-          cage: signal.cage,
-          city: signal.city,
-          state: signal.state,
-          country: signal.country,
-        },
-      },
-      null,
-      2,
-    );
-    return [
-      {
-        sourceKey: signal.sourceKey,
-        url: locator,
-        text: sourceText,
-        // SAM registration corroborates identity, US location, and industry
-        // classification. It never proves physical manufacturing or size.
-        allowedClaims: ["aerospace", "headquarters"],
-        metadata: {
-          matchedNaicsCodes: signal.sourcePayload["matchedNaicsCodes"] ?? [],
-          uei: signal.uei,
-          cage: signal.cage,
-          city: signal.city,
-          state: signal.state,
-          country: signal.country,
-        },
-      },
-    ];
-  }
-  return [];
-}
-
-const pageGroundedClaimSchema = z.strictObject({
-  excerpt: z.string().trim().min(1).max(2_000),
-  url: z.string().url().max(2_000),
-});
-const sourceSignalClassificationSchema = z
-  .strictObject({
-    manufacturer: z.boolean(),
-    aerospaceDefenseRelevance: z.boolean(),
-    businessModel: z.enum(["manufacturer", "distributor", "service", "btp", "unknown"]),
-    headquartersCountry: z.string().trim().min(1).max(100),
-    ownershipType: z.enum([
-      "independent",
-      "founder_family",
-      "pe_owned",
-      "strategic_parent",
-      "public",
-      "unknown",
-    ]),
-    sizeFit: z.enum(["likely_under_50m", "likely_over_50m", "unknown"]),
-    proprietarySignals: z.array(z.string().trim().min(1).max(500)).max(20),
-    manufacturerEvidence: pageGroundedClaimSchema.nullable(),
-    aerospaceDefenseEvidence: pageGroundedClaimSchema.nullable(),
-    targetDecision: z.enum(["yes_target", "no_target", "needs_more_research"]),
-    reasons: z.array(z.string().trim().min(1).max(500)).min(1).max(20),
-    confidence: z.number().min(0).max(1),
-  })
-  .superRefine((value, context) => {
-    if (value.manufacturer && value.manufacturerEvidence === null) {
-      context.addIssue({
-        code: "custom",
-        path: ["manufacturerEvidence"],
-        message: "manufacturer=true requires grounded evidence",
-      });
-    }
-    if (value.aerospaceDefenseRelevance && value.aerospaceDefenseEvidence === null) {
-      context.addIssue({
-        code: "custom",
-        path: ["aerospaceDefenseEvidence"],
-        message: "aerospaceDefenseRelevance=true requires grounded evidence",
-      });
-    }
-  });
-
-const SOURCE_SIGNAL_CLASSIFIER_PROMPT =
-  "You classify a company after Exa discovery and verified first-party website identity. " +
-  "Use the separately delimited official-site pages and authoritative government-source evidence. " +
-  "USAspending is only a weak discovery signal. FAA PMA records may prove current physical-part " +
-  "manufacturing and aerospace relevance. SAM may corroborate identity, US location, and NAICS/PSC " +
-  "classification, but SAM alone never proves physical manufacturing, ownership, or size. " +
-  "manufacturer=true only when an allowed source says the company makes, manufactures, machines, " +
-  "fabricates, assembles, or holds a current FAA PMA for a physical part. aerospaceDefenseRelevance=true " +
-  "requires explicit aerospace/aviation/space/defense evidence or an FAA PMA make/model record. For each " +
-  "true claim, copy an exact excerpt and its [Source URL]; otherwise return null evidence. Determine " +
-  "headquartersCountry, ownershipType (independent|founder_family|pe_owned|strategic_parent|public|unknown), " +
-  "sizeFit (likely_under_50m|likely_over_50m|unknown), and proprietarySignals. FAA PMA does not prove " +
-  "independence, ownership, size, revenue, or sole-source status. Unknown ownership or size is uncertainty, " +
-  "never positive evidence. Propose yes_target only for a verified US aerospace/defense physical-product " +
-  "manufacturer that is not distributor/service, has no known PE/strategic/public owner, and is not clearly " +
-  "over $50m. Use needs_more_research when manufacturer+aerospace+US pass but ownership or size is unknown; " +
-  "all other failures are no_target. Reply with exactly one raw JSON object and no markdown.";
-
-function createSourceSignalClassifier(model: ResolvedModelDeps): {
-  readonly classify: SourceSignalClassifier;
-  readonly costUsd: () => number;
-} {
-  let costUsd = 0;
-  return {
-    classify: async (input) => {
-      const authoritativeText = input.authoritativeEvidence
-        .map(
-          (source) =>
-            `[Source key: ${source.sourceKey}]\n[Source URL: ${source.url}]\n` +
-            `[Allowed claims: ${source.allowedClaims.join(", ")}]\n${source.text}`,
-        )
-        .join("\n\n")
-        .slice(0, MAX_CLASSIFICATION_TEXT_CHARS);
-      const result = await model.client.generateStructured({
-        route: "fast",
-        models: model.models,
-        schemaName: "source_signal_target_classification_v3",
-        schema: sourceSignalClassificationSchema,
-        systemPrompt: SOURCE_SIGNAL_CLASSIFIER_PROMPT,
-        prompt:
-          `Company legal name: ${input.legalName}` +
-          `\nPrimary verified page URL: ${input.pageUrl}` +
-          `\n\nVerified official-site pages:\n<official_pages>\n${input.pageText.slice(0, MAX_CLASSIFICATION_TEXT_CHARS)}\n</official_pages>` +
-          `\n\nAuthoritative source evidence:\n<authoritative_sources>\n${authoritativeText}\n</authoritative_sources>`,
-        temperature: 0,
-        maxOutputTokens: 1_024,
-        maxAttempts: 1,
-      });
-      costUsd += result.telemetry.costUsd ?? 0;
-      return result.data;
-    },
-    costUsd: () => costUsd,
-  };
-}
-
-function officialDomainSearcher(): OfficialDomainSearcher {
-  const client = new ExaSearchClient({ apiKey: process.env.EXA_API_KEY });
-  return (identity) => searchOfficialDomainCandidates(identity, client);
-}
-
-function sourceSignalIdentityHints(signal: {
-  readonly city: string | null;
-  readonly state: string | null;
-  readonly uei: string | null;
-  readonly cage: string | null;
-}): LeadIdentityHints {
-  const location = [signal.city, signal.state].filter((value): value is string => value !== null);
-  return {
-    location: location.length === 0 ? null : location.join(", "),
-    uei: signal.uei,
-    cage: signal.cage,
-  };
-}
-
-export const OFFICIAL_SITE_NAME_OVERLAP_THRESHOLD = 0.6;
-
-export interface OfficialSiteAuthenticity {
-  readonly origin: string;
-  readonly passed: boolean;
-  readonly method:
-    | "legal_name_token_overlap"
-    | "identifier_and_location"
-    | "none"
-    | "blocked_domain"
-    | "invalid_url"
-    | "unreachable";
-  readonly corroborationUrl: string | null;
-}
-
-interface OfficialSiteIdentity {
-  readonly legalName: string;
-  readonly city: string | null;
-  readonly state: string | null;
-  readonly uei: string | null;
-  readonly cage: string | null;
-}
-
-function containsExactIdentityValue(text: string, value: string): boolean {
-  const haystack = text.normalize("NFKC").toLocaleLowerCase("en-US");
-  const needle = value.normalize("NFKC").trim().toLocaleLowerCase("en-US");
-  if (needle.length === 0) return false;
-  let from = 0;
-  while (from <= haystack.length - needle.length) {
-    const index = haystack.indexOf(needle, from);
-    if (index < 0) return false;
-    const before = index === 0 ? "" : haystack[index - 1] ?? "";
-    const afterIndex = index + needle.length;
-    const after = afterIndex === haystack.length ? "" : haystack[afterIndex] ?? "";
-    if (!/[a-z0-9]/u.test(before) && !/[a-z0-9]/u.test(after)) return true;
-    from = index + 1;
-  }
-  return false;
-}
-
-function pageMatchesLocation(identity: OfficialSiteIdentity, text: string): boolean {
-  if (identity.city !== null) return containsExactIdentityValue(text, identity.city);
-  return identity.state !== null && containsExactIdentityValue(text, identity.state);
-}
-
-function legalNameTokenOverlapRatio(legalName: string, pageText: string): number {
-  const legalTokens = leadNameTokens(legalName);
-  if (legalTokens.length === 0) return 0;
-  const pageTokens = new Set(
-    pageText
-      .normalize("NFKC")
-      .toLocaleLowerCase("en-US")
-      .split(/[^a-z0-9]+/u)
-      .filter((token) => token.length > 0),
-  );
-  let matched = 0;
-  for (const token of legalTokens) {
-    if (pageTokens.has(token)) matched += 1;
-  }
-  return matched / legalTokens.length;
-}
-
-export function evaluateOfficialSiteAuthenticity(
-  identity: OfficialSiteIdentity,
-  origin: string,
-  pages: readonly IdentityPage[],
-): OfficialSiteAuthenticity {
-  for (const page of pages) {
-    if (
-      legalNameTokenOverlapRatio(identity.legalName, page.text) >=
-      OFFICIAL_SITE_NAME_OVERLAP_THRESHOLD
-    ) {
-      return {
-        origin,
-        passed: true,
-        method: "legal_name_token_overlap",
-        corroborationUrl: page.finalUrl,
-      };
-    }
-  }
-
-  const identifierPage = pages.find((page) =>
-    [identity.uei, identity.cage].some(
-      (identifier) =>
-        identifier !== null && containsExactIdentityValue(page.text, identifier),
-    ),
-  );
-  const locationPage = pages.find((page) => pageMatchesLocation(identity, page.text));
-  if (identifierPage !== undefined && locationPage !== undefined) {
+/**
+ * Source signals are now qualified by the lease-fenced evidence -> JEv ->
+ * Muse lifecycle. The legacy supervisor agent only performs a bounded,
+ * idempotent bootstrap; it must not create canonical leads/candidates or
+ * terminalize a transient research failure ahead of that lifecycle.
+ */
+function createQualifyAwardLeadHandler(): TickHandler {
+  return async (): Promise<TickResult> => {
+    const bootstrapped = await bootstrapSignalReviewStates(getDatabase(), {
+      limit: MAX_STATE_IDS,
+    });
     return {
-      origin,
-      passed: true,
-      method: "identifier_and_location",
-      corroborationUrl: identifierPage.finalUrl,
-    };
-  }
-  return {
-    origin,
-    passed: false,
-    method: "none",
-    corroborationUrl: null,
-  };
-}
-
-function identityJudgmentAccepts(judgment: IdentityJudgment): boolean {
-  return (
-    judgment.matches &&
-    judgment.confidence >= MIN_JUDGE_CONFIDENCE &&
-    (judgment.relationship === "exact" || judgment.relationship === "parent_brand")
-  );
-}
-function isPageGroundedClaim(
-  claim: PageGroundedClaim | null,
-  claimType: GroundedTargetClaim,
-  pageText: string,
-  fetchedUrls: readonly string[],
-  authoritativeEvidence: readonly AuthoritativeSourceEvidence[] = [],
-  officialPages: readonly Pick<IdentityPage, "finalUrl" | "text">[] = [],
-): boolean {
-  if (claim === null) return false;
-  const officialPage = officialPages.find((page) => page.finalUrl === claim.url);
-  if (officialPage !== undefined) return normalizedContains(officialPage.text, claim.excerpt);
-  if (
-    officialPages.length === 0 &&
-    fetchedUrls.includes(claim.url) &&
-    normalizedContains(pageText, claim.excerpt)
-  ) {
-    return true;
-  }
-  const authority = authoritativeEvidence.find(
-    (source) =>
-      source.url === claim.url &&
-      source.allowedClaims.includes(claimType),
-  );
-  return authority !== undefined && normalizedContains(authority.text, claim.excerpt);
-}
-
-function officialAddressConsistent(fullAddress: string, pageText: string): boolean {
-  const zip = /\b\d{5}(?:-\d{4})?\b/u.exec(fullAddress)?.[0];
-  if (zip !== undefined && pageText.includes(zip)) return true;
-  const cityState =
-    /(?:^|,)\s*([A-Za-z][A-Za-z .'-]{1,60}),\s*([A-Z]{2})\s+\d{5}(?:-\d{4})?\b/u.exec(
-      fullAddress,
-    );
-  if (cityState?.[1] === undefined || cityState[2] === undefined) return false;
-  const normalizedPage = normalizeText(pageText);
-  return (
-    normalizedPage.includes(normalizeText(cityState[1])) &&
-    new RegExp(`\\b${cityState[2]}\\b`, "u").test(pageText)
-  );
-}
-
-function excerptAround(text: string, term: string): string {
-  const index = text.toLocaleLowerCase("en-US").indexOf(term.toLocaleLowerCase("en-US"));
-  if (index < 0) return text.slice(0, 2_000).trim();
-  return text
-    .slice(Math.max(0, index - 500), Math.min(text.length, index + term.length + 1_500))
-    .trim();
-}
-
-interface AuthoritativeClassificationSynthesis {
-  readonly classification: SourceSignalClassification;
-  readonly contributions: Record<string, unknown>;
-}
-
-export function synthesizeAuthoritativeClassification(
-  signal: SourceSignal,
-  modelProposal: SourceSignalClassification,
-  authoritativeEvidence: readonly AuthoritativeSourceEvidence[],
-  officialPageText: string,
-): AuthoritativeClassificationSynthesis {
-  const baseContributions = {
-    officialWebsite: {
-      manufacturer: modelProposal.manufacturer,
-      aerospaceDefenseRelevance: modelProposal.aerospaceDefenseRelevance,
-      headquartersCountry: modelProposal.headquartersCountry,
-      ownershipType: modelProposal.ownershipType,
-      sizeFit: modelProposal.sizeFit,
-    },
-    authoritativeSources: authoritativeEvidence.map((source) => ({
-      sourceKey: source.sourceKey,
-      url: source.url,
-      allowedClaims: source.allowedClaims,
-      metadata: source.metadata,
-    })),
-  };
-  if (signal.sourceKey !== "faa_drs_pma" || authoritativeEvidence.length === 0) {
-    return { classification: modelProposal, contributions: baseContributions };
-  }
-
-  const faa = authoritativeEvidence[0]!;
-  const status = nullableTextField(faa.metadata, "status");
-  const holderNumber = nullableTextField(faa.metadata, "holderNumber");
-  const part =
-    nullableTextField(faa.metadata, "pmaPartNumber") ??
-    nullableTextField(faa.metadata, "partName");
-  const make = nullableTextField(faa.metadata, "make");
-  const models = stringArrayField(faa.metadata, "models");
-  const isCurrent =
-    status !== null &&
-    /\b(?:current|active)\b/iu.test(status) &&
-    !/\b(?:inactive|expired|cancelled|superseded)\b/iu.test(status);
-  if (!isCurrent || holderNumber === null || part === null || make === null || models.length === 0) {
-    return { classification: modelProposal, contributions: baseContributions };
-  }
-
-  const excerpt = excerptAround(faa.text, part);
-  const fullAddress = nullableTextField(faa.metadata, "fullAddress");
-  const usAddressConsistent =
-    fullAddress !== null && officialAddressConsistent(fullAddress, officialPageText);
-  const proprietarySignals = [
-    ...new Set([
-      ...modelProposal.proprietarySignals,
-      "FAA PMA",
-      `FAA PMA holder ${holderNumber}`,
-      `FAA PMA part ${part}`,
-    ]),
-  ];
-  const classification: SourceSignalClassification = {
-    ...modelProposal,
-    manufacturer: true,
-    aerospaceDefenseRelevance: true,
-    businessModel:
-      modelProposal.businessModel === "unknown"
-        ? "manufacturer"
-        : modelProposal.businessModel,
-    ...(usAddressConsistent ? { headquartersCountry: "United States" } : {}),
-    proprietarySignals,
-    manufacturerEvidence: { excerpt, url: faa.url },
-    aerospaceDefenseEvidence: { excerpt, url: faa.url },
-  };
-  return {
-    classification,
-    contributions: {
-      ...baseContributions,
-      authoritativeOverride: {
-        sourceKey: faa.sourceKey,
-        url: faa.url,
-        applied: ["manufacturer", "aerospace", "proprietarySignals"],
-        ...(usAddressConsistent ? { headquartersCountry: "United States" } : {}),
-        excerpt,
-        holderNumber,
-        part,
-        make,
-        models,
-        ownershipProven: false,
-        sizeProven: false,
-        soleSourceProven: false,
-      },
-    },
-  };
-}
-
-export interface DeterministicSourceSignalDecision {
-  readonly targetDecision: SourceSignalTargetDecision;
-  readonly reasons: readonly string[];
-}
-
-async function recordTargetDecision(
-  db: Database,
-  signalId: string,
-  input: {
-    readonly status: "qualified" | "rejected";
-    readonly modelProposal: SourceSignalClassification | null;
-    readonly deterministicDecision: DeterministicSourceSignalDecision;
-    readonly evidence: Record<string, unknown>;
-    readonly leadId?: string;
-    readonly companyId?: string;
-  },
-): Promise<void> {
-  await recordSourceSignalQualification(db, signalId, {
-    decision: input.status,
-    reason: input.deterministicDecision.targetDecision,
-    evidence: {
-      ...input.evidence,
-      modelProposal: input.modelProposal,
-      deterministicDecision: input.deterministicDecision,
-    },
-    ...(input.leadId === undefined ? {} : { leadId: input.leadId }),
-    ...(input.companyId === undefined ? {} : { companyId: input.companyId }),
-  });
-  // Keep the proposal/override directly addressable while retaining the full
-  // decision envelope produced by the canonical qualification recorder.
-  await db
-    .update(sourceSignals)
-    .set({
-      qualification: sql`${sourceSignals.qualification} || ${JSON.stringify({
-        modelProposal: input.modelProposal,
-        deterministicDecision: input.deterministicDecision,
-        ...(input.evidence["sourceContributions"] === undefined
-          ? {}
-          : { sourceContributions: input.evidence["sourceContributions"] }),
-      })}::jsonb`,
-      updatedAt: new Date(),
-    })
-    .where(eq(sourceSignals.id, signalId));
-}
-
-export type QualifiedSourceSynthesisState = "materialized" | "waiting" | "noop";
-
-export async function synthesizeQualifiedSignalIfReady(
-  db: Database,
-  signalId: string,
-  deps: Pick<TickHandlerDeps, "synthesizeSourceSignal"> = {},
-): Promise<QualifiedSourceSynthesisState> {
-  const [signal] = await db
-    .select({
-      sourceKey: sourceSignals.sourceKey,
-      status: sourceSignals.status,
-      companyId: sourceSignals.companyId,
-    })
-    .from(sourceSignals)
-    .where(eq(sourceSignals.id, signalId))
-    .limit(1);
-  if (
-    signal === undefined ||
-    (signal.sourceKey !== "sam_entity" && signal.sourceKey !== "faa_drs_pma") ||
-    signal.status !== "qualified"
-  ) {
-    return "noop";
-  }
-  if (signal.companyId === null) return "waiting";
-  await (deps.synthesizeSourceSignal ?? synthesizeQualifiedSourceSignal)(db, signalId);
-  return "materialized";
-}
-
-/** The model proposes; this policy function owns the terminal target decision. */
-export function deterministicSourceSignalDecision(
-  classification: SourceSignalClassification,
-  pageText: string,
-  fetchedUrls: readonly string[],
-  authoritativeEvidence: readonly AuthoritativeSourceEvidence[] = [],
-  officialPages: readonly Pick<IdentityPage, "finalUrl" | "text">[] = [],
-): DeterministicSourceSignalDecision {
-  const noTargetReasons: string[] = [];
-  if (!classification.manufacturer) noTargetReasons.push("manufacturer_not_verified");
-  else if (
-    !isPageGroundedClaim(
-      classification.manufacturerEvidence,
-      "manufacturer",
-      pageText,
-      fetchedUrls,
-      authoritativeEvidence,
-      officialPages,
-    )
-  ) {
-    noTargetReasons.push("manufacturer_evidence_not_page_grounded");
-  }
-  if (!classification.aerospaceDefenseRelevance) {
-    noTargetReasons.push("aerospace_defense_not_verified");
-  } else if (
-    !isPageGroundedClaim(
-      classification.aerospaceDefenseEvidence,
-      "aerospace",
-      pageText,
-      fetchedUrls,
-      authoritativeEvidence,
-      officialPages,
-    )
-  ) {
-    noTargetReasons.push("aerospace_defense_evidence_not_page_grounded");
-  }
-  if (classification.confidence < 0.75) {
-    noTargetReasons.push("classification_confidence_below_threshold");
-  }
-
-  const country = normalizeText(classification.headquartersCountry).replace(/[.,]/gu, "");
-  const headquartersIsUs =
-    country === "us" ||
-    country === "usa" ||
-    country === "united states" ||
-    country === "united states of america";
-  if (!headquartersIsUs) {
-    noTargetReasons.push(
-      country === "unknown" || country === "unclear"
-        ? "headquarters_not_verified_us"
-        : "non_us_headquarters",
-    );
-  }
-  if (
-    classification.businessModel === "distributor" ||
-    classification.businessModel === "service"
-  ) {
-    noTargetReasons.push(`ineligible_business_model:${classification.businessModel}`);
-  }
-  if (
-    classification.ownershipType === "pe_owned" ||
-    classification.ownershipType === "strategic_parent" ||
-    classification.ownershipType === "public"
-  ) {
-    noTargetReasons.push(`ineligible_ownership:${classification.ownershipType}`);
-  }
-  if (classification.sizeFit === "likely_over_50m") {
-    noTargetReasons.push("likely_over_50m");
-  }
-  if (noTargetReasons.length > 0) {
-    return { targetDecision: "no_target", reasons: noTargetReasons };
-  }
-
-  const researchReasons: string[] = [];
-  if (classification.ownershipType === "unknown") {
-    researchReasons.push("ownership_requires_research");
-  }
-  if (classification.sizeFit === "unknown") {
-    researchReasons.push("size_requires_research");
-  }
-  return researchReasons.length > 0
-    ? { targetDecision: "needs_more_research", reasons: researchReasons }
-    : {
-        targetDecision: "yes_target",
-        reasons: ["verified_us_aerospace_physical_product_manufacturer"],
-      };
-}
-
-async function linkedLeadForSourceSignal(
-  db: Database,
-  qualifierAgentId: string,
-  rawName: string,
-  domain: string,
-): Promise<{ readonly id: string; readonly companyId: string | null } | null> {
-  const rows = await db
-    .select({ id: leads.id, companyId: leads.resolvedCompanyId })
-    .from(leads)
-    .where(
-      and(
-        eq(leads.campaignId, qualifierAgentId),
-        eq(leads.rawName, rawName),
-        eq(leads.possibleDomain, domain),
-      ),
-    )
-    .orderBy(desc(leads.createdAt))
-    .limit(1);
-  return rows[0] ?? null;
-}
-
-async function routeQualifiedCandidate(
-  db: Database,
-  companyId: string,
-  signal: SourceSignal,
-  decision: DeterministicSourceSignalDecision,
-): Promise<void> {
-  const rationale = {
-    whyInteresting: [
-      "Verified from first-party pages as a US aerospace/defense physical-product manufacturer.",
-      `Qualified from ${signal.sourceKey}: ${signal.sourceLocator}`,
-    ],
-    risks: [
-      "Initial source-signal qualification only; enrichment confidence does not yet support evaluate tier.",
-    ],
-    unknowns:
-      decision.targetDecision === "needs_more_research"
-        ? [
-            "Ownership: independent/founder-family versus PE, strategic, or public control",
-            "Size fit: evidence that revenue is likely under $50m",
-            "Qualifications and customer concentration",
-          ]
-        : ["Exact revenue and employee count", "Qualifications", "Customer concentration"],
-  };
-  await db
-    .insert(candidates)
-    .values({ companyId, status: "queued_research", rationale })
-    .onConflictDoNothing({ target: candidates.companyId });
-  // Never regress an already enriched candidate. Newly created and existing
-  // queued candidates remain engine-owned needs_research until enrichment.
-  await db
-    .update(candidates)
-    .set({ rationale, updatedAt: new Date() })
-    .where(
-      and(
-        eq(candidates.companyId, companyId),
-        eq(candidates.status, "queued_research"),
-      ),
-    );
-}
-
-type QualifiedIdentifierType = "uei" | "cage" | "faa_pma_holder";
-
-interface QualifiedIdentifier {
-  readonly type: QualifiedIdentifierType;
-  readonly value: string;
-}
-
-interface QualifiedIdentifierMatch extends QualifiedIdentifier {
-  readonly companyId: string;
-}
-
-type QualifiedIdentifierAttachment =
-  | { readonly outcome: "no_match" }
-  | {
-      readonly outcome: "conflict";
-      readonly matches: readonly QualifiedIdentifierMatch[];
-    }
-  | {
-      readonly outcome: "attached";
-      readonly companyId: string;
-      readonly leadId: string;
-      readonly matches: readonly QualifiedIdentifierMatch[];
-    };
-
-function qualifiedSignalIdentifiers(signal: SourceSignal): QualifiedIdentifier[] {
-  const identifiers: QualifiedIdentifier[] = [];
-  const append = (type: QualifiedIdentifierType, rawValue: unknown): void => {
-    if (typeof rawValue !== "string") return;
-    const value = rawValue.normalize("NFKC").trim().toLocaleUpperCase("en-US");
-    if (
-      value !== "" &&
-      !identifiers.some(
-        (identifier) => identifier.type === type && identifier.value === value,
-      )
-    ) {
-      identifiers.push({ type, value });
-    }
-  };
-  if (signal.sourceKey === "sam_entity") {
-    append("uei", signal.uei);
-    append("cage", signal.cage);
-  } else if (signal.sourceKey === "faa_drs_pma") {
-    const record = signal.sourcePayload["record"];
-    if (typeof record === "object" && record !== null && "holderNumber" in record) {
-      append("faa_pma_holder", record.holderNumber);
-    }
-  }
-  return identifiers;
-}
-
-async function quarantineIdentifierConflict(
-  db: Database,
-  signalId: string,
-  identifiers: readonly QualifiedIdentifier[],
-  matches: readonly QualifiedIdentifierMatch[],
-  existingLeadCompanyId?: string,
-): Promise<QualifiedIdentifierAttachment> {
-  await recordSourceSignalQualification(db, signalId, {
-    decision: "quarantined",
-    reason: "confirmed_identity_conflict",
-    evidence: {
-      identifiers,
-      matches,
-      ...(existingLeadCompanyId === undefined
-        ? {}
-        : { existingLeadCompanyId }),
-    },
-  });
-  return { outcome: "conflict", matches };
-}
-
-async function attachQualifiedSignalByIdentifier(
-  db: Database,
-  qualifierAgent: ResearchAgent,
-  signal: SourceSignal,
-): Promise<QualifiedIdentifierAttachment> {
-  const identifiers = qualifiedSignalIdentifiers(signal);
-  if (identifiers.length === 0) return { outcome: "no_match" };
-  const condition = or(
-    ...identifiers.map((identifier) =>
-      and(
-        eq(companyIdentifiers.type, identifier.type),
-        sql`upper(btrim(${companyIdentifiers.value})) = ${identifier.value}`,
-      ),
-    ),
-  );
-  if (condition === undefined) return { outcome: "no_match" };
-  const rows = await db
-    .select({
-      companyId: companyIdentifiers.companyId,
-      type: companyIdentifiers.type,
-      value: companyIdentifiers.value,
-    })
-    .from(companyIdentifiers)
-    .where(condition);
-  const matches: QualifiedIdentifierMatch[] = rows.map((row) => ({
-    companyId: row.companyId,
-    type: row.type as QualifiedIdentifierType,
-    value: row.value.normalize("NFKC").trim().toLocaleUpperCase("en-US"),
-  }));
-  const matchedCompanyIds = [...new Set(matches.map((match) => match.companyId))];
-  if (matchedCompanyIds.length === 0) return { outcome: "no_match" };
-  if (matchedCompanyIds.length > 1) {
-    return quarantineIdentifierConflict(
-      db,
-      signal.id,
-      identifiers,
-      matches,
-    );
-  }
-  const companyId = matchedCompanyIds[0]!;
-  const [primaryDomain] = await db
-    .select({ domain: companyDomains.domain })
-    .from(companyDomains)
-    .where(
-      and(
-        eq(companyDomains.companyId, companyId),
-        eq(companyDomains.isPrimary, true),
-        sql`${companyDomains.verifiedAt} IS NOT NULL`,
-      ),
-    )
-    .orderBy(desc(companyDomains.verifiedAt))
-    .limit(1);
-  const currentLead =
-    signal.leadId === null
-      ? undefined
-      : (
-          await db
-            .select({
-              id: leads.id,
-              resolvedCompanyId: leads.resolvedCompanyId,
-            })
-            .from(leads)
-            .where(eq(leads.id, signal.leadId))
-            .limit(1)
-        )[0];
-  if (
-    currentLead?.resolvedCompanyId !== null &&
-    currentLead?.resolvedCompanyId !== undefined &&
-    currentLead.resolvedCompanyId !== companyId
-  ) {
-    return quarantineIdentifierConflict(
-      db,
-      signal.id,
-      identifiers,
-      matches,
-      currentLead.resolvedCompanyId,
-    );
-  }
-  const reusableLead =
-    currentLead ??
-    (
-      await db
-        .select({ id: leads.id, resolvedCompanyId: leads.resolvedCompanyId })
-        .from(leads)
-        .where(
-          and(
-            eq(leads.campaignId, qualifierAgent.id),
-            eq(leads.resolvedCompanyId, companyId),
-          ),
-        )
-        .orderBy(desc(leads.createdAt))
-        .limit(1)
-    )[0];
-  const identityContext = {
-    sourceSignalQualification: {
-      sourceSignalId: signal.id,
-      sourceKey: signal.sourceKey,
-      identityMethod: "exact_company_identifier",
-      matches,
-    },
-  };
-  let leadId: string;
-  if (reusableLead === undefined) {
-    const [created] = await db
-      .insert(leads)
-      .values({
-        campaignId: qualifierAgent.id,
-        rawName: signal.rawName,
-        context: identityContext,
-        possibleLocation:
-          [signal.city, signal.state]
-            .filter((value): value is string => value !== null)
-            .join(", ") || null,
-        ...(primaryDomain === undefined
-          ? {}
-          : {
-              possibleDomain: primaryDomain.domain,
-              url: `https://${primaryDomain.domain}`,
-            }),
-        possibleIdentifiers: identifiers,
-        status: "resolved",
-        resolvedCompanyId: companyId,
-      })
-      .returning({ id: leads.id });
-    if (created === undefined) {
-      throw new Error("exact identifier lead insert returned no row");
-    }
-    leadId = created.id;
-  } else {
-    leadId = reusableLead.id;
-    await db
-      .update(leads)
-      .set({
-        status: "resolved",
-        resolvedCompanyId: companyId,
-        possibleIdentifiers: identifiers,
-        ...(primaryDomain === undefined
-          ? {}
-          : {
-              possibleDomain: primaryDomain.domain,
-              url: `https://${primaryDomain.domain}`,
-            }),
-        context: sql`${leads.context} || ${JSON.stringify(identityContext)}::jsonb`,
-        updatedAt: new Date(),
-      })
-      .where(eq(leads.id, leadId));
-  }
-  const strongestMatch = matches.find(
-    (match) =>
-      match.type === "uei" ||
-      (match.type === "cage" &&
-        !matches.some((candidate) => candidate.type === "uei")) ||
-      (match.type === "faa_pma_holder" &&
-        !matches.some(
-          (candidate) => candidate.type === "uei" || candidate.type === "cage",
-        )),
-  )!;
-  await db
-    .insert(identityMatchCandidates)
-    .values({
-      leadId,
-      companyId,
-      signalType: strongestMatch.type,
-      features: { matchedValue: strongestMatch.value, matches },
-      confidence: "1.000",
-      explanation: `Automatic exact ${strongestMatch.type} match during source-signal qualification.`,
-      decision: "merged",
-      decidedAt: new Date(),
-    })
-    .onConflictDoNothing();
-  await recordSourceSignalQualification(db, signal.id, {
-    decision: "qualified",
-    reason: "exact_company_identifier",
-    evidence: { identifiers, matches },
-    leadId,
-    companyId,
-  });
-  return { outcome: "attached", companyId, leadId, matches };
-}
-
-async function stampVerifiedOfficialDomain(
-  db: Database,
-  companyId: string,
-  domain: string,
-): Promise<void> {
-  const normalizedDomain = domain
-    .normalize("NFKC")
-    .trim()
-    .toLocaleLowerCase("en-US")
-    .replace(/\.$/u, "")
-    .replace(/^www\./u, "");
-  if (normalizedDomain === "") throw new Error("verified official domain is empty");
-  await db.transaction(async (tx) => {
-    await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtextextended(${normalizedDomain}, 4281161))`,
-    );
-    const [existing] = await tx
-      .select({
-        id: companyDomains.id,
-        companyId: companyDomains.companyId,
-        isPrimary: companyDomains.isPrimary,
-      })
-      .from(companyDomains)
-      .where(sql`lower(regexp_replace(rtrim(${companyDomains.domain}, '.'), '^www\\.', '', 'i')) = ${normalizedDomain}`)
-      .limit(1);
-    if (existing !== undefined && existing.companyId !== companyId) {
-      throw new Error(
-        `verified official domain ${normalizedDomain} belongs to a different company`,
-      );
-    }
-    const [primary] = await tx
-      .select({ id: companyDomains.id })
-      .from(companyDomains)
-      .where(
-        and(
-          eq(companyDomains.companyId, companyId),
-          eq(companyDomains.isPrimary, true),
-        ),
-      )
-      .limit(1);
-    const verifiedAt = new Date();
-    if (existing !== undefined) {
-      await tx
-        .update(companyDomains)
-        .set({
-          verifiedAt,
-          isPrimary: existing.isPrimary || primary === undefined,
-        })
-        .where(eq(companyDomains.id, existing.id));
-      return;
-    }
-    await tx.insert(companyDomains).values({
-      companyId,
-      domain: normalizedDomain,
-      isPrimary: primary === undefined,
-      verifiedAt,
-    });
-  });
-}
-
-async function qualifySourceSignal(input: {
-  readonly db: Database;
-  readonly qualifierAgent: ResearchAgent;
-  readonly signal: SourceSignal;
-  readonly searchDomains: OfficialDomainSearcher;
-  readonly pageProber: IdentityPageProber;
-  readonly judge: DomainJudge;
-  readonly classifier: SourceSignalClassifier;
-}): Promise<SourceSignalTargetDecision> {
-  const proposals = await input.searchDomains({
-    legalName: input.signal.rawName,
-    ...(input.signal.city === null ? {} : { city: input.signal.city }),
-    ...(input.signal.state === null ? {} : { state: input.signal.state }),
-    ...(input.signal.uei === null ? {} : { uei: input.signal.uei }),
-    ...(input.signal.cage === null ? {} : { cage: input.signal.cage }),
-  });
-  const attempts: Array<Record<string, unknown>> = [];
-  for (const proposal of proposals.slice(0, MAX_EXA_PROPOSALS_PER_SIGNAL)) {
-    let candidateUrl: URL;
-    try {
-      candidateUrl = new URL(proposal.url);
-    } catch {
-      attempts.push({
-        domain: proposal.domain,
-        outcome: "invalid_url",
-        officiality: {
-          origin: proposal.url,
-          passed: false,
-          method: "invalid_url",
-          corroborationUrl: null,
-        } satisfies OfficialSiteAuthenticity,
-      });
-      continue;
-    }
-    const origin = `${candidateUrl.origin}/`;
-    if (
-      !["http:", "https:"].includes(candidateUrl.protocol) ||
-      candidateUrl.username !== "" ||
-      candidateUrl.password !== ""
-    ) {
-      attempts.push({
-        domain: proposal.domain,
-        outcome: "invalid_url",
-        officiality: {
-          origin,
-          passed: false,
-          method: "invalid_url",
-          corroborationUrl: null,
-        } satisfies OfficialSiteAuthenticity,
-      });
-      continue;
-    }
-    if (isSuppressedDirectoryDomain(candidateUrl.hostname)) {
-      attempts.push({
-        domain: proposal.domain,
-        outcome: "blocked_domain",
-        officiality: {
-          origin,
-          passed: false,
-          method: "blocked_domain",
-          corroborationUrl: null,
-        } satisfies OfficialSiteAuthenticity,
-      });
-      continue;
-    }
-
-    // Exa result paths are weak third-party proposals. Always authenticate the
-    // root origin before fetching or using the proposed deep page.
-    const homepage = await input.pageProber.fetchIdentityPage(origin);
-    if (!homepage.ok) {
-      attempts.push({
-        domain: proposal.domain,
-        outcome: "unreachable",
-        reason: homepage.error,
-        officiality: {
-          origin,
-          passed: false,
-          method: "unreachable",
-          corroborationUrl: null,
-        } satisfies OfficialSiteAuthenticity,
-      });
-      continue;
-    }
-    const homepageHost = hostOf(homepage.finalUrl);
-    if (
-      homepageHost === null ||
-      isSuppressedDirectoryDomain(new URL(homepage.finalUrl).hostname)
-    ) {
-      attempts.push({
-        domain: proposal.domain,
-        outcome: "blocked_domain_redirect",
-        officiality: {
-          origin,
-          passed: false,
-          method: "blocked_domain",
-          corroborationUrl: null,
-        } satisfies OfficialSiteAuthenticity,
-      });
-      continue;
-    }
-    const authenticityPages: IdentityPage[] = [homepage];
-    const identityLinks = homepage.identityLinks
-      .filter((link) => hostOf(link) === homepageHost)
-      .slice(0, 2);
-    for (const link of identityLinks) {
-      const page = await input.pageProber.fetchIdentityPage(link);
-      if (page.ok && hostOf(page.finalUrl) === homepageHost) authenticityPages.push(page);
-    }
-    const officiality = evaluateOfficialSiteAuthenticity(
-      {
-        legalName: input.signal.rawName,
-        city: input.signal.city,
-        state: input.signal.state,
-        uei: input.signal.uei,
-        cage: input.signal.cage,
-      },
-      origin,
-      authenticityPages,
-    );
-    if (!officiality.passed) {
-      attempts.push({
-        domain: proposal.domain,
-        urls: authenticityPages.map((page) => page.finalUrl),
-        outcome: "officiality_failed",
-        officiality,
-      });
-      continue;
-    }
-
-    const pages = [...authenticityPages];
-    candidateUrl.hash = "";
-    if (
-      candidateUrl.href !== origin &&
-      hostOf(candidateUrl.href) === homepageHost &&
-      !pages.some((page) => page.finalUrl === candidateUrl.href)
-    ) {
-      const deepPage = await input.pageProber.fetchIdentityPage(candidateUrl.href);
-      if (deepPage.ok && hostOf(deepPage.finalUrl) === homepageHost) pages.push(deepPage);
-    }
-    const pageText = pages
-      .map((page) => `[Source URL: ${page.finalUrl}]\n${page.text}`)
-      .join("\n\n");
-    const identityUrls = pages.map((page) => page.finalUrl);
-    const judgment = await input.judge.judgeIdentity(
-      input.signal.rawName,
-      pageText,
-      sourceSignalIdentityHints(input.signal),
-    );
-    if (!identityJudgmentAccepts(judgment)) {
-      attempts.push({
-        domain: proposal.domain,
-        urls: identityUrls,
-        outcome: "identity_mismatch",
-        officiality,
-        identity: judgment,
-      });
-      continue;
-    }
-
-    const corroborationUrl = officiality.corroborationUrl;
-    const authoritativeEvidence = buildAuthoritativeSourceEvidence(input.signal);
-    const modelProposal = await input.classifier({
-      legalName: input.signal.rawName,
-      pageText,
-      pageUrl: corroborationUrl ?? homepage.finalUrl,
-      authoritativeEvidence,
-    });
-    const authoritativeSynthesis = synthesizeAuthoritativeClassification(
-      input.signal,
-      modelProposal,
-      authoritativeEvidence,
-      pageText,
-    );
-    const policyClassification = authoritativeSynthesis.classification;
-    const deterministicDecision = deterministicSourceSignalDecision(
-      policyClassification,
-      pageText,
-      identityUrls,
-      authoritativeEvidence,
-      pages,
-    );
-    const sourceContributions = {
-      ...authoritativeSynthesis.contributions,
-      officialIdentity: {
-        passed: true,
-        judgment,
-        officiality,
-        urls: identityUrls,
-      },
-    };
-    const evidence = {
-      proposal: {
-        domain: proposal.domain,
-        url: proposal.url,
-        title: proposal.title,
-        snippet: proposal.textSnippet,
-      },
-      officiality,
-      identity: judgment,
-      identityUrls,
-      corroborationUrl,
-      authoritativeEvidence: authoritativeEvidence.map((source) => ({
-        sourceKey: source.sourceKey,
-        url: source.url,
-        allowedClaims: source.allowedClaims,
-        metadata: source.metadata,
-      })),
-      policyClassification,
-      sourceContributions,
-      attempts,
-    };
-    if (deterministicDecision.targetDecision === "no_target") {
-      await recordTargetDecision(input.db, input.signal.id, {
-        status: "rejected",
-        modelProposal,
-        deterministicDecision,
-        evidence,
-      });
-      return "no_target";
-    }
-
-    await ingestLeadCandidates(input.qualifierAgent.id, [
-      {
-        rawName: input.signal.rawName,
-        domain: proposal.domain,
-        ...(input.signal.uei === null ? {} : { uei: input.signal.uei }),
-        ...(input.signal.cage === null ? {} : { cageCode: input.signal.cage }),
-        ...(input.signal.city === null ? {} : { city: input.signal.city }),
-        ...(input.signal.state === null ? {} : { state: input.signal.state }),
-        awardCount: input.signal.awardCount ?? 0,
-        totalAwardValueUsd: Number(input.signal.awardValue ?? 0),
-        ...(input.signal.freshestAward === null
-          ? {}
-          : { freshestAwardDate: input.signal.freshestAward.toISOString() }),
-        sourceLocator: input.signal.sourceLocator,
-      },
-    ]);
-    const lead = await linkedLeadForSourceSignal(
-      input.db,
-      input.qualifierAgent.id,
-      input.signal.rawName,
-      proposal.domain,
-    );
-    if (lead === null) {
-      throw new Error("qualified source-signal ingestion returned no lead");
-    }
-    await input.db
-      .update(leads)
-      .set({
-        context: sql`${leads.context} || ${JSON.stringify({
-          sourceSignalQualification: {
-            sourceSignalId: input.signal.id,
-            sourceKey: input.signal.sourceKey,
-            modelProposal,
-            deterministicDecision,
-            candidateRouting: {
-              status: "queued_research",
-              effectiveTier: "needs_research",
-              evaluateRequiresEnrichmentConfidence: true,
-            },
-          },
-        })}::jsonb`,
-        updatedAt: new Date(),
-      })
-      .where(eq(leads.id, lead.id));
-    if (lead.companyId !== null) {
-      await stampVerifiedOfficialDomain(input.db, lead.companyId, homepageHost);
-      await routeQualifiedCandidate(
-        input.db,
-        lead.companyId,
-        input.signal,
-        deterministicDecision,
-      );
-    }
-    await recordTargetDecision(input.db, input.signal.id, {
-      status: "qualified",
-      modelProposal,
-      deterministicDecision,
-      evidence,
-      leadId: lead.id,
-      ...(lead.companyId === null ? {} : { companyId: lead.companyId }),
-    });
-    return deterministicDecision.targetDecision;
-  }
-
-  const deterministicDecision: DeterministicSourceSignalDecision = {
-    targetDecision: "no_target",
-    reasons: ["official_identity_not_verified"],
-  };
-  await recordTargetDecision(input.db, input.signal.id, {
-    status: "rejected",
-    modelProposal: null,
-    deterministicDecision,
-    evidence: { attempts },
-  });
-  return "no_target";
-}
-
-function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHandler {
-  return async (context): Promise<TickResult> => {
-    const planned = await planAgentTick(deps, context, async (db) => ({
-      sourceSignalIds: (
-        await db
-          .select({ id: sourceSignals.id })
-          .from(sourceSignals)
-          .where(eq(sourceSignals.status, "queued_qualification"))
-          .orderBy(asc(sourceSignals.createdAt))
-          .limit(MAX_SOURCE_SIGNALS_PER_TICK)
-      ).map((signal) => signal.id),
-    }));
-    if ("shortCircuit" in planned) return planned.shortCircuit;
-    if (deps.searchOfficialDomains === undefined && !process.env.EXA_API_KEY) {
-      return {
-        outcome: "stuck",
-        plan: { ...planned.plan },
-        findings: { idle: true, idleReason: "missing_exa_api_key" },
-      };
-    }
-    const needsModel = deps.classifySourceSignal === undefined || deps.domainJudge === undefined;
-    const model = needsModel ? resolveModelDeps(deps) : null;
-    if (needsModel && model === null) {
-      return {
-        outcome: "stuck",
-        plan: { ...planned.plan },
-        findings: { idle: true, idleReason: "missing_model_dependencies" },
-      };
-    }
-    const runtime =
-      deps.domainProber !== undefined && deps.domainJudge !== undefined
-        ? { prober: deps.domainProber, judge: deps.domainJudge }
-        : buildDomainResolutionDeps(deps)?.deps;
-    if (runtime === undefined) {
-      return {
-        outcome: "stuck",
-        plan: { ...planned.plan },
-        findings: { idle: true, idleReason: "missing_identity_dependencies" },
-      };
-    }
-    const pageProber: IdentityPageProber =
-      deps.identityPageProber ??
-      (deps.domainProber === undefined
-        ? new SafeFetchDomainProber()
-        : {
-            fetchIdentityPage: async (url) => {
-              const probe = await runtime.prober.fetchText(url);
-              return probe.ok
-                ? {
-                    ok: true as const,
-                    finalUrl: probe.finalUrl,
-                    text: probe.text,
-                    identityLinks: [],
-                  }
-                : probe;
-            },
-          });
-    const defaultClassifier =
-      deps.classifySourceSignal === undefined && model !== null
-        ? createSourceSignalClassifier(model)
-        : null;
-    const classifier = deps.classifySourceSignal ?? defaultClassifier?.classify;
-    if (classifier === undefined) {
-      return {
-        outcome: "stuck",
-        plan: { ...planned.plan },
-        findings: { idle: true, idleReason: "missing_classifier" },
-      };
-    }
-    const db = getDatabase();
-    const signals = await claimQueuedSourceSignals(db, MAX_SOURCE_SIGNALS_PER_TICK);
-    let yesTarget = 0;
-    let needsMoreResearch = 0;
-    let noTarget = 0;
-    let quarantined = 0;
-    let identifierAttached = 0;
-    let identifierConflicts = 0;
-    let synthesisMaterialized = 0;
-    let synthesisWaiting = 0;
-    const synthesisErrors: Array<{ signalId: string; error: string }> = [];
-    for (const signal of signals) {
-      try {
-        const attachment = await attachQualifiedSignalByIdentifier(
-          db,
-          context.agent,
-          signal,
-        );
-        if (attachment.outcome === "conflict") {
-          identifierConflicts += 1;
-          quarantined += 1;
-          continue;
-        }
-        let shouldSynthesize = attachment.outcome === "attached";
-        if (attachment.outcome === "attached") {
-          identifierAttached += 1;
-        } else {
-          const result = await qualifySourceSignal({
-            db,
-            qualifierAgent: context.agent,
-            signal,
-            searchDomains: deps.searchOfficialDomains ?? officialDomainSearcher(),
-            pageProber,
-            judge: runtime.judge,
-            classifier,
-          });
-          if (result === "yes_target") yesTarget += 1;
-          else if (result === "needs_more_research") needsMoreResearch += 1;
-          else noTarget += 1;
-          shouldSynthesize = result !== "no_target";
-        }
-        if (shouldSynthesize) {
-          try {
-            const synthesis = await synthesizeQualifiedSignalIfReady(db, signal.id, deps);
-            if (synthesis === "materialized") synthesisMaterialized += 1;
-            else if (synthesis === "waiting") synthesisWaiting += 1;
-          } catch (error) {
-            synthesisErrors.push({
-              signalId: signal.id,
-              error: error instanceof Error ? error.message : String(error),
-            });
-          }
-        }
-      } catch (error) {
-        quarantined += 1;
-        await recordSourceSignalQualification(db, signal.id, {
-          decision: "quarantined",
-          reason: "qualification_error",
-          evidence: { error: error instanceof Error ? error.message : String(error) },
-        });
-      }
-    }
-    return {
-      outcome: "executed",
-      plan: { ...planned.plan },
-      actionsExecuted: signals.length,
+      outcome: bootstrapped > 0 ? "executed" : "done",
+      actionsExecuted: bootstrapped,
       findings: {
-        selected: signals.length,
-        statusTransitions: {
-          "qualifying->qualified":
-            identifierAttached + yesTarget + needsMoreResearch,
-          "qualifying->rejected": noTarget,
-          "qualifying->quarantined": quarantined,
-        },
-        targetDecisions: {
-          yes_target: yesTarget,
-          needs_more_research: needsMoreResearch,
-          no_target: noTarget,
-        },
-        identifierResolution: {
-          attached: identifierAttached,
-          conflicts: identifierConflicts,
-        },
-        synthesis: {
-          materialized: synthesisMaterialized,
-          waitingForCompany: synthesisWaiting,
-          errors: synthesisErrors,
-        },
+        bootstrapped,
+        handoff: "signal_review_state",
+        note:
+          bootstrapped > 0
+            ? "raw signals queued for lease-fenced evidence review"
+            : "no raw signals awaiting review bootstrap",
       },
-      costUsd: judgeCostUsd(runtime.judge) + (defaultClassifier?.costUsd() ?? 0),
+      costUsd: 0,
     };
   };
 }
@@ -4250,7 +2860,9 @@ function createQualifyAwardLeadHandler(deps: Partial<TickHandlerDeps>): TickHand
 export async function selectDomainResolutionBatch(
   db: Database,
   limit: number = MAX_DOMAIN_LEADS_PER_TICK,
-): Promise<Array<{ id: string; rawName: string; possibleLocation: string | null }>> {
+): Promise<
+  Array<{ id: string; rawName: string; possibleLocation: string | null }>
+> {
   return db
     .select({
       id: leads.id,
@@ -4260,73 +2872,24 @@ export async function selectDomainResolutionBatch(
     .from(leads)
     .where(eq(leads.status, "unresolved_lead"))
     .orderBy(
-      desc(sql`case when ${leads.possibleDomain} is not null then 1 else 0 end`),
+      desc(
+        sql`case when ${leads.possibleDomain} is not null then 1 else 0 end`,
+      ),
       asc(leads.createdAt),
     )
     .limit(limit);
 }
 
-interface ResolvedLeadSynthesis {
-  readonly leadId: string;
-  readonly attached: number;
-  readonly materialized: number;
-  readonly errors: readonly { signalId: string; error: string }[];
-}
-
-async function synthesizeResolvedLeadSignals(
-  db: Database,
-  leadId: string,
-  companyId: string,
-  deps: Pick<TickHandlerDeps, "synthesizeSourceSignal">,
-): Promise<ResolvedLeadSynthesis> {
-  const attached = await db
-    .update(sourceSignals)
-    .set({ companyId, updatedAt: new Date() })
-    .where(
-      and(
-        eq(sourceSignals.leadId, leadId),
-        eq(sourceSignals.status, "qualified"),
-        inArray(sourceSignals.sourceKey, ["sam_entity", "faa_drs_pma"]),
-        sql`${sourceSignals.companyId} IS NULL`,
-      ),
-    )
-    .returning({ id: sourceSignals.id });
-  const ready = await db
-    .select({ id: sourceSignals.id })
-    .from(sourceSignals)
-    .where(
-      and(
-        eq(sourceSignals.leadId, leadId),
-        eq(sourceSignals.companyId, companyId),
-        eq(sourceSignals.status, "qualified"),
-        inArray(sourceSignals.sourceKey, ["sam_entity", "faa_drs_pma"]),
-      ),
-    );
-  let materialized = 0;
-  const errors: Array<{ signalId: string; error: string }> = [];
-  for (const signal of ready) {
-    try {
-      if (
-        (await synthesizeQualifiedSignalIfReady(db, signal.id, deps)) ===
-        "materialized"
-      ) {
-        materialized += 1;
-      }
-    } catch (error) {
-      errors.push({
-        signalId: signal.id,
-        error: error instanceof Error ? error.message : String(error),
-      });
-    }
-  }
-  return { leadId, attached: attached.length, materialized, errors };
-}
-
-function createResolveDomainHandler(deps: Partial<TickHandlerDeps>): TickHandler {
+function createResolveDomainHandler(
+  deps: Partial<TickHandlerDeps>,
+): TickHandler {
   return async (): Promise<TickResult> => {
     const runtime = buildDomainResolutionDeps(deps);
     if (runtime === null) {
-      return { outcome: "stuck", findings: { idleReason: "openrouter_not_configured" } };
+      return {
+        outcome: "stuck",
+        findings: { idleReason: "openrouter_not_configured" },
+      };
     }
 
     const db = getDatabase();
@@ -4334,48 +2897,42 @@ function createResolveDomainHandler(deps: Partial<TickHandlerDeps>): TickHandler
     if (batch.length === 0) {
       return {
         outcome: "done",
-        findings: { note: "no unresolved_lead leads without a possible_domain" },
+        findings: {
+          note: "no unresolved_lead leads without a possible_domain",
+        },
       };
     }
 
-    const verified: Array<{ leadId: string; domain: string; companyId: string }> = [];
+    const verified: Array<{
+      leadId: string;
+      domain: string;
+      companyId: string;
+    }> = [];
     const errors: Array<{ leadId: string; error: string }> = [];
-    const sourceSynthesis: ResolvedLeadSynthesis[] = [];
     let noDomain = 0;
     let mismatched = 0;
     for (const lead of batch) {
       // Per-lead isolation: one poisoned lead never fails the batch.
       try {
         const resolveOne = deps.resolveLead ?? resolveLeadDomain;
-        const result: ResolutionResult = await resolveOne(db, lead.id, runtime.deps, {
-          maxCandidates: MAX_DOMAIN_CANDIDATES_PER_LEAD,
-        });
+        const result: ResolutionResult = await resolveOne(
+          db,
+          lead.id,
+          runtime.deps,
+          {
+            maxCandidates: MAX_DOMAIN_CANDIDATES_PER_LEAD,
+          },
+        );
         if (
           result.outcome === "domain_verified" &&
           result.domain !== undefined &&
           result.companyId !== undefined
         ) {
-          verified.push({ leadId: result.leadId, domain: result.domain, companyId: result.companyId });
-          sourceSynthesis.push(
-            await synthesizeResolvedLeadSignals(
-              db,
-              result.leadId,
-              result.companyId,
-              deps,
-            ),
-          );
-        } else if (
-          result.outcome === "already_resolved" &&
-          result.companyId !== undefined
-        ) {
-          sourceSynthesis.push(
-            await synthesizeResolvedLeadSignals(
-              db,
-              result.leadId,
-              result.companyId,
-              deps,
-            ),
-          );
+          verified.push({
+            leadId: result.leadId,
+            domain: result.domain,
+            companyId: result.companyId,
+          });
         } else if (result.outcome === "no_domain_found") {
           noDomain += 1;
         } else if (result.outcome === "identity_mismatch") {
@@ -4396,7 +2953,7 @@ function createResolveDomainHandler(deps: Partial<TickHandlerDeps>): TickHandler
     return {
       outcome,
       actionsExecuted: processed,
-      findings: { verified, noDomain, mismatched, errors, sourceSynthesis },
+      findings: { verified, noDomain, mismatched, errors },
       costUsd: judgeCostUsd(runtime.judge),
     };
   };

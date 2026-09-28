@@ -7,7 +7,7 @@ This is the operator contract for Aerospace Supplier Intelligence. Local restore
 - `apps/web` serves App Router, `/api/v1`, and authenticated SSE.
 - `apps/worker` consumes `pg-boss` jobs. Health is `/health` and `/ready` on `PORT`.
 - PostgreSQL is authoritative for identities, facts, jobs, and audit. Local Compose is 17; the observed Railway plugin is 18.
-- `STORAGE_PATH` is authoritative for document bytes. The database stores relative keys and SHA-256 digests.
+- `STORAGE_PATH` is authoritative for uploaded/ingested document bytes. Raw-signal investor research also stores database-only source references, bounded quotes, and frozen review evidence; those rows have no `storage_key` and are not full-page archives.
 - Web and worker must not share a process. They share PostgreSQL. They may share a document volume only when the platform actually mounts the same store (local Compose does; Railway volumes do not).
 
 ## Environment
@@ -21,16 +21,16 @@ Required outside tests: `DATABASE_URL`, `SESSION_SECRET`. Production also needs 
 Observed production project `aerospace-supplier-intelligence` (independent of Almanac):
 
 - Web: `https://aero-intel.up.railway.app` — `Dockerfile.web`, health `/api/v1/health`, start `npm run start:web` (migrate then Next). Volume `web-volume` at `/var/lib/asi/storage`.
-- Worker: `Dockerfile.worker`, health `/health`, start `npm run start --workspace @asi/worker`. Volume `worker-volume` at `/var/lib/asi/storage` (independent of `web-volume`). No migrations. **Stopped** for the stakeholder walkthrough (0 running replicas, GitHub source disconnected, restart policy `NEVER`) so OpenRouter cannot run. With `RESEARCH_SHARED_STORAGE=false` a running worker would still be health-only (`/ready` 503).
+- Worker release configuration: `Dockerfile.worker`, health `/health`, start `npm run start:worker` (migrate then worker), restart `ON_FAILURE`, sleeping disabled. Volume `worker-volume` at `/var/lib/asi/storage` is independent of `web-volume`. The August walkthrough shutdown below is historical, not the September operating state. Verify the actual Railway service configuration; checked-in settings alone do not prove the deployed settings match.
 - Database: Railway PostgreSQL plugin image `postgres-ssl:18` (local Compose remains `postgres:17-bookworm`). Same `DATABASE_URL` on web and worker.
 - Bootstrap admin: create inside the web container with `railway ssh -s web -- npm run bootstrap:admin`. Credentials live in gitignored `.env.railway.local`, never in git or image layers.
-- Dockerfile `VOLUME` is rejected by Railway; platform volumes replace it. `.dockerignore` excludes `.env*`, `storage/`, `backups/`, and `node_modules/`.
+- Dockerfile `VOLUME` is rejected by Railway; platform volumes replace it. `.dockerignore` excludes `.env*`, `storage/`, `backups/`, `data/`, `exports/`, and `node_modules/`. Private workbook inputs, evidence freezes, exports, and database dumps must not enter this public repository or image layers.
 
-Rollout order: database → web (migrates on start) → worker. Drain the worker (`SIGTERM`, then wait until `/api/v1/ops/status` reports `drainable: true`) before a breaking schema change.
+Rollout order: verified backup → stop/drain the old worker → merge/deploy web (migrates on start) → deploy the matching worker → verify database progress. Stop the old worker **before merging main**: the web service auto-deploys from main, and migration `0012_signal_review_state.sql` replaces the old three-column evaluation conflict key with the input-hashed key. The old writer is not compatible with that index. A code-only rollback to the old worker is not safe; rollback requires a coordinated database restore and matching application revision.
 
 ## Migrations
 
-- Forward: `npm run db:migrate` (production web `start:web` already does this).
+- Forward: `npm run db:migrate`; both `start:web` and `start:worker` run it before starting the application. Preserve already-applied migration bytes, including `0011_eval_updated_at.sql`; new changes belong in subsequent migrations.
 - Rollback: restore the previous database dump. Drizzle history in `migrations/` is forward-only; do not hand-edit applied SQL.
 - After restore, run storage extraction from the matching backup so digests still verify.
 
@@ -58,7 +58,7 @@ npm run ops:rehearse
 
 1. Stop the worker (`SIGTERM`; the process already stops `pg-boss` gracefully).
 2. `npm run ops:status` or `GET /api/v1/ops/status` as admin.
-3. Proceed when `drainable` is true (`created + retry + active = 0`).
+3. For queue work, require `drainable` (`created + retry + active = 0`). The investor scheduler is independent of `pg-boss`: also stop its process and check active `signal_review_state` leases before maintenance. Expired leases can be reclaimed; never treat a health response or an empty job queue as proof that model work has drained.
 4. Failed jobs stay in `pgboss.job` for diagnosis; do not delete them to force a green drain.
 
 ## Storage reconciliation
@@ -78,7 +78,7 @@ Worker logs are JSON with secret-like keys, bearer tokens, and Postgres URLs red
 ## Known limitations
 
 - Railway Postgres plugin is 18; local Compose is 17. SQL used here is valid on both.
-- Railway volumes attach to one service. Web has `web-volume` and the worker has `worker-volume`, both at `/var/lib/asi/storage`. They do not replicate. Catalog, jobs, and research metadata persist in PostgreSQL if the worker is stopped. Import/upload bytes persist on `web-volume`. Research document bytes would persist only on `worker-volume`, so production research writes stay disabled (`RESEARCH_SHARED_STORAGE=false`) until web and worker share one object store. Docker Compose still shares `uploaded-storage`. Web `GET /api/v1/ops/status` only sees the web volume.
+- Railway volumes attach to one service and do not replicate. Upload/document-byte research still requires genuinely shared storage; keep `RESEARCH_SHARED_STORAGE=false` until that exists. Campaign discovery and the database-backed raw-signal investor scheduler do not require shared files. Their source URLs, hashes, quotes, evidence links and model inputs live in PostgreSQL. Web storage reconciliation checks rows with a `storage_key`; it does not certify a complete archive of database-only website sources.
 - Qualification, certification, and sole-source claims remain review-gated; research writes observations/proposals only.
 - Restore rehearsal requires `CREATEDB` on the backup role.
 
@@ -86,16 +86,16 @@ Worker logs are JSON with secret-like keys, bearer tokens, and Postgres URLs red
 
 Observed locally against the running stack (not a Railway claim):
 
-| Area | Control | Evidence |
-| --- | --- | --- |
-| Auth | Argon2id, hashed sessions, CSRF on mutations, role fail-closed | Login 401 on bad password; viewer cannot POST research; CSRF mismatch 403 |
-| Session | httpOnly, sameSite=lax, `SESSION_COOKIE_SECURE` in production | Cookie flags in `createSession`; production env must set secure true |
-| SSRF | Credential-free HTTP(S) only; localhost/.local blocked; DNS then pin; private/link-local/reserved/docs ranges rejected; redirects re-resolved | `safeFetchUrl` unit tests; literal `127.0.0.1` / `169.254.169.254` / `10.0.0.1` blocked without connecting |
-| Upload | 5 MB / 5000-row CSV caps; SHA-256 storage key; idempotent digest | `processImportBatch` throws before database on empty/oversize; completed digest replay returns existing batch |
-| Storage | Traversal rejected; digest verified on read; no metadata rewrite on mismatch | `writeStoredDocument` tests; ops findings `missing_file` / `digest_mismatch` |
-| Prompt injection | Fetched/model text cannot add tools or write canonical facts | Company research persists observations/proposals only |
-| Privacy | Worker JSON redacts secrets, bearer tokens, Postgres URLs | Worker logger; do not log document content or private contacts |
-| Retention | Append-only observations, reviews, audit; merge revert restores snapshot | Merge APIs; proposal accept is pointer-only |
+| Area             | Control                                                                                                                                       | Evidence                                                                                                      |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Auth             | Argon2id, hashed sessions, CSRF on mutations, role fail-closed                                                                                | Login 401 on bad password; viewer cannot POST research; CSRF mismatch 403                                     |
+| Session          | httpOnly, sameSite=lax, `SESSION_COOKIE_SECURE` in production                                                                                 | Cookie flags in `createSession`; production env must set secure true                                          |
+| SSRF             | Credential-free HTTP(S) only; localhost/.local blocked; DNS then pin; private/link-local/reserved/docs ranges rejected; redirects re-resolved | `safeFetchUrl` unit tests; literal `127.0.0.1` / `169.254.169.254` / `10.0.0.1` blocked without connecting    |
+| Upload           | 5 MB / 5000-row CSV caps; SHA-256 storage key; idempotent digest                                                                              | `processImportBatch` throws before database on empty/oversize; completed digest replay returns existing batch |
+| Storage          | Traversal rejected; digest verified on read; no metadata rewrite on mismatch                                                                  | `writeStoredDocument` tests; ops findings `missing_file` / `digest_mismatch`                                  |
+| Prompt injection | Fetched/model text cannot add tools or write canonical facts                                                                                  | Company research persists observations/proposals only                                                         |
+| Privacy          | Worker JSON redacts secrets, bearer tokens, Postgres URLs                                                                                     | Worker logger; do not log document content or private contacts                                                |
+| Retention        | Append-only observations, reviews, audit; merge revert restores snapshot                                                                      | Merge APIs; proposal accept is pointer-only                                                                   |
 
 ## Restore rehearsal (local)
 
@@ -103,29 +103,62 @@ Observed locally against the running stack (not a Railway claim):
 
 ## Worker start and stop (Railway)
 
-PostgreSQL holds identities, catalog, jobs, observations, proposals, and audit. Stopping the worker does not delete that data. Observed 2026-08-17T12:21Z: companies `totalItems` 13 and facilities 8 before `railway down -s worker`, while the worker was down, and after worker `cbe4d8ca` came back. Queue counts stayed `created/retry/active/completed/failed = 0` across that cycle because research enqueue was 409.
+PostgreSQL holds identities, catalog, jobs, observations, proposals, signal review state, and audit. Stopping the worker does not delete these records. The 2026-08-17 walkthrough deliberately stopped the worker and disabled paid research; that is a dated operational event, not a current safety mechanism. The 2026-09-28 baseline instead observed an active, healthy worker whose legacy selection was idle.
 
-**Observed 2026-08-17T13:17Z:** the production worker is **stopped** (0 running replicas, GitHub source disconnected, restart policy `NEVER`) so a stakeholder walkthrough cannot incur OpenRouter cost. Catalog and sessions stay on Postgres/web. Do not reconnect GitHub or `railway up` the worker until research is explicitly requested. Reconnect later with `railway service source connect --repo nrbontha/aerospace-intel --branch main --service worker` and restore restart policy `ON_FAILURE`.
-
-Production research writes stay **disabled**. `RESEARCH_SHARED_STORAGE=false` on web and worker. Per-service volumes are not a shared object store. Do not set the flag true until web and worker share one object store; otherwise worker-written `source_documents` bytes land on `worker-volume` while web ops/downloads read `web-volume` (`missing_file`).
-
-The demo is Postgres catalog data only. Stop/start verified Postgres catalog and empty job-queue metadata, plus that each service volume remains attached. No research job was enqueued, so cross-service document retrieval was not tested and remains unresolved.
-
-Stop (replica goes to 0; Postgres catalog remains):
+Stop the current worker deployment without removing its database or volume:
 
 ```bash
-railway down -s worker -y
+railway down --service worker --yes
 ```
 
-`railway scale …=0` is invalid (minimum 1 replica) and can redeploy the same image. The walkthrough stop is GitHub disconnect plus restart policy `NEVER`, so a leftover FAILED deployment cannot come back. `railway.worker.json` still documents `ON_FAILURE` for when research is requested again. Do not set `ALWAYS`. Do not reconnect GitHub until then.
-
-Start:
+Deploy the verified main revision:
 
 ```bash
-railway up --service worker --detach -y
+railway up --service worker --environment production --detach
 ```
 
-or `railway redeploy --service worker` when the current image is already the one you want. Since the storage-free campaign handlers were split out, the queue starts whenever `DATABASE_URL` is set, so `/health` and `/ready` are **200** even with `RESEARCH_SHARED_STORAGE=false`; only OpenRouter-backed research handlers stay off (`worker.started` logs `researchHandlers=false`).
+Use the matching `railway.worker.json` settings, including `npm run start:worker`, `ON_FAILURE`, and sleeping disabled. `/health` and `/ready` can be healthy with `RESEARCH_SHARED_STORAGE=false`; document-byte handlers remain disabled, while database-only discovery and investor review may run. Inspect scheduler logs, durable review phases, linked evaluations and source evidence—not only HTTP health.
+
+## Investor signal review
+
+The automatic path is raw source → official-site identity and evidence research → Jev ladder → same-input Muse verification/audit → current projection → evidence-gated lead promotion. It does not create a canonical company merely to save source evidence. `signal_review_state` provides per-signal leases, source-revision fencing, input hashes, retry timing, and exact evaluation linkage.
+
+- Provider/configuration failures are not company verdicts. Missing keys and budget deferrals remain distinguishable from candidate failures.
+- Evidence refresh with unchanged semantic input and current policy reuses settled work. Changed source facts or the review contract invalidate the old decision. Hashless historical evaluations remain history, never promotion proof.
+- Acquisition readiness requires source-backed identity, own named products, affirmative independence, revenue below $50m, US headquarters, and compatible Jev/Muse results on the same input. FAA aircraft applicability is not a supplier product catalog; award counts are not part counts. Unknown diligence stays explicit.
+- Product-fit research prospects can remain in `evaluate` without being acquisition-ready. Existing human decisions and mixed curated/reference attention are preserved; stale machine-only readiness, priority, product and size flags are cleared or replaced.
+- Curated/candidate rationale survives FAA refreshes. Exported readiness also holds conflicting target, source, or linked-company domains; a legacy tier or curated rationale alone is not same-input model completion.
+- The Targets UI is candidate-based. A research prospect in `unified_targets` is not automatically an approved Target.
+- Manual populate/promote/export callers must supply `currentFaaReviewInputContract()`. Exports are read-only and label missing/incompatible current policy rather than triggering paid review.
+- Live ensemble CLI work uses durable claims. Legacy status/source/sample/known-name/failed-only selectors are dry-run-only; they cannot bypass the claim lifecycle.
+
+Explicit backfill controls (set on the worker; use the same model/policy values for manual commands):
+
+| Variable                                                          | Purpose                                                                       |
+| ----------------------------------------------------------------- | ----------------------------------------------------------------------------- |
+| `EXA_DAILY_BUDGET_USD`, `EXA_SPEND_STATE_PATH`                    | Research-provider recorded-spend threshold and persistent worker counter      |
+| `OPENROUTER_MAX_COST_PER_DAY_USD`                                 | Recorded model-spend threshold across generic usage and FAA response receipts |
+| `SIGNAL_EVIDENCE_LIMIT`, `SIGNAL_EVIDENCE_CONCURRENCY`            | Bounded raw-evidence batch and parallelism                                    |
+| `ENSEMBLE_BATCH_LIMIT`, `JEV_LADDER_CONCURRENCY`                  | Jev claim batch and parallelism                                               |
+| `VERIFY_BATCH_LIMIT`, `ENSEMBLE_CONCURRENCY`, `ENSEMBLE_DELAY_MS` | Muse batch, parallelism, and spacing                                          |
+| `JEV_FAST_INTERVAL_MS`, `ENSEMBLE_SCHEDULE_MINUTES`               | Independent fast and maintenance cadence                                      |
+| `JEV_AUDIT_SAMPLE_RATE`                                           | Deterministic additional Muse audit fraction, from 0 to 1                     |
+
+Model spending is accounted over explicit UTC calendar-day bounds from `model_usage` and `faa_review_model_usage`. Each returned Jev rung records an independent receipt before later processing or verdict publication. A logical Muse call records its known aggregate attempt charges even when its responses fail schema validation; that failure remains retryable and publishes no verdict. Unknown cost stays null, not a fabricated zero. A later rung failure or stale-input fence does not erase an observed charge.
+
+Migration `0014_review_model_usage.sql` backfills previously recorded evaluation costs once. Migration `0015_review_usage_precision.sql` preserves their exact PostgreSQL numeric values, including charges below eight decimal places, without changing source links or observation times. Evaluation cost columns remain diagnostic and are not counted again. Source deletion leaves the receipt with a null source link.
+
+Jev checks before each paid rung; Muse checks before its call. An exhausted or unreadable budget defers the claim without consuming a candidate retry or publishing a verdict. Deterministic zero-cost decisions can continue. This is a recorded-spend gate, not an atomic reservation or a complete provider invoice: concurrent/in-flight calls, failed responses without returned cost telemetry, and failed receipt persistence can exceed it. Exa's counter is worker-file-backed; put `EXA_SPEND_STATE_PATH` on the persistent worker volume and do not claim a shared multi-replica reservation.
+
+The provider's key/account limit is separate from the application budget. OpenRouter HTTP 402 and structured quota-exhaustion HTTP 403 responses defer reviews without incrementing candidate attempts or publishing judgments; known charges from earlier attempts remain recorded. A non-resetting exhausted key requires an account owner to raise its limit or replace the Railway credential. Raising `OPENROUTER_MAX_COST_PER_DAY_USD` alone cannot restore provider capacity. Ordinary 403 refusals are not classified as quota exhaustion, and response-body digits cannot turn a terminal failure into a transient retry.
+
+Monitor phase counts and due/leased rows, retrieval failures, same-input Jev/Muse linkage, current outcomes, source-document/evidence counts, and actual spending. A backlog of repeated retrieval errors or all-unknown reviews is not successful screening coverage.
+
+Validation separates sourced historical golden references, synthetic controls, and the repeatedly tuned investor sample. `scripts/jev-ladder-bakeoff.mts` uses the production ladder and fact extractor, but supplied reference domains are an explicit identity premise. It does not prove identity discovery, persistence, Muse, promotion, or current acquisition truth. Report false promotions, false rejects, abstentions, coverage and errors; zero false promotions with zero decisive coverage is not a passing quality result. The frozen old autoresearch harness belongs to its old segment and must not be used to claim comparable new metrics.
+
+Prior-list membership is provenance, not approval. Sources include the original golden workbook, preliminary pipeline workbook, sampled priorities, and investor feedback. A read-only production audit on 2026-09-28 also found the existing `ma-pipeline-20260926` snapshot: 303 recorded members, created before this repair. Its original input file is not present locally, but its persisted membership rows are available. The separate 36-name fixture remains a sample, not a substitute for that snapshot. Exports name the matching snapshot and row/hash provenance; “no match” means no match in available snapshots, not proven novelty.
+
+For a coordinated policy cutover, stop the old worker before applying the review-state migrations and replacing stale machine projections. Run `npx tsx scripts/reconcile-stale-reviews.mts` with the deployment's database and model/policy environment to drain observable source-revision and input-contract changes without provider calls. It does not bootstrap unrelated sources, and fails rather than claiming a complete drain if it cannot make progress or reaches its pass limit. Preserve primary source documents, historical evaluations, and human decisions.
 
 ## Campaign discovery pipeline
 
@@ -151,7 +184,7 @@ or `railway redeploy --service worker` when the current image is already the one
 Enabling/disabling:
 
 - On by default. Set `AGENT_SUPERVISOR_ENABLED=false` in the worker environment to skip starting it (`apps/worker/src/index.ts`); a restart is required for the change to apply.
-- Budgets gate everything: global daily cap `OPENROUTER_MAX_COST_PER_DAY_USD` (default $1) over `model_usage` spend since UTC midnight, plus each agent's `budget_share_pct` / `daily_budget_usd` floor. An agent that crosses its cap is parked with outcome `budget_exhausted` until just past UTC midnight; it resumes automatically — no operator action needed. If daily spend cannot be read, the supervisor fails safe and parks agents rather than spending blind.
+- The supervisor uses `OPENROUTER_MAX_COST_PER_DAY_USD` (default $1 when unset at this gate) over recorded generic and FAA review spending for the UTC day, plus each agent's `budget_share_pct` / `daily_budget_usd` floor. An agent that crosses its cap is parked with outcome `budget_exhausted` until just past UTC midnight; it resumes automatically. If daily spend cannot be read, the supervisor fails safe and parks agents rather than spending blind. The separate investor scheduler defers only the affected paid review claims; provider-free maintenance is not stopped.
 
 Pause/kill (audited control plane, `apps/web/src/app/api/v1/agents/`):
 

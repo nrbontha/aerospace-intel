@@ -1,7 +1,19 @@
+import { createHash } from "node:crypto";
+import { EventEmitter } from "node:events";
+import type {
+  ClientRequest,
+  IncomingHttpHeaders,
+  IncomingMessage,
+  RequestOptions,
+} from "node:http";
+import { Readable } from "node:stream";
+import { brotliCompressSync, deflateSync, gzipSync } from "node:zlib";
+
 import { describe, expect, it } from "vitest";
 
 import {
   isPublicAddress,
+  isRetryableSafeFetchError,
   SafeFetchError,
   safeFetchUrl,
 } from "./safe-fetch.js";
@@ -15,6 +27,96 @@ async function expectSafeFetchCode(
     code,
   });
 }
+
+function incomingResponse(
+  status: number,
+  headers: IncomingHttpHeaders = {},
+  body: Buffer | readonly Buffer[] = Buffer.alloc(0),
+): IncomingMessage {
+  const chunks = Buffer.isBuffer(body) ? [body] : body;
+  const response = Readable.from(chunks) as unknown as IncomingMessage;
+  response.statusCode = status;
+  response.headers = headers;
+  return response;
+}
+
+function requestForResponse(
+  status: number,
+  headers: IncomingHttpHeaders = {},
+  body: Buffer | readonly Buffer[] = Buffer.alloc(0),
+): (
+  url: URL,
+  options: RequestOptions,
+  callback: (response: IncomingMessage) => void,
+) => ClientRequest {
+  return (_url, _options, callback) => {
+    const request = new EventEmitter() as EventEmitter & { end: () => void };
+    request.end = () => callback(incomingResponse(status, headers, body));
+    return request as unknown as ClientRequest;
+  };
+}
+
+describe("safe fetch error retryability", () => {
+  it.each([
+    { status: 400, retryable: false },
+    { status: 404, retryable: false },
+    { status: 408, retryable: true },
+    { status: 429, retryable: true },
+    { status: 503, retryable: true },
+  ])(
+    "retains HTTP $status and classifies its retry boundary",
+    async ({ status, retryable }) => {
+      const error: unknown = await safeFetchUrl("http://8.8.8.8/", {
+        request: requestForResponse(status),
+      }).then(
+        () => new Error("Expected safeFetchUrl to reject"),
+        (caught: unknown) => caught,
+      );
+
+      expect(error).toBeInstanceOf(SafeFetchError);
+      expect(error).toMatchObject({ code: "http_error", status });
+      expect(isRetryableSafeFetchError(error)).toBe(retryable);
+    },
+  );
+
+  it("retains the response status for a redirect without a location", async () => {
+    const error: unknown = await safeFetchUrl("http://8.8.8.8/", {
+      request: requestForResponse(302),
+    }).then(
+      () => new Error("Expected safeFetchUrl to reject"),
+      (caught: unknown) => caught,
+    );
+
+    expect(error).toBeInstanceOf(SafeFetchError);
+    expect(error).toMatchObject({ code: "http_error", status: 302 });
+    expect(isRetryableSafeFetchError(error)).toBe(false);
+  });
+
+  it("retries transient transport failures but not destination or response policy failures", () => {
+    expect(isRetryableSafeFetchError(new Error("socket reset"))).toBe(true);
+    expect(isRetryableSafeFetchError(new SafeFetchError("dns_failed"))).toBe(
+      true,
+    );
+    expect(isRetryableSafeFetchError(new SafeFetchError("timeout"))).toBe(true);
+    expect(
+      isRetryableSafeFetchError(new SafeFetchError("blocked_destination")),
+    ).toBe(false);
+    expect(
+      isRetryableSafeFetchError(new SafeFetchError("too_many_redirects")),
+    ).toBe(false);
+    expect(
+      isRetryableSafeFetchError(new SafeFetchError("unsupported_content_type")),
+    ).toBe(false);
+    expect(
+      isRetryableSafeFetchError(
+        new SafeFetchError("unsupported_content_encoding"),
+      ),
+    ).toBe(false);
+    expect(
+      isRetryableSafeFetchError(new SafeFetchError("invalid_content")),
+    ).toBe(false);
+  });
+});
 
 describe("isPublicAddress", () => {
   it("allows ordinary public unicast addresses", () => {
@@ -73,5 +175,120 @@ describe("safeFetchUrl destination policy", () => {
     await expectSafeFetchCode("http://192.168.0.20/", "blocked_destination");
     await expectSafeFetchCode("http://169.254.169.254/", "blocked_destination");
     await expectSafeFetchCode("http://[::1]/", "blocked_destination");
+  });
+});
+
+describe("safeFetchUrl transport decoding", () => {
+  const html = "<!doctype html><html><body>Compressed café</body></html>";
+  const decodedBytes = Buffer.from(html, "utf8");
+
+  it.each([
+    ["gzip", gzipSync],
+    ["deflate", deflateSync],
+    ["br", brotliCompressSync],
+  ] as const)(
+    "decodes %s HTML and reports decoded entity byte semantics",
+    async (encoding, compress) => {
+      const result = await safeFetchUrl("http://8.8.8.8/page", {
+        request: requestForResponse(
+          200,
+          {
+            "content-type": "text/html; charset=utf-8",
+            "content-encoding": encoding,
+          },
+          compress(decodedBytes),
+        ),
+      });
+
+      expect(result.content).toBe(html);
+      expect(result.byteLength).toBe(decodedBytes.byteLength);
+      expect(result.contentSha256).toBe(
+        createHash("sha256").update(decodedBytes).digest("hex"),
+      );
+    },
+  );
+
+  it("fails closed on malformed compressed content", async () => {
+    await expect(
+      safeFetchUrl("http://8.8.8.8/", {
+        request: requestForResponse(
+          200,
+          {
+            "content-type": "text/html",
+            "content-encoding": "gzip",
+          },
+          Buffer.from("<html>not gzipped</html>"),
+        ),
+      }),
+    ).rejects.toMatchObject({
+      name: "SafeFetchError",
+      code: "invalid_content",
+    });
+  });
+
+  it("fails closed on an unsupported content encoding", async () => {
+    await expect(
+      safeFetchUrl("http://8.8.8.8/", {
+        request: requestForResponse(200, {
+          "content-type": "text/html",
+          "content-encoding": "compress",
+        }),
+      }),
+    ).rejects.toMatchObject({
+      name: "SafeFetchError",
+      code: "unsupported_content_encoding",
+    });
+  });
+
+  it("rejects a decoded entity that exceeds the byte limit", async () => {
+    const compressed = gzipSync(Buffer.alloc(5 * 1024 * 1024 + 1, "a"));
+
+    await expect(
+      safeFetchUrl("http://8.8.8.8/", {
+        request: requestForResponse(
+          200,
+          {
+            "content-type": "text/plain",
+            "content-encoding": "gzip",
+          },
+          compressed,
+        ),
+      }),
+    ).rejects.toMatchObject({
+      name: "SafeFetchError",
+      code: "content_too_large",
+    });
+  });
+
+  it("still rejects a wire entity that exceeds the byte limit", async () => {
+    const chunk = Buffer.alloc(64 * 1024, "a");
+    const chunks = Array<Buffer>(81).fill(chunk);
+
+    await expect(
+      safeFetchUrl("http://8.8.8.8/", {
+        request: requestForResponse(
+          200,
+          { "content-type": "text/plain" },
+          chunks,
+        ),
+      }),
+    ).rejects.toMatchObject({
+      name: "SafeFetchError",
+      code: "content_too_large",
+    });
+  });
+
+  it.each([
+    ["NUL bytes", Buffer.from("<html>\0</html>")],
+    ["malformed UTF-8", Buffer.from([0xc3, 0x28])],
+  ])("rejects nontext content containing %s", async (_description, body) => {
+    await expect(
+      safeFetchUrl("http://8.8.8.8/", {
+        request: requestForResponse(200, { "content-type": "text/html" }, body),
+      }),
+    ).rejects.toMatchObject({
+      name: "SafeFetchError",
+      code: "invalid_content",
+    });
   });
 });

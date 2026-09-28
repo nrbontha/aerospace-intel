@@ -108,14 +108,7 @@ const serverEnvSchema = z
     OPENROUTER_MODEL_DEEP: modelId.default("anthropic/claude-sonnet-5"),
     OPENROUTER_MODEL_FALLBACK: modelId.default("google/gemini-3.7-flash"),
     FAA_MODEL_A: modelId.default("meta/muse-spark-1.3-contributor"),
-    FAA_MODEL_B: modelId.default("meta/muse-spark-1.3-contributor"),
-    FAA_ADJUDICATOR_MODEL: modelId.optional(),
     FAA_JEV_MODEL: modelId.default("typesafe/jev-1.13"),
-    JEV_PRESCREEN: optionalBoolean.transform((value) => value ?? true),
-    JEV_REJECT_CONFIRM_THRESHOLD: z.preprocess(
-      blankToUndefined,
-      z.coerce.number().finite().min(0).max(1).default(0.85),
-    ),
     JEV_AUDIT_SAMPLE_RATE: z.preprocess(
       blankToUndefined,
       z.coerce.number().finite().min(0).max(1).default(0.05),
@@ -178,7 +171,6 @@ const serverEnvSchema = z
   })
   .transform((env) => ({
     ...env,
-    FAA_ADJUDICATOR_MODEL: env.FAA_ADJUDICATOR_MODEL ?? env.FAA_MODEL_A,
     SESSION_COOKIE_SECURE:
       env.SESSION_COOKIE_SECURE ?? env.NODE_ENV === "production",
   }));

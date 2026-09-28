@@ -57,53 +57,6 @@ export const OWNERSHIP_GROUPS = [
 ] as const;
 export type OwnershipGroup = (typeof OWNERSHIP_GROUPS)[number];
 
-const STATE_NAMES: Record<string, true> = {
-  alabama: true, alaska: true, arizona: true, arkansas: true,
-  california: true, colorado: true, connecticut: true, delaware: true,
-  florida: true, georgia: true, hawaii: true, idaho: true, illinois: true,
-  indiana: true, iowa: true, kansas: true, kentucky: true, louisiana: true,
-  maine: true, maryland: true, massachusetts: true, michigan: true,
-  minnesota: true, mississippi: true, missouri: true, montana: true,
-  nebraska: true, nevada: true, "new hampshire": true, "new jersey": true,
-  "new mexico": true, "new york": true, "north carolina": true,
-  "north dakota": true, ohio: true, oklahoma: true, oregon: true,
-  pennsylvania: true, "rhode island": true, "south carolina": true,
-  "south dakota": true, tennessee: true, texas: true, utah: true,
-  vermont: true, virginia: true, washington: true, "west virginia": true,
-  wisconsin: true, wyoming: true,
-};
-
-const STATE_ABBREVIATIONS: Record<string, string> = {
-  al: "alabama", ak: "alaska", az: "arizona", ar: "arkansas",
-  ca: "california", co: "colorado", ct: "connecticut", de: "delaware",
-  fl: "florida", ga: "georgia", hi: "hawaii", id: "idaho", il: "illinois",
-  in: "indiana", ia: "iowa", ks: "kansas", ky: "kentucky", la: "louisiana",
-  me: "maine", md: "maryland", ma: "massachusetts", mi: "michigan",
-  mn: "minnesota", ms: "mississippi", mo: "missouri", mt: "montana",
-  ne: "nebraska", nv: "nevada", nh: "new hampshire", nj: "new jersey",
-  nm: "new mexico", ny: "new york", nc: "north carolina", nd: "north dakota",
-  oh: "ohio", ok: "oklahoma", or: "oregon", pa: "pennsylvania",
-  ri: "rhode island", sc: "south carolina", sd: "south dakota",
-  tn: "tennessee", tx: "texas", ut: "utah", vt: "vermont",
-  va: "virginia", wa: "washington", wv: "west virginia", wi: "wisconsin",
-  wy: "wyoming",
-};
-
-/** Normalize a state value ("CT" / "Connecticut" / "California, USA") to its full lowercase name when recognized. */
-export function normalizeState(value: string): string {
-  const cleaned = value.replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
-  const withoutCountry = cleaned
-    .replace(/\b(usa|u\.s\.a\.|us|united states)\b/gu, " ")
-    .replace(/[,.\-]+/gu, " ")
-    .replace(/\s+/gu, " ")
-    .trim();
-  if (STATE_ABBREVIATIONS[withoutCountry] !== undefined) return STATE_ABBREVIATIONS[withoutCountry];
-  if (STATE_NAMES[withoutCountry] === true) return withoutCountry;
-  if (STATE_ABBREVIATIONS[cleaned] !== undefined) return STATE_ABBREVIATIONS[cleaned];
-  if (STATE_NAMES[cleaned] === true) return cleaned;
-  return withoutCountry.length > 0 ? withoutCountry : cleaned;
-}
-
 const SPONSOR_WORDS = /\b(private equity|\bpe\b|pe-owned|pe-backed|investor[- ]backed|venture[- ]backed|\bvc\b|sponsor|majority (?:stake|investment)|growth equity)\b/iu;
 const PUBLIC_SUB_WORDS = /\bpublic(?:ly[- ]traded)? subsidiary\b|(?:subsidiary|division) of a public\b/iu;
 const PRIVATE_SUB_WORDS = /\bsub(sidiar\w+)?\b/iu;

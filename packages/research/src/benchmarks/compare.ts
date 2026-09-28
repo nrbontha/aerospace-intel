@@ -4,10 +4,10 @@
  *
  * Pure module: no I/O, no model calls, no database.
  */
+import { normalizeState } from "../geography.js";
 import {
   classifyOwnership,
   grataNumber,
-  normalizeState,
   type EnrichmentProfile,
   type OwnershipGroup,
 } from "./schema.js";

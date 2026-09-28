@@ -6,8 +6,8 @@
  * Boots a SCRATCH postgres:18 container, applies repo migrations, and proves:
  *   - the registry covers resolve_domain,
  *   - the seeder plants the resolve-domains agent within a ≤100% budget,
- *   - batch selection is oldest-first and skips leads that already have a
- *     possible_domain or a non-unresolved status,
+ *   - batch selection prioritizes leads with proposed domains and then uses
+ *     oldest-first order,
  *   - the handler verifies + attaches through the REAL resolveLeadDomain
  *     commit path (fake prober/judge, NO network),
  *   - one failing lead never fails the rest of the batch (error isolation).
@@ -18,7 +18,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 
 import { eq, inArray } from "drizzle-orm";
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import {
   closeDatabase,
@@ -27,14 +27,16 @@ import {
   getDatabase,
   leads,
   researchAgents,
-  sourceSignals,
   resolveLeadDomain,
   type DomainJudge,
   type DomainProber,
   type IdentityJudgment,
   type ResearchAgent,
 } from "@asi/database";
-import { DEFAULT_AGENT_SEEDS, ensureDefaultAgents } from "../apps/worker/src/supervisor/seed.js";
+import {
+  DEFAULT_AGENT_SEEDS,
+  ensureDefaultAgents,
+} from "../apps/worker/src/supervisor/seed.js";
 // Repo imports @asi/database (built dist) AND source paths for runMigrations;
 // each module instance keeps its own pool — close both.
 import { closeDatabase as closeSourceDatabase } from "../packages/database/src/client.js";
@@ -62,7 +64,15 @@ async function waitForPostgres(): Promise<void> {
   for (let attempt = 0; attempt < 120; attempt += 1) {
     try {
       await docker([
-        "exec", CONTAINER, "psql", "-U", "asi", "-d", "asi_app", "-c", "SELECT 1",
+        "exec",
+        CONTAINER,
+        "psql",
+        "-U",
+        "asi",
+        "-d",
+        "asi_app",
+        "-c",
+        "SELECT 1",
       ]);
       return;
     } catch {
@@ -73,7 +83,8 @@ async function waitForPostgres(): Promise<void> {
 }
 
 function loadDatabaseUrl(): void {
-  if (process.env.DATABASE_URL !== undefined && process.env.DATABASE_URL !== "") return;
+  if (process.env.DATABASE_URL !== undefined && process.env.DATABASE_URL !== "")
+    return;
   for (const candidate of [".env.local", ".env"]) {
     const full = path.join(process.cwd(), candidate);
     if (!existsSync(full)) continue;
@@ -97,7 +108,8 @@ function fakeProber(pages: Record<string, string>): DomainProber {
     async fetchText(url) {
       const host = new URL(url).hostname.replace(/^www\./u, "");
       const text = pages[host];
-      if (text === undefined) return { ok: false as const, error: "dns_failed" };
+      if (text === undefined)
+        return { ok: false as const, error: "dns_failed" };
       return { ok: true as const, finalUrl: url, text };
     },
   };
@@ -126,7 +138,9 @@ function fakeJudge(options: {
   };
 }
 
-function depsWith(overrides: Partial<TickHandlerDeps>): Partial<TickHandlerDeps> {
+function depsWith(
+  overrides: Partial<TickHandlerDeps>,
+): Partial<TickHandlerDeps> {
   // Syntactically valid key; the overridden judge/prober never touch it.
   return {
     client: new OpenRouterClient("test-key-not-used"),
@@ -152,7 +166,9 @@ async function insertLead(overrides: {
       ...(overrides.possibleDomain === undefined
         ? {}
         : { possibleDomain: overrides.possibleDomain }),
-      ...(overrides.createdAt === undefined ? {} : { createdAt: overrides.createdAt }),
+      ...(overrides.createdAt === undefined
+        ? {}
+        : { createdAt: overrides.createdAt }),
       context: {},
     })
     .returning({ id: leads.id });
@@ -165,12 +181,6 @@ interface ResolveDomainFindings {
   noDomain: number;
   mismatched: number;
   errors: Array<{ leadId: string; error: string }>;
-  sourceSynthesis: Array<{
-    leadId: string;
-    attached: number;
-    materialized: number;
-    errors: Array<{ signalId: string; error: string }>;
-  }>;
   note?: string;
 }
 
@@ -183,8 +193,14 @@ function handlerFor(deps: Partial<TickHandlerDeps>): () => Promise<{
   if (handler === undefined) throw new Error("resolve_domain handler missing");
   const agent = { key: "resolve-domains-test" } as unknown as ResearchAgent;
   return async () => {
-    const result = await handler({ agent, signal: new AbortController().signal });
-    return { outcome: result.outcome, findings: result.findings as ResolveDomainFindings };
+    const result = await handler({
+      agent,
+      signal: new AbortController().signal,
+    });
+    return {
+      outcome: result.outcome,
+      findings: result.findings as ResolveDomainFindings,
+    };
   };
 }
 
@@ -192,9 +208,21 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
   beforeAll(async () => {
     await docker(["rm", "-f", CONTAINER]).catch(() => undefined);
     await docker([
-      "run", "-d", "--name", CONTAINER,
-      "-e", "POSTGRES_USER=asi", "-e", "POSTGRES_PASSWORD=test", "-e", "POSTGRES_DB=asi_app",
-      "-p", "127.0.0.1::5432", IMAGE, "-c", "fsync=off",
+      "run",
+      "-d",
+      "--name",
+      CONTAINER,
+      "-e",
+      "POSTGRES_USER=asi",
+      "-e",
+      "POSTGRES_PASSWORD=test",
+      "-e",
+      "POSTGRES_DB=asi_app",
+      "-p",
+      "127.0.0.1::5432",
+      IMAGE,
+      "-c",
+      "fsync=off",
     ]);
     const portMapping = await docker(["port", CONTAINER, "5432"]);
     const assigned = /(?:127\.0\.0\.1|0\.0\.0\.0):(\d+)/.exec(portMapping);
@@ -204,7 +232,8 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
     process.env.DATABASE_URL = `postgres://asi:test@127.0.0.1:${assigned[1]}/asi_app`;
     loadDatabaseUrl();
     await waitForPostgres();
-    const { runMigrations } = await import("../packages/database/src/migrate.js");
+    const { runMigrations } =
+      await import("../packages/database/src/migrate.js");
     await runMigrations();
   }, 180_000);
 
@@ -226,7 +255,9 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
       createdLeadIds = [];
     }
     if (createdCompanyIds.length > 0) {
-      await db.delete(companies).where(inArray(companies.id, createdCompanyIds));
+      await db
+        .delete(companies)
+        .where(inArray(companies.id, createdCompanyIds));
       createdCompanyIds = [];
     }
   });
@@ -238,7 +269,10 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
 
   it("seeder plants the active portfolio, totals budget shares at 100%, and preserves pauses", async () => {
     const split = Object.fromEntries(
-      DEFAULT_AGENT_SEEDS.map((seed) => [seed.key, Number.parseFloat(seed.budgetSharePct)]),
+      DEFAULT_AGENT_SEEDS.map((seed) => [
+        seed.key,
+        Number.parseFloat(seed.budgetSharePct),
+      ]),
     );
     const total = Object.values(split).reduce((sum, share) => sum + share, 0);
     expect(total).toBe(100);
@@ -265,7 +299,9 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
         .map((agent) => agent.key)
         .sort(),
     ).toEqual(["discover-sam", "faa-pma-targeted"]);
-    const sourceCatalog = rows.find((agent) => agent.key === "source-catalog-scout");
+    const sourceCatalog = rows.find(
+      (agent) => agent.key === "source-catalog-scout",
+    );
     expect(sourceCatalog).toMatchObject({
       name: "Source Catalog Scout",
       agentType: "discover_source",
@@ -293,7 +329,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
     expect(pausedResolver?.status).toBe("paused");
   });
 
-  it("selects a newer qualified possible_domain before older unresolved legacy leads", async () => {
+  it("selects a newer lead with a possible domain before older unresolved leads", async () => {
     const olderLegacy = await insertLead({
       rawName: "Legacy Zitec, Inc",
       createdAt: new Date(Date.now() - 120_000),
@@ -318,7 +354,8 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
   it("handler verifies a lead through the real commit path", async () => {
     const run = handlerFor({
       domainProber: fakeProber({
-        "acmetooling.com": "ACME Tooling LLC — precision aerospace tooling, Ohio.",
+        "acmetooling.com":
+          "ACME Tooling LLC — precision aerospace tooling, Ohio.",
       }),
       domainJudge: fakeJudge({
         proposals: ["acmetooling.com"],
@@ -345,7 +382,10 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
     expect(findings.errors).toHaveLength(0);
 
     const verified = findings.verified[0]!;
-    const [leadRow] = await getDatabase().select().from(leads).where(eq(leads.id, verified.leadId));
+    const [leadRow] = await getDatabase()
+      .select()
+      .from(leads)
+      .where(eq(leads.id, verified.leadId));
     expect(leadRow?.status).toBe("resolved");
     expect(leadRow?.possibleDomain).toBe("acmetooling.com");
     expect(leadRow?.resolvedCompanyId).toBe(verified.companyId);
@@ -355,67 +395,6 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
       .from(companyDomains)
       .where(eq(companyDomains.domain, "acmetooling.com"));
     expect(domainRow?.companyId).toBe(verified.companyId);
-  });
-
-  it("attaches and synthesizes a qualified source after later domain resolution", async () => {
-    const leadId = await insertLead({ rawName: "LATER RESOLVED PMA LLC" });
-    const [signal] = await getDatabase()
-      .insert(sourceSignals)
-      .values({
-        sourceKey: "faa_drs_pma",
-        sourceLocator:
-          "https://drs.faa.gov/browse/excelExternalWindow/DRSDOCIDLATER",
-        sourceFingerprint: "resolver-later-synthesis",
-        rawName: "Later Resolved PMA LLC",
-        sourcePayload: {},
-        status: "qualified",
-        leadId,
-        companyId: null,
-      })
-      .returning({ id: sourceSignals.id });
-    const synthesizeSourceSignal: NonNullable<
-      TickHandlerDeps["synthesizeSourceSignal"]
-    > = vi.fn(async () => ({ status: "noop", sourceKey: "faa_drs_pma" }));
-    const run = handlerFor({
-      domainProber: fakeProber({
-        "laterresolvedpma.com":
-          "Later Resolved PMA LLC — aircraft component manufacturing.",
-      }),
-      domainJudge: fakeJudge({
-        proposals: ["laterresolvedpma.com"],
-        judgment: {
-          matches: true,
-          confidence: 0.95,
-          locationMatches: "unknown",
-          identifierMatches: "unknown",
-          relationship: "exact",
-          reason: "official identity verified",
-        },
-      }),
-      synthesizeSourceSignal,
-    });
-
-    const result = await run();
-    expect(result.outcome).toBe("executed");
-    expect(result.findings?.sourceSynthesis).toEqual([
-      {
-        leadId,
-        attached: 1,
-        materialized: 1,
-        errors: [],
-      },
-    ]);
-    expect(synthesizeSourceSignal).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(synthesizeSourceSignal).mock.calls[0]?.[1]).toBe(signal!.id);
-    const [attached] = await getDatabase()
-      .select({ status: sourceSignals.status, companyId: sourceSignals.companyId })
-      .from(sourceSignals)
-      .where(eq(sourceSignals.id, signal!.id));
-    expect(attached).toMatchObject({
-      status: "qualified",
-      companyId: result.findings?.verified[0]?.companyId,
-    });
-    await getDatabase().delete(sourceSignals).where(eq(sourceSignals.id, signal!.id));
   });
 
   it("one failing lead never fails the rest of the batch", async () => {
@@ -461,8 +440,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("resolve_domain agent (DB)", () => {
   });
 
   it("handler reports done when nothing is selectable", async () => {
-    // Prior tests cleaned up their leads, so no unresolved_lead without a
-    // possible_domain remains.
+    // Prior tests cleaned up every unresolved lead.
     const result = await handlerFor({})();
     expect(result.outcome).toBe("done");
     expect(result.findings?.note).toBeDefined();

@@ -27,16 +27,20 @@ import {
   sha256Hex,
   SnapshotKeyConflictError,
 } from "@asi/database";
+import { INVESTOR_VERDICTS_V1 } from "../packages/research/src/scoring-axial/fixtures/investor-verdicts.js";
+import { MA_PRIORITIES_V1 } from "../packages/research/src/scoring-axial/fixtures/ma-priorities.js";
 import { runMigrations } from "../packages/database/src/migrate.js";
 
 const execFileAsync = promisify(execFile);
 const DB_TESTS_ENABLED =
-  process.env.ASI_DB_TESTS === "1" &&
-  Boolean(process.env.DATABASE_URL);
+  process.env.ASI_DB_TESTS === "1" && Boolean(process.env.DATABASE_URL);
 const repoPath = (suffix: string) => path.join(process.cwd(), suffix);
 
 function loadDatabaseUrl(): void {
-  if (process.env.DATABASE_URL !== undefined && process.env.DATABASE_URL !== "") {
+  if (
+    process.env.DATABASE_URL !== undefined &&
+    process.env.DATABASE_URL !== ""
+  ) {
     return;
   }
   for (const candidate of [repoPath(".env.local"), repoPath(".env")]) {
@@ -51,14 +55,12 @@ function loadDatabaseUrl(): void {
   }
 }
 
-async function runCli(): Promise<string> {
+async function runCli(): Promise<void> {
   loadDatabaseUrl();
-  const { stdout } = await execFileAsync(
-    "npx",
-    ["tsx", "scripts/import-datasets.ts"],
-    { cwd: process.cwd(), maxBuffer: 10 * 1024 * 1024 },
-  );
-  return stdout;
+  await execFileAsync("npx", ["tsx", "scripts/import-datasets.ts"], {
+    cwd: process.cwd(),
+    maxBuffer: 10 * 1024 * 1024,
+  });
 }
 
 function goldenWorkbookBytes(): Uint8Array {
@@ -68,6 +70,102 @@ function goldenWorkbookBytes(): Uint8Array {
 async function countRows(query: ReturnType<typeof sql>): Promise<number> {
   const result = await getDatabase().execute<{ c: number }>(query);
   return result.rows[0]?.c ?? 0;
+}
+
+interface SnapshotProvenance {
+  id: string;
+  key: string;
+  name: string;
+  sourceType: string;
+  importFileName: string | null;
+  effectiveDate: string | null;
+  notes: string | null;
+  rowCount: number;
+  contentSha256: string | null;
+  active: boolean;
+  createdAt: string;
+}
+
+interface CanonicalCounts {
+  companies: number;
+  leads: number;
+  candidates: number;
+  identityMatchCandidates: number;
+  unifiedTargets: number;
+}
+
+async function loadSnapshotProvenance(): Promise<SnapshotProvenance[]> {
+  const result = await getDatabase().execute<SnapshotProvenance>(sql`
+    SELECT
+      id,
+      key,
+      name,
+      source_type AS "sourceType",
+      import_file_name AS "importFileName",
+      effective_date::text AS "effectiveDate",
+      notes,
+      row_count::int AS "rowCount",
+      trim(content_sha256) AS "contentSha256",
+      active,
+      created_at::text AS "createdAt"
+    FROM known_universe_snapshots
+    WHERE key IN (
+      'golden-set-v01',
+      'grata-enrichment-v01',
+      'preliminary-pipeline-v01',
+      'booie-original29-2026-09-09',
+      'ma-priorities-sample36-2026-09-09'
+    )
+    ORDER BY key
+  `);
+  return result.rows;
+}
+
+async function loadCanonicalCounts(): Promise<CanonicalCounts> {
+  const result = await getDatabase().execute<CanonicalCounts>(sql`
+    SELECT
+      (SELECT count(*)::int FROM companies) AS companies,
+      (SELECT count(*)::int FROM leads) AS leads,
+      (SELECT count(*)::int FROM candidates) AS candidates,
+      (SELECT count(*)::int FROM identity_match_candidates) AS "identityMatchCandidates",
+      (SELECT count(*)::int FROM unified_targets) AS "unifiedTargets"
+  `);
+  const counts = result.rows[0];
+  if (counts === undefined)
+    throw new Error("Canonical count query returned no row");
+  return counts;
+}
+
+interface StoredMembership {
+  name: string;
+  domain: string | null;
+  sourceRow: number | null;
+  rawPayload: Record<string, unknown>;
+}
+
+async function loadMembership(key: string): Promise<StoredMembership[]> {
+  const result = await getDatabase().execute<StoredMembership>(sql`
+    SELECT
+      m.raw_name AS name,
+      m.raw_domain AS domain,
+      m.source_row AS "sourceRow",
+      m.raw_payload AS "rawPayload"
+    FROM known_universe_members m
+    JOIN known_universe_snapshots s ON s.id = m.snapshot_id
+    WHERE s.key = ${key}
+    ORDER BY m.source_row
+  `);
+  return result.rows;
+}
+
+function membershipContentSha256(
+  identities: readonly { name: string; domain: string | null }[],
+): string {
+  return sha256Hex(
+    new TextEncoder().encode(
+      JSON.stringify(identities.map(({ name, domain }) => [name, domain])),
+    ),
+  );
 }
 
 describe.skipIf(!DB_TESTS_ENABLED)("dataset imports (DB)", () => {
@@ -80,23 +178,73 @@ describe.skipIf(!DB_TESTS_ENABLED)("dataset imports (DB)", () => {
     await closeDatabase();
   });
 
-  it("imports all three snapshots, sources, and golden examples idempotently", async () => {
-    const firstRun = await runCli();
-    // The database may already hold the snapshots (created) or not — either
-    // way the CLI reports the correct member counts and stays consistent.
-    expect(firstRun).toMatch(/golden-set-v01\s+(created|skipped)\s+18\s/);
-    expect(firstRun).toMatch(/grata-enrichment-v01\s+(created|skipped)\s+18\s/);
-    expect(firstRun).toMatch(/preliminary-pipeline-v01\s+(created|skipped)\s+246\s/);
-    expect(firstRun).toContain("data_sources: total=5");
-    expect(firstRun).toContain("golden_examples: total=18");
-    console.log("--- CLI summary-table output ---\n" + firstRun.trimEnd());
+  it("imports five immutable snapshots idempotently without canonical promotion", async () => {
+    const canonicalBefore = await loadCanonicalCounts();
 
-    const secondRun = await runCli();
-    // A second consecutive run is always fully skipped: same bytes, same sha.
-    expect(secondRun).toMatch(/golden-set-v01\s+skipped/);
-    expect(secondRun).toMatch(/grata-enrichment-v01\s+skipped/);
-    expect(secondRun).toMatch(/preliminary-pipeline-v01\s+skipped/);
-    console.log("--- CLI run 2 (idempotent) ---\n" + secondRun.trimEnd());
+    await runCli();
+    const firstSnapshots = await loadSnapshotProvenance();
+    expect(firstSnapshots).toHaveLength(5);
+    expect(
+      Object.fromEntries(firstSnapshots.map((row) => [row.key, row.rowCount])),
+    ).toEqual({
+      "booie-original29-2026-09-09": 29,
+      "golden-set-v01": 18,
+      "grata-enrichment-v01": 18,
+      "ma-priorities-sample36-2026-09-09": 36,
+      "preliminary-pipeline-v01": 246,
+    });
+
+    const booie = firstSnapshots.find(
+      (row) => row.key === "booie-original29-2026-09-09",
+    );
+    expect(booie).toMatchObject({
+      sourceType: "external_export",
+      effectiveDate: "2026-09-09",
+      active: true,
+      contentSha256: membershipContentSha256(
+        INVESTOR_VERDICTS_V1.map((entry) => ({
+          name: entry.name,
+          domain: null,
+        })),
+      ),
+    });
+
+    const prioritySample = firstSnapshots.find(
+      (row) => row.key === "ma-priorities-sample36-2026-09-09",
+    );
+    expect(prioritySample).toMatchObject({
+      sourceType: "external_export",
+      effectiveDate: "2026-09-09",
+      active: true,
+      contentSha256: membershipContentSha256(
+        MA_PRIORITIES_V1.map((entry) => ({
+          name: entry.name,
+          domain: entry.domain,
+        })),
+      ),
+    });
+
+    expect(await loadMembership("booie-original29-2026-09-09")).toEqual(
+      INVESTOR_VERDICTS_V1.map((entry, index) => ({
+        name: entry.name,
+        domain: null,
+        sourceRow: index + 1,
+        rawPayload: {},
+      })),
+    );
+    expect(await loadMembership("ma-priorities-sample36-2026-09-09")).toEqual(
+      MA_PRIORITIES_V1.map((entry, index) => ({
+        name: entry.name,
+        domain: entry.domain,
+        sourceRow: index + 1,
+        rawPayload: {},
+      })),
+    );
+    expect(await loadCanonicalCounts()).toEqual(canonicalBefore);
+
+    await runCli();
+    expect(await loadSnapshotProvenance()).toEqual(firstSnapshots);
+    expect(await loadCanonicalCounts()).toEqual(canonicalBefore);
   });
 
   it("holds 18 golden examples with the expected proposal split", async () => {
@@ -195,7 +343,9 @@ describe.skipIf(!DB_TESTS_ENABLED)("dataset imports (DB)", () => {
     `);
     expect(rows.rows.length).toBe(5);
     const byName = new Map(rows.rows.map((r) => [r.name, r]));
-    expect(byName.get("Online Aerospace Supplier Information System (OASIS)")).toMatchObject({
+    expect(
+      byName.get("Online Aerospace Supplier Information System (OASIS)"),
+    ).toMatchObject({
       access: "authorized",
       ingestion: "web_fetch",
     });
@@ -213,9 +363,9 @@ describe.skipIf(!DB_TESTS_ENABLED)("dataset imports (DB)", () => {
       ingestion: "manual",
     });
     // Precise access states live in notes — the enum vocabulary gap reported.
-    expect(byName.get("Online Aerospace Supplier Information System (OASIS)")?.notes).toContain(
-      "public_account_required",
-    );
+    expect(
+      byName.get("Online Aerospace Supplier Information System (OASIS)")?.notes,
+    ).toContain("public_account_required");
     expect(byName.get("Performance Review Institute")?.notes).toContain(
       "paid_subscription",
     );
@@ -223,9 +373,9 @@ describe.skipIf(!DB_TESTS_ENABLED)("dataset imports (DB)", () => {
       "api_key_required",
     );
     expect(byName.get("USAspending")?.notes).toContain("public_no_auth");
-    expect(byName.get("Boeing Illustrated Parts Catalog (IPC)")?.notes).toContain(
-      "disabled",
-    );
+    expect(
+      byName.get("Boeing Illustrated Parts Catalog (IPC)")?.notes,
+    ).toContain("disabled");
   });
 
   it("shows at least 12 exact/probable overlaps between golden and pipeline snapshots", async () => {
@@ -278,7 +428,10 @@ describe.skipIf(!DB_TESTS_ENABLED)("dataset imports (DB)", () => {
     const before = await countRows(
       sql`SELECT count(*)::int AS c FROM golden_examples`,
     );
-    await importGoldenExamples(db, joinGoldenWithGrata(goldenSet.companies, grataRows));
+    await importGoldenExamples(
+      db,
+      joinGoldenWithGrata(goldenSet.companies, grataRows),
+    );
     expect(
       await countRows(sql`SELECT count(*)::int AS c FROM golden_examples`),
     ).toBe(before);
@@ -326,7 +479,10 @@ describe.skipIf(!DB_TESTS_ENABLED)("dataset imports (DB)", () => {
     // Reviewed rows survive re-import untouched.
     const summary = await importGoldenExamples(
       db,
-      joinGoldenWithGrata(parseGoldenSetWorkbook(goldenWorkbookBytes()).companies, parseGrataData(goldenWorkbookBytes())),
+      joinGoldenWithGrata(
+        parseGoldenSetWorkbook(goldenWorkbookBytes()).companies,
+        parseGrataData(goldenWorkbookBytes()),
+      ),
     );
     expect(summary.skippedReviewed).toBeGreaterThanOrEqual(1);
   });

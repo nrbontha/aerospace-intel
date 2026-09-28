@@ -1,806 +1,1584 @@
-import { type SQL } from "drizzle-orm";
-import { PgDialect } from "drizzle-orm/pg-core";
-import { describe, expect, it, vi, type Mock } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import type * as DatabaseModule from "@asi/database";
 
-import { type Database } from "../packages/database/src/index.js";
+import { getDailySpendUsd } from "../packages/research/src/campaigns/budget.js";
+import { OpenRouterClientError } from "../packages/research/src/openrouter.js";
+import { callJev } from "../packages/research/src/faa-ensemble/jev.js";
+
+const signalReviewMocks = vi.hoisted(() => ({
+  claimSignalReviews: vi.fn(),
+  commitSignalReview: vi.fn(),
+  failSignalReview: vi.fn(),
+  insertFaaReviewModelUsageReceipt: vi.fn(),
+  reconcileChangedSignalReviews: vi.fn(),
+  updateClaimedSignalReviewInput: vi.fn(),
+}));
+
+vi.mock("@asi/database", async (importOriginal) => ({
+  ...(await importOriginal<typeof DatabaseModule>()),
+  ...signalReviewMocks,
+}));
+
 import {
-  adjudicatorResultSchema,
   buildEvidencePackage,
-  ensembleDecisionSchema,
-  evaluatorResultSchema,
-  isRateLimitError,
-  parseEnsembleArgs,
-  resolveEnsemble,
+  buildFaaReviewInputManifest,
+  currentFaaReviewInputContract,
+  buildJevState,
+  evaluateJevLadder,
+  hashFaaReviewInput,
   resolveEnsembleConfig,
-  runJevCascade,
-  runJevSweep,
-  runMuseVerification,
-  runWithConcurrency,
-  selectCandidateSignals,
-  summarizeEnsembleOutcomes,
-  type EnsembleSignalOutcome,
-  type FaaEvaluatorResult,
-  withRateLimitPatience,
+  parseEnsembleArgs,
+  runFaaEnsemble,
+  runJevReviews,
+  runMuseReviews,
+  type FaaEnsembleConfig,
+  type FaaEvidencePackage,
+  type JevLadderCallRequest,
 } from "../scripts/run-faa-ensemble.mts";
 
-function evaluatorResult(
-  overrides: Partial<FaaEvaluatorResult> = {},
-): FaaEvaluatorResult {
+function sourceRow(overrides: Record<string, unknown> = {}) {
   return {
-    decision: "research",
-    confidence: 60,
-    company_type: "manufacturer",
-    aerospace_defense_relevance: "PMA parts for aircraft models",
-    manufacturing_evidence: "FAA PMA holder with part records",
-    thesis_signals: ["pma_holder"],
-    disqualifiers: [],
-    missing_evidence: ["ownership", "revenue"],
-    false_negative_risk: "low",
-    reason: "fixture",
+    id: "00000000-0000-0000-0000-000000000001",
+    review_revision: 0,
+    source_key: "faa_pma_database",
+    source_locator: "faa-pma:1ABC2",
+    source_fingerprint: "source-fingerprint",
+    raw_name: "Acme Aero",
+    raw_domain: null,
+    uei: null,
+    cage: "1ABC2",
+    city: "Mobile",
+    state: "AL",
+    country: "US",
+    award_count: 14,
+    freshest_award: "2026-01-01T00:00:00Z",
+    source_payload: {
+      makes: ["BOEING"],
+      models_sample: ["737"],
+      guid_url: "https://drs.faa.gov/example",
+    },
+    qualification: {},
     ...overrides,
   };
 }
 
-describe("parseEnsembleArgs", () => {
-  it("defaults to every queued source key", () => {
-    expect(parseEnsembleArgs([])).toMatchObject({
-      limit: 0,
-      status: "queued_qualification",
-      sourceKeys: [],
-      dryRun: false,
-      sample: null,
-      concurrency: 5,
-      includeKnown: false,
-      benchmarkNames: [],
-      failedOnly: false,
-    });
-  });
+function supportRef(
+  stage: "domain" | "website" | "ownership" | "size" | "hq",
+  quote: string,
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    evidenceId: `${stage}-row`,
+    stage,
+    url: `https://acme.example/evidence/${stage}`,
+    title: `${stage} evidence`,
+    quote,
+    contentSha256: `${stage}-sha256`,
+    retrievedAt: "2026-09-27T00:00:00Z",
+    sourceKind: "official_site",
+    firstParty: true,
+    role: "support",
+    ...overrides,
+  };
+}
 
-  it("treats empty and all source-key values as every queued key", () => {
-    expect(parseEnsembleArgs(["--source-key", ""]).sourceKeys).toEqual([]);
-    expect(parseEnsembleArgs(["--source-key=all"]).sourceKeys).toEqual([]);
-  });
-
-  it("parses every CLI flag", () => {
-    const options = parseEnsembleArgs([
-      "--limit",
-      "25",
-      "--status",
-      "qualifying",
-      "--source-key",
-      "custom_key",
-      "--dry-run",
-      "--sample",
-      "10",
-      "--concurrency",
-      "3",
-      "--include-known",
-      "--benchmark-names",
-      "Zephyr,RAM,Zitec",
-      "--failed-only",
-    ]);
-    expect(options).toMatchObject({
-      limit: 25,
-      status: "qualifying",
-      sourceKeys: ["custom_key"],
-      dryRun: true,
-      sample: 10,
-      concurrency: 3,
-      includeKnown: true,
-      benchmarkNames: ["Zephyr", "RAM", "Zitec"],
-      failedOnly: true,
-    });
-  });
-
-  it("parses comma-separated source keys", () => {
-    expect(
-      parseEnsembleArgs(["--source-key", "faa_pma_database, sam_entity"]),
-    ).toMatchObject({
-      sourceKeys: ["faa_pma_database", "sam_entity"],
-    });
-  });
-
-  it("supports --flag=value form", () => {
-    expect(parseEnsembleArgs(["--limit=7", "--sample=2"])).toMatchObject({
-      limit: 7,
-      sample: 2,
-    });
-  });
-
-  it("rejects negative limits", () => {
-    expect(() => parseEnsembleArgs(["--limit", "-1"])).toThrow("--limit");
-  });
-});
-
-describe("selectCandidateSignals", () => {
-  it("filters multiple source keys and selects FIFO by creation time", async () => {
-    const execute = vi.fn(async (_query: unknown) => ({ rows: [] }));
-    await selectCandidateSignals(
-      { execute } as unknown as Database,
-      parseEnsembleArgs([
-        "--source-key",
-        "faa_pma_database,sam_entity",
-        "--include-known",
-      ]),
-    );
-
-    const query = new PgDialect().sqlToQuery(execute.mock.calls[0]![0] as SQL);
-    expect(query.params).toEqual(
-      expect.arrayContaining(["faa_pma_database", "sam_entity"]),
-    );
-    expect(query.sql).toMatch(/ss\.source_key IN \(\$\d+, \$\d+\)/);
-    expect(query.sql).toContain("ORDER BY ss.created_at ASC, ss.id ASC");
-  });
-});
-
-describe("resolveEnsembleConfig", () => {
-  it("defaults to GLM single-model operation with adjudicator = model A", () => {
-    expect(resolveEnsembleConfig({})).toMatchObject({
-      modelA: "meta/muse-spark-1.3-contributor",
-      modelB: "meta/muse-spark-1.3-contributor",
-      adjudicatorModel: "meta/muse-spark-1.3-contributor",
-      concurrency: 5,
-    });
-  });
-
-  it("honors additive env overrides", () => {
-    expect(
-      resolveEnsembleConfig({
-        FAA_MODEL_A: "a/model",
-        FAA_MODEL_B: "b/model",
-        FAA_ADJUDICATOR_MODEL: "c/model",
-        FAA_QUALIFICATION_CONCURRENCY: "2",
-      }),
-    ).toMatchObject({
-      modelA: "a/model",
-      modelB: "b/model",
-      adjudicatorModel: "c/model",
-      concurrency: 2,
-    });
-  });
-});
-
-describe("ensemble rule", () => {
-  it.each(["reject", "research", "high_priority"] as const)(
-    "accepts agreement on %s without adjudication",
-    (decision) => {
-      const resolution = resolveEnsemble(
-        evaluatorResult({ decision, confidence: 70 }),
-        evaluatorResult({ decision, confidence: 80 }),
-      );
-      expect(resolution).toMatchObject({
-        agreed: true,
-        adjudicationRequired: false,
-        finalDecision: decision,
-      });
+function sourcedResearch(overrides: Record<string, unknown> = {}) {
+  return {
+    version: "signal_research_v1",
+    signalId: "00000000-0000-0000-0000-000000000001",
+    sourceContext: {
+      sourceKey: "faa_pma_database",
+      sourceLocator: "faa-pma:1ABC2",
+      sourceFingerprint: "source-fingerprint",
+      rawName: "Acme Aero",
+      rawDomain: null,
+      uei: null,
+      cage: "1ABC2",
+      city: "Mobile",
+      state: "AL",
+      country: "US",
+      awardCount: 14,
     },
-  );
+    identity: {
+      status: "verified",
+      verifiedDomain: "acme.example",
+      legalName: "Acme Aero LLC",
+      proofEvidenceIds: ["domain-row"],
+    },
+    website: {
+      status: "supported",
+      offering: "products_menu",
+      excerpts: "Acme manufactures the AX-10 actuator.",
+      productHints: ["AX-10 actuator"],
+      namedProductEvidenceIds: ["website-row"],
+    },
+    ownership: {
+      status: "unknown",
+      owner: null,
+      year: null,
+      supportEvidenceIds: [],
+    },
+    size: { status: "unknown", assessment: "unknown", indicators: [] },
+    headquarters: {
+      status: "unknown",
+      city: null,
+      state: null,
+      country: null,
+      supportEvidenceIds: [],
+    },
+    missingFacts: ["headquarters", "revenue", "ownership"],
+    checkedSources: [
+      {
+        url: "https://acme.example/products",
+        outcome: "retrieved",
+        contentSha256: "abc123",
+        retrievedAt: "2026-09-27T00:00:00Z",
+      },
+    ],
+    evidenceRefs: [
+      supportRef("domain", "Acme Aero LLC"),
+      supportRef("website", "AX-10 actuator"),
+    ],
+    ...overrides,
+  };
+}
 
-  it("defaults research+high_priority to research without adjudication", () => {
-    for (const [first, second] of [
-      ["research", "high_priority"],
-      ["high_priority", "research"],
-    ] as const) {
-      const resolution = resolveEnsemble(
-        evaluatorResult({ decision: first }),
-        evaluatorResult({ decision: second }),
-      );
-      expect(resolution).toMatchObject({
-        agreed: false,
-        adjudicationRequired: false,
-        finalDecision: "research",
-      });
+function packageFixture(
+  research: Record<string, unknown> = sourcedResearch(),
+): FaaEvidencePackage {
+  return buildEvidencePackage(sourceRow(), research as never);
+}
+
+function fullLadderCaller(
+  finalChoice: "reject" | "research" | "high_priority",
+) {
+  return async (request: JevLadderCallRequest) => {
+    if (request.rung === "r1") {
+      return {
+        answers: { manufacturer: { type: "noul", noul: 0.9 } },
+        costUsd: null,
+        model: "jev",
+      };
     }
+    if (request.rung === "r2") {
+      return {
+        answers: {
+          product_vs_process: {
+            type: "choice",
+            choice: "product",
+            confidence: 0.8,
+          },
+        },
+        costUsd: null,
+        model: "jev",
+      };
+    }
+    if (request.rung === "r3") {
+      return {
+        answers: { oversize: { type: "noul", noul: 0.1 } },
+        costUsd: null,
+        model: "jev",
+      };
+    }
+    return {
+      answers: {
+        disposition: {
+          type: "choice",
+          choice: finalChoice,
+          confidence: 0.8,
+        },
+      },
+      costUsd: null,
+      model: "jev",
+    };
+  };
+}
+
+describe("JEv provider failure classification", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+    vi.unstubAllGlobals();
+  });
+
+  it("attempts the structured quota 403 with a numeric key hash once", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message:
+                "Key limit exceeded (total limit). Manage it using https://openrouter.ai/workspaces/default/keys/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+              code: 403,
+            },
+          }),
+          { status: 403 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      callJev("test-key", {}, { disposition: { type: "choice" } }),
+    ).rejects.toMatchObject({
+      code: "quota_exhausted",
+      retryable: false,
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("classifies HTTP 402 credit exhaustion as terminal quota", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: { message: "Insufficient credits", code: 402 },
+          }),
+          { status: 402 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      callJev("test-key", {}, { disposition: { type: "choice" } }),
+    ).rejects.toMatchObject({
+      code: "quota_exhausted",
+      retryable: false,
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("does not treat ordinary 403 body digits as retryable or quota", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message:
+                "Forbidden for resource 503187f18bf3097567905f785a3965ab7693f97",
+              code: 403,
+            },
+          }),
+          { status: 403 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(
+      callJev("test-key", {}, { disposition: { type: "choice" } }),
+    ).rejects.toMatchObject({
+      code: "request_rejected",
+      retryable: false,
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("bounds transient HTTP retries by maxRetries", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi.fn(async () => new Response("", { status: 503 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    const call = callJev(
+      "test-key",
+      {},
+      { disposition: { type: "choice" } },
+      { maxRetries: 2 },
+    );
+    const rejection = expect(call).rejects.toMatchObject({
+      code: "provider_unavailable",
+      retryable: true,
+    });
+    await vi.runAllTimersAsync();
+    await rejection;
+    expect(fetchMock).toHaveBeenCalledTimes(3);
+  });
+
+  it("retries a transport failure and returns the next valid response", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockRejectedValueOnce(new TypeError("controlled network failure"))
+      .mockResolvedValueOnce(
+        new Response(
+          JSON.stringify({
+            model: "typesafe/jev-controlled",
+            answers: { disposition: { type: "noul", noul: 0.6 } },
+            usage: { cost: 0.0123 },
+          }),
+          { status: 200 },
+        ),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const call = callJev(
+      "test-key",
+      {},
+      { disposition: { type: "noul" } },
+      { maxRetries: 1 },
+    );
+    await vi.runAllTimersAsync();
+    await expect(call).resolves.toMatchObject({
+      model: "typesafe/jev-controlled",
+      costUsd: 0.0123,
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+});
+
+describe("canonical FAA review input", () => {
+  it("keeps FAA holder/platform context separate from sourced products", () => {
+    const evidence = packageFixture();
+
+    expect(evidence).toMatchObject({
+      sourceRecordKind: "faa_holder_records",
+      sourceRecordCount: 14,
+      platformMakes: ["BOEING"],
+      platformModels: ["737"],
+      productEvidence: ["AX-10 actuator"],
+      identityStatus: "verified",
+      headquarters: { status: "unknown" },
+    });
+    expect(buildJevState(evidence)).toMatchObject({
+      faa_platform_applicability: {
+        makes: ["BOEING"],
+        models: ["737"],
+      },
+      sourced_product_evidence: ["AX-10 actuator"],
+    });
+  });
+
+  it("labels non-FAA counts as government award context", () => {
+    const evidence = buildEvidencePackage(
+      sourceRow({ source_key: "sam_entity", award_count: 6 }),
+      sourcedResearch() as never,
+    );
+
+    expect(evidence.sourceRecordKind).toBe("government_awards");
+    expect(evidence.sourceRecordCount).toBe(6);
+    expect(evidence.productEvidence).toEqual(["AX-10 actuator"]);
+  });
+
+  it("reads current FAA DRS record context without treating it as products", () => {
+    const evidence = buildEvidencePackage(
+      sourceRow({
+        source_key: "faa_drs_pma",
+        award_count: 0,
+        source_payload: {
+          record: {
+            make: "Pratt & Whitney Canada Corp.",
+            models: ["PW305A", "PW305B"],
+            supplementDate: "2026-08-04",
+            guidUrl: "https://drs.faa.gov/current-record",
+          },
+        },
+      }),
+      sourcedResearch({
+        website: {
+          status: "no_content",
+          offering: "unknown",
+          excerpts: "",
+          productHints: [],
+          namedProductEvidenceIds: [],
+        },
+      }) as never,
+    );
+
+    expect(evidence).toMatchObject({
+      sourceRecordKind: "faa_holder_records",
+      sourceRecordCount: 1,
+      platformMakes: ["Pratt & Whitney Canada Corp."],
+      platformModels: ["PW305A", "PW305B"],
+      productEvidence: [],
+      latestSourceRecordDate: "2026-08-04",
+    });
+  });
+
+  it("does not treat FAA platforms as products without sourced research", () => {
+    const evidence = buildEvidencePackage(sourceRow());
+
+    expect(evidence.platformMakes).toEqual(["BOEING"]);
+    expect(evidence.productEvidence).toEqual([]);
+    expect(evidence.identityStatus).toBe("not_found");
+  });
+
+  it("keeps identical evidence stable across persistence ids and retrieval times", () => {
+    const config = resolveEnsembleConfig({});
+    const first = buildFaaReviewInputManifest(packageFixture(), config, 0);
+    const changedOperationalFields = sourcedResearch({
+      identity: {
+        status: "verified",
+        verifiedDomain: "acme.example",
+        legalName: "Acme Aero LLC",
+        proofEvidenceIds: ["different-domain-id"],
+      },
+      website: {
+        status: "supported",
+        offering: "products_menu",
+        excerpts: "Acme manufactures the AX-10 actuator.",
+        productHints: ["AX-10 actuator"],
+        namedProductEvidenceIds: ["different-product-id"],
+      },
+      evidenceRefs: [
+        supportRef("domain", "Acme Aero LLC", {
+          evidenceId: "different-domain-id",
+          retrievedAt: "2027-01-01T00:00:00Z",
+        }),
+        supportRef("website", "AX-10 actuator", {
+          evidenceId: "different-product-id",
+          retrievedAt: "2027-01-01T00:00:00Z",
+        }),
+      ],
+    });
+    const second = buildFaaReviewInputManifest(
+      packageFixture(changedOperationalFields),
+      config,
+      0,
+    );
+
+    expect(hashFaaReviewInput(second)).toBe(hashFaaReviewInput(first));
+  });
+
+  it("invalidates the review when evidence or reviewed human facts change", () => {
+    const config = resolveEnsembleConfig({});
+    const original = buildFaaReviewInputManifest(packageFixture(), config, 0);
+    const changedIdentity = buildFaaReviewInputManifest(
+      packageFixture(
+        sourcedResearch({
+          identity: {
+            status: "verified",
+            verifiedDomain: "different.example",
+            legalName: "Different Acme LLC",
+            proofEvidenceIds: ["new-id"],
+          },
+        }),
+      ),
+      config,
+      0,
+    );
+    const changedEvidence = buildFaaReviewInputManifest(
+      packageFixture(
+        sourcedResearch({
+          website: {
+            status: "supported",
+            offering: "products_menu",
+            excerpts: "Acme manufactures the AX-20 actuator.",
+            productHints: ["AX-20 actuator"],
+            namedProductEvidenceIds: ["new-product-id"],
+          },
+        }),
+      ),
+      config,
+      0,
+    );
+    const changedHumanFacts = buildFaaReviewInputManifest(
+      buildEvidencePackage(
+        sourceRow({
+          qualification: {
+            humanDecision: "research",
+            decisionSource: "human",
+          },
+        }),
+        sourcedResearch() as never,
+      ),
+      config,
+      0,
+    );
+
+    expect(hashFaaReviewInput(changedIdentity)).not.toBe(
+      hashFaaReviewInput(original),
+    );
+    expect(hashFaaReviewInput(changedEvidence)).not.toBe(
+      hashFaaReviewInput(original),
+    );
+    expect(hashFaaReviewInput(changedHumanFacts)).not.toBe(
+      hashFaaReviewInput(original),
+    );
+  });
+  it("binds the database source revision into the full review contract", () => {
+    const config = resolveEnsembleConfig({});
+    const original = buildFaaReviewInputManifest(packageFixture(), config, 7);
+    const revised = buildFaaReviewInputManifest(packageFixture(), config, 8);
+
+    expect(original).toMatchObject({
+      sourceRevision: 7,
+      policy: {
+        jevModel: config.jevModel,
+        museModel: config.modelA,
+      },
+    });
+    expect(hashFaaReviewInput(revised)).not.toBe(hashFaaReviewInput(original));
+  });
+  it("uses one pure current contract for manifests and read-only consumers", () => {
+    const config = resolveEnsembleConfig({});
+    const contract = currentFaaReviewInputContract(config);
+    const manifest = buildFaaReviewInputManifest(packageFixture(), config, 3);
+
+    expect(contract).toEqual({
+      version: manifest.version,
+      policy: manifest.policy,
+    });
+  });
+});
+describe("FAA ensemble CLI selection", () => {
+  it.each([
+    ["--status", "qualified"],
+    ["--source-key", "faa_pma_database"],
+    ["--sample", "2"],
+    ["--include-known"],
+    ["--benchmark-names", "Acme"],
+    ["--failed-only"],
+  ])("rejects live-only use of unsupported selector %s", (...selector) => {
+    expect(() => parseEnsembleArgs(selector, {})).toThrow(
+      /supported only with --dry-run/u,
+    );
+    expect(() =>
+      parseEnsembleArgs(["--dry-run", ...selector], {}),
+    ).not.toThrow();
+  });
+  it("rejects programmatic live selectors before touching the database", async () => {
+    const selectedDryRun = parseEnsembleArgs(
+      ["--dry-run", "--source-key", "faa_pma_database"],
+      {},
+    );
+    await expect(
+      runFaaEnsemble({ ...selectedDryRun, dryRun: false }, { db: {} as never }),
+    ).rejects.toThrow(/supported only for dry runs/u);
+  });
+});
+
+describe("production JEv ladder engine", () => {
+  it("rejects acquired assets without a five-year bypass or model call", async () => {
+    const call = vi.fn();
+    const evidence = packageFixture(
+      sourcedResearch({
+        ownership: {
+          status: "pe_owned",
+          owner: "Sponsor",
+          year: 2010,
+          supportEvidenceIds: ["ownership-row"],
+        },
+        evidenceRefs: [
+          supportRef("domain", "Acme Aero LLC"),
+          supportRef("website", "AX-10 actuator"),
+          supportRef("ownership", "Sponsor acquired Acme."),
+        ],
+      }),
+    );
+
+    const result = await evaluateJevLadder({ evidence, call });
+
+    expect(result).toMatchObject({
+      decision: "reject",
+      exitRung: "r0-veto",
+      callCount: 0,
+      costUsd: null,
+    });
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it("does not turn an unsupported ownership label into a deterministic veto", async () => {
+    const call = vi.fn(fullLadderCaller("research"));
+    const evidence = packageFixture(
+      sourcedResearch({
+        ownership: {
+          status: "pe_owned",
+          owner: "Unattributed Sponsor",
+          year: 2010,
+          supportEvidenceIds: [],
+        },
+      }),
+    );
+
+    const result = await evaluateJevLadder({ evidence, call });
+
+    expect(result).toMatchObject({
+      decision: "research",
+      exitRung: "r4",
+      callCount: 4,
+    });
+    expect(call).toHaveBeenCalled();
   });
 
   it.each([
-    ["reject", "research"],
-    ["research", "reject"],
-    ["reject", "high_priority"],
-    ["high_priority", "reject"],
-  ] as const)("adjudicates reject-vs-%s vs %s", (first, second) => {
-    const resolution = resolveEnsemble(
-      evaluatorResult({ decision: first }),
-      evaluatorResult({ decision: second }),
-    );
-    expect(resolution).toMatchObject({
-      agreed: false,
-      adjudicationRequired: true,
-      finalDecision: "research",
+    [
+      "non-US headquarters",
+      {
+        headquarters: {
+          status: "supported",
+          city: "Toronto",
+          state: "ON",
+          country: "CA",
+          supportEvidenceIds: ["hq-row"],
+        },
+        evidenceRefs: [
+          supportRef("domain", "Acme Aero LLC"),
+          supportRef("website", "AX-10 actuator"),
+          supportRef("hq", "Headquartered in Toronto, Canada."),
+        ],
+      },
+    ],
+    [
+      "public ownership",
+      {
+        ownership: {
+          status: "public_parent",
+          owner: "Public Parent",
+          year: null,
+          supportEvidenceIds: ["ownership-row"],
+        },
+        evidenceRefs: [
+          supportRef("domain", "Acme Aero LLC"),
+          supportRef("website", "AX-10 actuator"),
+          supportRef("ownership", "Acme is a subsidiary of Public Parent."),
+        ],
+      },
+    ],
+    [
+      "revenue at or above the mandate",
+      {
+        size: {
+          status: "supported",
+          assessment: "over_50m",
+          indicators: [
+            {
+              kind: "revenue",
+              excerpt: "Revenue exceeded $50 million.",
+              evidenceId: "size-row",
+            },
+          ],
+        },
+        evidenceRefs: [
+          supportRef("domain", "Acme Aero LLC"),
+          supportRef("website", "AX-10 actuator"),
+          supportRef("size", "Revenue exceeded $50 million."),
+        ],
+      },
+    ],
+  ])(
+    "rejects affirmative %s evidence before model spend",
+    async (_label, override) => {
+      const call = vi.fn();
+      const result = await evaluateJevLadder({
+        evidence: packageFixture(sourcedResearch(override)),
+        call,
+      });
+
+      expect(result).toMatchObject({
+        decision: "reject",
+        exitRung: "r0-veto",
+        callCount: 0,
+      });
+      expect(call).not.toHaveBeenCalled();
+    },
+  );
+
+  it("keeps model HP as research while ownership, HQ, or revenue are unknown", async () => {
+    const result = await evaluateJevLadder({
+      evidence: packageFixture(),
+      call: fullLadderCaller("high_priority"),
+    });
+
+    expect(result).toMatchObject({
+      decision: "research",
+      exitRung: "r4",
+      callCount: 4,
+    });
+    expect(result.records.at(-1)).toMatchObject({
+      decision: "research",
+      terminal: true,
     });
   });
 
-  it("adjudicates malformed (null) evaluations", () => {
-    expect(
-      resolveEnsemble(null, evaluatorResult({ decision: "high_priority" })),
-    ).toMatchObject({ adjudicationRequired: true, finalDecision: "research" });
-    expect(
-      resolveEnsemble(evaluatorResult({ decision: "reject" }), null),
-    ).toMatchObject({ adjudicationRequired: true });
-    expect(resolveEnsemble(null, null)).toMatchObject({
-      adjudicationRequired: true,
+  it("retains HP only with sourced positive mandate evidence", async () => {
+    const research = sourcedResearch({
+      ownership: {
+        status: "independent",
+        owner: null,
+        year: null,
+        supportEvidenceIds: ["ownership-row"],
+      },
+      size: {
+        status: "supported",
+        assessment: "under_50m",
+        indicators: [
+          {
+            kind: "revenue",
+            excerpt: "The company reports revenue below $50 million.",
+            evidenceId: "size-row",
+          },
+        ],
+      },
+      headquarters: {
+        status: "supported",
+        city: "Mobile",
+        state: "AL",
+        country: "US",
+        supportEvidenceIds: ["hq-row"],
+      },
+      missingFacts: [],
+      evidenceRefs: [
+        supportRef("domain", "Acme Aero LLC"),
+        supportRef("website", "AX-10 actuator"),
+        supportRef("ownership", "Acme is independently owned."),
+        supportRef("size", "Revenue is below $50 million."),
+        supportRef("hq", "Acme is headquartered in Mobile, Alabama, USA."),
+      ],
     });
-  });
-});
+    const result = await evaluateJevLadder({
+      evidence: packageFixture(research),
+      call: fullLadderCaller("high_priority"),
+    });
 
-describe("ensemble schemas", () => {
-  it("accepts the three valid decisions", () => {
-    for (const decision of ["reject", "research", "high_priority"] as const) {
-      expect(ensembleDecisionSchema.parse(decision)).toBe(decision);
-    }
+    expect(result.decision).toBe("high_priority");
   });
 
-  it("rejects invalid decision enums like 'maybe'", () => {
-    expect(() => ensembleDecisionSchema.parse("maybe")).toThrow();
-    expect(() =>
-      evaluatorResultSchema.parse(
-        evaluatorResult({ decision: "maybe" as never }),
-      ),
-    ).toThrow();
-    expect(() =>
-      adjudicatorResultSchema.parse({
-        decision: "maybe",
-        confidence: 50,
-        reason: "x",
-      }),
-    ).toThrow();
-  });
-
-  it("bounds confidence to 0..100", () => {
-    expect(() =>
-      evaluatorResultSchema.parse(evaluatorResult({ confidence: 101 })),
-    ).toThrow();
-    expect(() =>
-      evaluatorResultSchema.parse(evaluatorResult({ confidence: -1 })),
-    ).toThrow();
-  });
-});
-
-describe("buildEvidencePackage", () => {
-  it("builds a compact package from a fixture source_signals row", () => {
-    const pkg = buildEvidencePackage({
-      id: "00000000-0000-0000-0000-000000000001",
-      raw_name: "Zephyr Propulsion Labs",
-      raw_domain: null,
-      uei: null,
-      cage: "8AZ11",
-      city: "Mojave",
-      state: "CA",
-      country: "US",
-      award_count: 14,
-      freshest_award: "2024-03-01T00:00:00.000Z",
-      source_payload: {
-        address: "123 Flight Line",
-        zip: "93501",
-        makes: ["BOEING", "AIRBUS"],
-        models_sample: ["737", "A320"],
-        guid_url: "https://drs.faa.gov/browse/excelExternalWindow/abc",
+  it("counts only a non-NULL terminal rung as the terminal judgment", async () => {
+    const seen: JevLadderCallRequest[] = [];
+    const result = await evaluateJevLadder({
+      evidence: packageFixture(),
+      call: async (request) => {
+        seen.push(request);
+        if (request.rung === "r1") {
+          return {
+            answers: { manufacturer: { type: "noul", noul: 0.9 } },
+            costUsd: 0.01,
+            model: "jev",
+          };
+        }
+        if (request.rung === "r2") {
+          return {
+            answers: {
+              product_vs_process: {
+                type: "choice",
+                choice: "product",
+                confidence: 0.8,
+              },
+            },
+            costUsd: 0.01,
+            model: "jev",
+          };
+        }
+        if (request.rung === "r3") {
+          return {
+            answers: { oversize: { type: "noul", noul: 0.1 } },
+            costUsd: 0.01,
+            model: "jev",
+          };
+        }
+        return {
+          answers: {
+            disposition: {
+              type: "choice",
+              choice: "research",
+              confidence: 0.75,
+            },
+          },
+          costUsd: 0.01,
+          model: "jev",
+        };
       },
     });
-    expect(pkg).toMatchObject({
-      signalId: "00000000-0000-0000-0000-000000000001",
-      name: "Zephyr Propulsion Labs",
-      domain: null,
-      cage: "8AZ11",
-      city: "Mojave",
-      state: "CA",
-      partCount: 14,
-      makes: ["BOEING", "AIRBUS"],
-      modelsSample: ["737", "A320"],
-      guidUrl: "https://drs.faa.gov/browse/excelExternalWindow/abc",
-    });
-  });
 
-  it("caps makes/models and tolerates missing payload", () => {
-    const pkg = buildEvidencePackage({
-      id: "00000000-0000-0000-0000-000000000002",
-      raw_name: "Sparse Co",
-      source_payload: {
-        makes: Array.from({ length: 30 }, (_, index) => `MAKE-${index}`),
-        models_sample: "not-a-list",
-      },
+    expect(seen.map((request) => request.rung)).toEqual([
+      "r1",
+      "r2",
+      "r3",
+      "r4",
+    ]);
+    expect(result).toMatchObject({
+      decision: "research",
+      exitRung: "r4",
+      callCount: 4,
+      costUsd: 0.04,
     });
-    expect(pkg.makes).toHaveLength(12);
-    expect(pkg.modelsSample).toEqual([]);
-    expect(pkg.guidUrl).toBeNull();
-  });
-});
-
-describe("runWithConcurrency", () => {
-  it("preserves input order under concurrency", async () => {
-    let inFlight = 0;
-    let maxInFlight = 0;
-    const result = await runWithConcurrency(
-      [1, 2, 3, 4, 5],
-      2,
-      async (item) => {
-        inFlight += 1;
-        maxInFlight = Math.max(maxInFlight, inFlight);
-        await new Promise((resolve) => setTimeout(resolve, 5));
-        inFlight -= 1;
-        return item * 10;
-      },
-    );
-    expect(result).toEqual([10, 20, 30, 40, 50]);
-    expect(maxInFlight).toBeLessThanOrEqual(2);
-  });
-});
-
-describe("summarizeEnsembleOutcomes", () => {
-  const outcomes: EnsembleSignalOutcome[] = [
-    {
-      modelADecision: "high_priority",
-      modelBDecision: "high_priority",
-      agreed: true,
-      adjudicationRequired: false,
-      adjudicated: false,
-      finalDecision: "high_priority",
-      apiCalls: 2,
-      failures: 0,
-    },
-    {
-      modelADecision: "research",
-      modelBDecision: "high_priority",
-      agreed: false,
-      adjudicationRequired: false,
-      adjudicated: false,
-      finalDecision: "research",
-      apiCalls: 2,
-      failures: 0,
-    },
-    {
-      modelADecision: "reject",
-      modelBDecision: "research",
-      agreed: false,
-      adjudicationRequired: true,
-      adjudicated: true,
-      finalDecision: "research",
-      apiCalls: 3,
-      failures: 0,
-    },
-    {
-      modelADecision: null,
-      modelBDecision: "research",
-      agreed: false,
-      adjudicationRequired: true,
-      adjudicated: false,
-      finalDecision: "research",
-      apiCalls: 3,
-      failures: 2,
-    },
-  ];
-
-  it("computes agreement rates, distributions, and call counts", () => {
-    const metrics = summarizeEnsembleOutcomes(outcomes);
-    expect(metrics.total).toBe(4);
-    expect(metrics.agreed).toBe(1);
-    expect(metrics.agreementRate).toBeCloseTo(0.25);
-    expect(metrics.disagreementRate).toBeCloseTo(0.75);
-    expect(metrics.perModel.a).toMatchObject({
-      reject: 1,
-      research: 1,
-      high_priority: 1,
-      error: 1,
-    });
-    expect(metrics.perModel.b).toMatchObject({
-      reject: 0,
-      research: 2,
-      high_priority: 2,
-      error: 0,
-    });
-    expect(metrics.finalDistribution).toMatchObject({
-      reject: 0,
-      research: 3,
-      high_priority: 1,
-    });
-    expect(metrics.adjudications).toBe(1);
-    expect(metrics.apiCalls).toBe(10);
-    expect(metrics.failures).toBe(2);
-  });
-});
-
-describe("withRateLimitPatience", () => {
-  it("classifies rate-limit errors", () => {
+    expect(result.records.filter((record) => record.terminal)).toHaveLength(1);
     expect(
-      isRateLimitError(new Error("OpenRouter request was rate limited")),
+      result.records.slice(0, -1).every((record) => !record.terminal),
     ).toBe(true);
-    expect(isRateLimitError(new Error("429 Too Many Requests"))).toBe(true);
-    expect(isRateLimitError(new Error("validation_failed"))).toBe(false);
+    expect(
+      result.records.slice(0, -1).every((record) => record.decision === null),
+    ).toBe(true);
   });
 
-  it("retries rate limits then returns success", async () => {
-    let calls = 0;
-    const slept: number[] = [];
-    const result = await withRateLimitPatience(
-      () => {
-        calls += 1;
-        if (calls < 3) throw new Error("rate limited");
-        return Promise.resolve("ok");
-      },
-      async (ms: number) => {
-        slept.push(ms);
-      },
-    );
-    expect(result).toBe("ok");
-    expect(calls).toBe(3);
-    expect(slept).toHaveLength(2);
-  });
-
-  it("throws non-rate-limit errors immediately", async () => {
-    let calls = 0;
+  it("propagates provider errors instead of fabricating research", async () => {
     await expect(
-      withRateLimitPatience(() => {
-        calls += 1;
-        throw new Error("validation_failed");
+      evaluateJevLadder({
+        evidence: packageFixture(),
+        call: async () => {
+          throw new Error("provider unavailable");
+        },
       }),
-    ).rejects.toThrow("validation_failed");
-    expect(calls).toBe(1);
+    ).rejects.toThrow("provider unavailable");
+  });
+
+  it("rejects malformed final output instead of publishing a judgment", async () => {
+    await expect(
+      evaluateJevLadder({
+        evidence: packageFixture(),
+        call: async (request) => {
+          if (request.rung === "r1") {
+            return {
+              answers: { manufacturer: { type: "noul", noul: 0.9 } },
+              costUsd: null,
+              model: "jev",
+            };
+          }
+          if (request.rung === "r2") {
+            return {
+              answers: {
+                product_vs_process: {
+                  type: "choice",
+                  choice: "product",
+                  confidence: 0.8,
+                },
+              },
+              costUsd: null,
+              model: "jev",
+            };
+          }
+          if (request.rung === "r3") {
+            return {
+              answers: { oversize: { type: "noul", noul: 0.1 } },
+              costUsd: null,
+              model: "jev",
+            };
+          }
+          return { answers: {}, costUsd: null, model: "jev" };
+        },
+      }),
+    ).rejects.toThrow("terminal disposition");
   });
 });
 
-describe("runJevCascade", () => {
-  const row = { id: "signal-1" };
-  const pkg = {
-    signalId: "signal-1",
-    name: "Acme Aero",
-    domain: null,
-    cage: null,
-    uei: null,
-    address: null,
-    city: null,
-    state: null,
-    country: null,
-    partCount: 10,
-    makes: ["Boeing"],
-    modelsSample: [],
-    supplementDate: null,
-    guidUrl: null,
+describe("ensemble configuration", () => {
+  it("uses intended defaults when optional numeric env values are unset", () => {
+    expect(resolveEnsembleConfig({})).toMatchObject({
+      jevAuditSampleRate: 0.05,
+    });
+    expect(
+      resolveEnsembleConfig({
+        JEV_AUDIT_SAMPLE_RATE: "",
+      }),
+    ).toMatchObject({
+      jevAuditSampleRate: 0.05,
+    });
+  });
+});
+
+function reviewClaim(
+  phase: "jev" | "muse",
+  overrides: Record<string, unknown> = {},
+) {
+  return {
+    signalId: "00000000-0000-0000-0000-000000000001",
+    sourceRevision: 0,
+    phase,
+    inputHash: null,
+    inputManifest: null,
+    researchEvidence: sourcedResearch(),
+    jevEvaluationId: null,
+    nextAttemptAt: new Date("2026-09-28T00:00:00Z"),
+    attemptCount: 0,
+    lastError: null,
+    leaseToken: "00000000-0000-0000-0000-000000000099",
+    leaseExpiresAt: new Date("2026-09-28T01:00:00Z"),
+    researchDueAt: null,
+    lastResearchOutcome: null,
+    inputsCheckedAt: null,
+    createdAt: new Date("2026-09-28T00:00:00Z"),
+    updatedAt: new Date("2026-09-28T00:00:00Z"),
+    ...overrides,
   };
-  const mockDb = () => ({ execute: vi.fn(async () => ({ rows: [] })) });
-  const baseConfig = {
+}
+
+function unitReviewConfig(): FaaEnsembleConfig {
+  return {
     ...resolveEnsembleConfig({}),
-    jevAuditSampleRate: 0,
-    jevRejectConfirmThreshold: 0.85,
+    concurrency: 1,
     requestDelayMs: 0,
   };
-  const museOk = (decision: "reject" | "research" | "high_priority") =>
-    vi.fn(async () => ({
-      ok: true as const,
-      result: evaluatorResult({ decision }),
-      rawResponse: "{}",
-      tokens: { input: 1, output: 1, total: 2 },
-      costUsd: null,
-    }));
+}
 
-  it("accepts JEv research with zero Muse calls", async () => {
-    const evaluate = museOk("research");
-    const outcome = await runJevCascade(
-      mockDb() as never,
-      row as never,
-      pkg,
-      baseConfig,
-      async () => ({ decision: "research", confidence: 0.7, costUsd: null }),
-      evaluate,
+describe("FAA recorded-spend budget gates", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    signalReviewMocks.reconcileChangedSignalReviews.mockResolvedValue(0);
+    signalReviewMocks.insertFaaReviewModelUsageReceipt.mockResolvedValue({});
+    signalReviewMocks.updateClaimedSignalReviewInput.mockImplementation(
+      async (_db, claim, input) => ({ ...claim, ...input }),
     );
-    expect(outcome).toMatchObject({
-      finalDecision: "research",
-      jevFastPath: true,
-      jevDecision: "research",
-      apiCalls: 0,
+    signalReviewMocks.failSignalReview.mockResolvedValue({});
+    signalReviewMocks.commitSignalReview.mockResolvedValue({
+      accepted: true,
+      value: undefined,
+      state: {},
     });
-    expect(evaluate).not.toHaveBeenCalled();
   });
 
-  it("confirms JEv high_priority with one Muse call", async () => {
-    const evaluate = museOk("high_priority");
-    const outcome = await runJevCascade(
-      mockDb() as never,
-      row as never,
-      pkg,
-      baseConfig,
-      async () => ({
-        decision: "high_priority",
-        confidence: 0.9,
-        costUsd: null,
-      }),
-      evaluate,
-    );
-    expect(outcome).toMatchObject({
-      finalDecision: "high_priority",
-      apiCalls: 1,
-    });
-    expect(evaluate).toHaveBeenCalledTimes(1);
+  it("fails closed when recorded spend cannot be read", async () => {
+    const db = {
+      execute: vi.fn(async () => ({ rows: [{ total: null }] })),
+    };
+
+    await expect(
+      getDailySpendUsd(new Date("2026-09-28T12:00:00Z"), db as never),
+    ).rejects.toThrow("invalid total");
   });
 
-  it("overrules unconfirmed high_priority to research", async () => {
-    const outcome = await runJevCascade(
-      mockDb() as never,
-      row as never,
-      pkg,
-      baseConfig,
-      async () => ({
-        decision: "high_priority",
-        confidence: 0.9,
-        costUsd: null,
-      }),
-      museOk("research"),
-    );
-    expect(outcome).toMatchObject({ finalDecision: "research" });
-  });
+  it("defers an exhausted JEv claim without a paid call or judgment", async () => {
+    const claim = reviewClaim("jev");
+    signalReviewMocks.claimSignalReviews.mockResolvedValue([claim]);
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [sourceRow()] }),
+    };
+    const callJev = vi.fn(fullLadderCaller("research"));
+    const readSpend = vi.fn(async () => 1);
 
-  it("confirms high-confidence JEv reject with one Muse call", async () => {
-    const outcome = await runJevCascade(
-      mockDb() as never,
-      row as never,
-      pkg,
-      baseConfig,
-      async () => ({ decision: "reject", confidence: 0.95, costUsd: null }),
-      museOk("reject"),
+    const summary = await runJevReviews(
+      db as never,
+      { limit: 1, concurrency: 1 },
+      {
+        config: unitReviewConfig(),
+        callJev,
+        getDailySpendUsd: readSpend,
+        dailyBudgetCapUsd: () => 1,
+      },
     );
-    expect(outcome).toMatchObject({ finalDecision: "reject", apiCalls: 1 });
-  });
 
-  it("retains low-confidence reject without Muse calls", async () => {
-    const evaluate = museOk("reject");
-    const outcome = await runJevCascade(
-      mockDb() as never,
-      row as never,
-      pkg,
-      baseConfig,
-      async () => ({ decision: "reject", confidence: 0.4, costUsd: null }),
-      evaluate,
-    );
-    expect(outcome).toMatchObject({
-      finalDecision: "research",
-      jevFastPath: true,
-    });
-    expect(evaluate).not.toHaveBeenCalled();
-  });
-
-  it("falls through on screen error and on audit sample", async () => {
-    expect(
-      await runJevCascade(
-        mockDb() as never,
-        row as never,
-        pkg,
-        baseConfig,
-        async () => null,
-        museOk("research"),
-      ),
-    ).toBeNull();
-    expect(
-      await runJevCascade(
-        mockDb() as never,
-        row as never,
-        pkg,
-        { ...baseConfig, jevAuditSampleRate: 1 },
-        async () => ({ decision: "research", confidence: 0.9, costUsd: null }),
-        museOk("research"),
-      ),
-    ).toBeNull();
-  });
-});
-
-describe("runJevSweep", () => {
-  const sweepConfig = { ...resolveEnsembleConfig({}), requestDelayMs: 0 };
-  const candidate = (id: string) => ({
-    id,
-    raw_name: `Supplier ${id}`,
-    raw_domain: null,
-    uei: null,
-    cage: null,
-    city: null,
-    state: null,
-    country: null,
-    award_count: 3,
-    freshest_award: null,
-    created_at: new Date("2026-01-01T00:00:00Z"),
-    source_payload: {},
-  });
-  const statementsOf = (execute: Mock) =>
-    execute.mock.calls.map(([query]) => {
-      const rendered = new PgDialect().sqlToQuery(query as SQL);
-      return { ...rendered, sql: rendered.sql.trimStart() };
-    });
-
-  it("persists jev evals with zero Muse calls and no result rows", async () => {
-    const execute = vi.fn(async () => ({ rows: [] }));
-    execute.mockResolvedValueOnce({ rows: [candidate("s1"), candidate("s2")] });
-    const screenJev = vi.fn(async (pkg: { signalId: string }) =>
-      pkg.signalId === "s1"
-        ? { decision: "high_priority" as const, confidence: 0.9, costUsd: null }
-        : { decision: "research" as const, confidence: 0.7, costUsd: null },
-    );
-    const summary = await runJevSweep(
-      { execute } as unknown as Database,
-      { status: "queued_qualification", concurrency: 2 },
-      { screenJev: screenJev as never, config: sweepConfig },
-    );
-    expect(summary).toEqual({ screened: 2, flagged: 1, errors: 0 });
-    expect(screenJev).toHaveBeenCalledTimes(2);
-    const inserts = statementsOf(execute).filter((s) =>
-      s.sql.startsWith("INSERT"),
-    );
-    expect(inserts).toHaveLength(2);
-    expect(
-      inserts.every((s) => s.sql.includes("faa_ensemble_evaluations")),
-    ).toBe(true);
-    expect(inserts.some((s) => s.sql.includes("faa_ensemble_results"))).toBe(
-      false,
-    );
-  });
-
-  it("counts screen misses as errors without persisting", async () => {
-    const execute = vi.fn(async () => ({ rows: [] }));
-    execute.mockResolvedValueOnce({ rows: [candidate("s1")] });
-    const summary = await runJevSweep(
-      { execute } as unknown as Database,
-      {},
-      { screenJev: async () => null, config: sweepConfig },
-    );
-    expect(summary).toEqual({ screened: 0, flagged: 0, errors: 1 });
-    expect(statementsOf(execute).some((s) => s.sql.startsWith("INSERT"))).toBe(
-      false,
-    );
-  });
-});
-
-describe("runMuseVerification", () => {
-  const verifyConfig = {
-    ...resolveEnsembleConfig({}),
-    requestDelayMs: 0,
-    jevRejectConfirmThreshold: 0.85,
-    jevAuditSampleRate: 0.05,
-  };
-  const stored = (
-    id: string,
-    jev_decision: "high_priority" | "reject" | "research",
-    jev_confidence: number,
-  ) => ({
-    id,
-    raw_name: `Supplier ${id}`,
-    raw_domain: null,
-    uei: null,
-    cage: null,
-    city: null,
-    state: null,
-    country: null,
-    award_count: 3,
-    freshest_award: null,
-    created_at: new Date("2026-01-01T00:00:00Z"),
-    source_payload: {},
-    jev_decision,
-    jev_confidence,
-    jev_cost: null,
-  });
-  const museOk = (decision: "reject" | "research" | "high_priority") =>
-    vi.fn(async () => ({
-      ok: true as const,
-      result: evaluatorResult({ decision }),
-      rawResponse: "{}",
-      tokens: { input: 1, output: 1, total: 2 },
-      costUsd: null,
-    }));
-  const flaggedThenAudit = (
-    execute: Mock,
-    flagged: unknown[],
-    audit: unknown[],
-  ) => {
-    execute.mockResolvedValueOnce({ rows: flagged });
-    execute.mockResolvedValueOnce({ rows: audit });
-  };
-
-  it("confirms a JEv high_priority with one Muse call", async () => {
-    const execute = vi.fn(async () => ({ rows: [] }));
-    flaggedThenAudit(execute, [stored("hp1", "high_priority", 90)], []);
-    const evaluateModel = museOk("high_priority");
-    const summary = await runMuseVerification(
-      { execute } as unknown as Database,
-      { limit: 10, concurrency: 1 },
-      { evaluateModel: evaluateModel as never, config: verifyConfig },
-    );
-    expect(summary).toEqual({
-      verified: 1,
-      confirmed: 1,
-      overruled: 0,
+    expect(summary).toMatchObject({
+      screened: 0,
+      deferred: 1,
       errors: 0,
+      stale: 0,
     });
-    expect(evaluateModel).toHaveBeenCalledTimes(1);
+    expect(readSpend).toHaveBeenCalledOnce();
+    expect(callJev).not.toHaveBeenCalled();
+    expect(signalReviewMocks.commitSignalReview).not.toHaveBeenCalled();
+    expect(signalReviewMocks.failSignalReview).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ signalId: claim.signalId, attemptCount: 0 }),
+      expect.stringContaining("Daily model budget exhausted"),
+      { deferred: true },
+    );
   });
 
-  it("overrules a JEv reject the second opinion does not confirm", async () => {
-    const execute = vi.fn(async () => ({ rows: [] }));
-    flaggedThenAudit(execute, [stored("rj1", "reject", 95)], []);
-    const evaluateModel = museOk("research");
-    const summary = await runMuseVerification(
-      { execute } as unknown as Database,
-      { limit: 10, concurrency: 1 },
-      { evaluateModel: evaluateModel as never, config: verifyConfig },
-    );
-    expect(summary).toEqual({
-      verified: 1,
-      confirmed: 0,
-      overruled: 1,
-      errors: 0,
+  it("defers a Muse claim when accounting is unreadable", async () => {
+    const config = unitReviewConfig();
+    const evidence = packageFixture();
+    const manifest = buildFaaReviewInputManifest(evidence, config, 0);
+    const inputHash = hashFaaReviewInput(manifest);
+    const claim = reviewClaim("muse", {
+      inputHash,
+      inputManifest: manifest,
+      jevEvaluationId: "00000000-0000-0000-0000-000000000010",
     });
-  });
+    signalReviewMocks.claimSignalReviews.mockResolvedValue([claim]);
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [sourceRow()] })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: claim.jevEvaluationId,
+              decision: "research",
+              confidence: "0.8",
+              input_hash: inputHash,
+            },
+          ],
+        }),
+    };
+    const evaluateModel = vi.fn();
 
-  it("skips signals that already have Muse evals", async () => {
-    const pool = [
-      stored("hp1", "high_priority", 90),
-      stored("hp2", "high_priority", 88),
-    ];
-    const museEvals = new Set(["hp1"]);
-    const execute = vi.fn(async () => ({ rows: [] }));
-    execute.mockImplementationOnce(async () => ({
-      rows: pool.filter((row) => !museEvals.has(row.id)),
-    }));
-    execute.mockResolvedValueOnce({ rows: [] });
-    const evaluateModel = museOk("high_priority");
-    const summary = await runMuseVerification(
-      { execute } as unknown as Database,
-      { limit: 10, concurrency: 1 },
-      { evaluateModel: evaluateModel as never, config: verifyConfig },
+    const summary = await runMuseReviews(
+      db as never,
+      { limit: 1, concurrency: 1 },
+      {
+        config,
+        evaluateModel,
+        getDailySpendUsd: vi.fn(async () => {
+          throw new Error("database unavailable");
+        }),
+        dailyBudgetCapUsd: () => 1,
+      },
     );
-    expect(summary).toEqual({
-      verified: 1,
-      confirmed: 1,
-      overruled: 0,
-      errors: 0,
-    });
-    expect(evaluateModel).toHaveBeenCalledTimes(1);
-    expect(evaluateModel.mock.calls[0]![1]).toMatchObject({
-      signalId: "hp2",
-    });
-  });
 
-  it("verifies the audit sample of JEv-research signals", async () => {
-    const execute = vi.fn(async () => ({ rows: [] }));
-    flaggedThenAudit(execute, [], [stored("r1", "research", 70)]);
-    const evaluateModel = museOk("research");
-    const summary = await runMuseVerification(
-      { execute } as unknown as Database,
-      { limit: 20, concurrency: 1 },
-      { evaluateModel: evaluateModel as never, config: verifyConfig },
-    );
-    expect(summary).toEqual({
-      verified: 1,
-      confirmed: 1,
-      overruled: 0,
-      errors: 0,
-    });
-    expect(evaluateModel).toHaveBeenCalledTimes(1);
-    const auditQuery = new PgDialect().sqlToQuery(
-      execute.mock.calls[1]![0] as SQL,
-    );
-    expect(auditQuery.sql).toContain("jev.decision = 'research'");
-    expect(auditQuery.sql).toMatch(/LIMIT/);
-  });
-
-  it("records Muse failures without writing result rows", async () => {
-    const execute = vi.fn(async () => ({ rows: [] }));
-    flaggedThenAudit(execute, [stored("hp1", "high_priority", 90)], []);
-    const evaluateModel = vi.fn(async () => ({
-      ok: false as const,
-      error: "boom",
-      rawResponse: null,
-    }));
-    const summary = await runMuseVerification(
-      { execute } as unknown as Database,
-      { limit: 10, concurrency: 1 },
-      { evaluateModel: evaluateModel as never, config: verifyConfig },
-    );
     expect(summary).toEqual({
       verified: 0,
       confirmed: 0,
       overruled: 0,
-      errors: 1,
+      deferred: 1,
+      costUsd: 0,
+      errors: 0,
+      stale: 0,
     });
-    const inserts = execute.mock.calls
-      .map(([query]) => new PgDialect().sqlToQuery(query as SQL))
-      .filter((s) => s.sql.startsWith("INSERT"));
-    expect(inserts.some((s) => s.sql.includes("faa_ensemble_results"))).toBe(
-      false,
+    expect(evaluateModel).not.toHaveBeenCalled();
+    expect(signalReviewMocks.commitSignalReview).not.toHaveBeenCalled();
+    expect(signalReviewMocks.failSignalReview).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({ signalId: claim.signalId, attemptCount: 0 }),
+      expect.stringContaining("accounting unavailable"),
+      { deferred: true },
     );
+  });
+
+  it("keeps an observed first-rung charge when a later JEv rung fails", async () => {
+    const claim = reviewClaim("jev");
+    signalReviewMocks.claimSignalReviews.mockResolvedValue([claim]);
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [sourceRow()] }),
+    };
+    const callJev = vi
+      .fn()
+      .mockResolvedValueOnce({
+        answers: { manufacturer: { type: "noul", noul: 0.9 } },
+        costUsd: 0.1234,
+        model: "typesafe/jev-returned",
+      })
+      .mockRejectedValueOnce(new Error("later rung failed"));
+
+    const summary = await runJevReviews(
+      db as never,
+      { limit: 1, concurrency: 1 },
+      {
+        config: unitReviewConfig(),
+        callJev,
+        getDailySpendUsd: async () => 0,
+        dailyBudgetCapUsd: () => 1,
+      },
+    );
+
+    expect(summary).toMatchObject({
+      screened: 0,
+      costUsd: 0.1234,
+      errors: 1,
+      stale: 0,
+    });
+    expect(
+      signalReviewMocks.insertFaaReviewModelUsageReceipt,
+    ).toHaveBeenCalledOnce();
+    expect(
+      signalReviewMocks.insertFaaReviewModelUsageReceipt,
+    ).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({
+        sourceSignalId: claim.signalId,
+        configuredModel: unitReviewConfig().jevModel,
+        returnedModel: "typesafe/jev-returned",
+        phase: "jev",
+        rung: "r1",
+        costUsd: "0.1234",
+      }),
+    );
+    expect(signalReviewMocks.commitSignalReview).not.toHaveBeenCalled();
+  });
+
+  it("defers a quota-exhausted later JEv rung and retains prior spend", async () => {
+    const claim = reviewClaim("jev");
+    signalReviewMocks.claimSignalReviews.mockResolvedValue([claim]);
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [sourceRow()] }),
+    };
+    const callJev = vi
+      .fn()
+      .mockResolvedValueOnce({
+        answers: { manufacturer: { type: "noul", noul: 0.9 } },
+        costUsd: 0.1234,
+        model: "typesafe/jev-returned",
+      })
+      .mockRejectedValueOnce(
+        new OpenRouterClientError("quota_exhausted", false),
+      );
+
+    const summary = await runJevReviews(
+      db as never,
+      { limit: 1, concurrency: 1 },
+      {
+        config: unitReviewConfig(),
+        callJev,
+        getDailySpendUsd: async () => 0,
+        dailyBudgetCapUsd: () => 1,
+      },
+    );
+
+    expect(summary).toMatchObject({
+      screened: 0,
+      costUsd: 0.1234,
+      deferred: 1,
+      errors: 0,
+      stale: 0,
+    });
+    expect(callJev).toHaveBeenCalledTimes(2);
+    expect(
+      signalReviewMocks.insertFaaReviewModelUsageReceipt,
+    ).toHaveBeenCalledOnce();
+    expect(
+      signalReviewMocks.insertFaaReviewModelUsageReceipt,
+    ).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({
+        sourceSignalId: claim.signalId,
+        returnedModel: "typesafe/jev-returned",
+        rung: "r1",
+        costUsd: "0.1234",
+      }),
+    );
+    expect(signalReviewMocks.commitSignalReview).not.toHaveBeenCalled();
+  });
+
+  it("counts a paid JEv response even when the lease fence rejects publication", async () => {
+    const claim = reviewClaim("jev");
+    signalReviewMocks.claimSignalReviews.mockResolvedValue([claim]);
+    signalReviewMocks.commitSignalReview.mockResolvedValue({ accepted: false });
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [sourceRow()] })
+        .mockResolvedValueOnce({ rows: [sourceRow()] }),
+    };
+
+    const summary = await runJevReviews(
+      db as never,
+      { limit: 1, concurrency: 1 },
+      {
+        config: unitReviewConfig(),
+        callJev: async () => ({
+          answers: { manufacturer: { type: "noul", noul: 0.1 } },
+          costUsd: 0.2,
+          model: "typesafe/jev-returned",
+        }),
+        getDailySpendUsd: async () => 0,
+        dailyBudgetCapUsd: () => 1,
+      },
+    );
+
+    expect(summary).toMatchObject({
+      screened: 0,
+      costUsd: 0.2,
+      errors: 0,
+      stale: 1,
+    });
+    expect(
+      signalReviewMocks.insertFaaReviewModelUsageReceipt,
+    ).toHaveBeenCalledOnce();
+  });
+
+  it("records Muse spend before a later source/currentness failure", async () => {
+    const config = unitReviewConfig();
+    const evidence = packageFixture();
+    const manifest = buildFaaReviewInputManifest(evidence, config, 0);
+    const inputHash = hashFaaReviewInput(manifest);
+    const claim = reviewClaim("muse", {
+      inputHash,
+      inputManifest: manifest,
+      jevEvaluationId: "00000000-0000-0000-0000-000000000010",
+    });
+    signalReviewMocks.claimSignalReviews.mockResolvedValue([claim]);
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [sourceRow()] })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: claim.jevEvaluationId,
+              decision: "research",
+              confidence: "80",
+              input_hash: inputHash,
+            },
+          ],
+        })
+        .mockResolvedValueOnce({ rows: [] }),
+    };
+
+    const summary = await runMuseReviews(
+      db as never,
+      { limit: 1, concurrency: 1 },
+      {
+        config,
+        evaluateModel: async () => ({
+          ok: true,
+          result: {
+            decision: "research",
+            confidence: 80,
+            company_type: "manufacturer",
+            aerospace_defense_relevance: "moderate",
+            manufacturing_evidence: "moderate",
+            thesis_signals: [],
+            disqualifiers: [],
+            missing_evidence: [],
+            false_negative_risk: "medium",
+            reason: "controlled response",
+            proprietary_product_evidence: "weak",
+            proprietary_process_only: false,
+            website_products_menu: true,
+            size_indicators: [],
+            likely_oversize: false,
+            suggested_priority: 2,
+          },
+          rawResponse: "{}",
+          tokens: { input: 1, output: 1, total: 2 },
+          costUsd: 0.3,
+          returnedModel: "meta/muse-returned",
+        }),
+        getDailySpendUsd: async () => 0,
+        dailyBudgetCapUsd: () => 1,
+      },
+    );
+
+    expect(summary).toEqual({
+      verified: 0,
+      confirmed: 0,
+      overruled: 0,
+      costUsd: 0.3,
+      deferred: 0,
+      errors: 0,
+      stale: 1,
+    });
+    expect(
+      signalReviewMocks.insertFaaReviewModelUsageReceipt,
+    ).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({
+        sourceSignalId: claim.signalId,
+        configuredModel: config.modelA,
+        returnedModel: "meta/muse-returned",
+        phase: "muse",
+        costUsd: "0.3",
+      }),
+    );
+    expect(signalReviewMocks.commitSignalReview).not.toHaveBeenCalled();
+  });
+
+  it("records known Muse costs when an injected adapter throws", async () => {
+    const config = unitReviewConfig();
+    const evidence = packageFixture();
+    const manifest = buildFaaReviewInputManifest(evidence, config, 0);
+    const inputHash = hashFaaReviewInput(manifest);
+    const claim = reviewClaim("muse", {
+      inputHash,
+      inputManifest: manifest,
+      jevEvaluationId: "00000000-0000-0000-0000-000000000010",
+    });
+    signalReviewMocks.claimSignalReviews.mockResolvedValue([claim]);
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [sourceRow()] })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: claim.jevEvaluationId,
+              decision: "research",
+              confidence: "80",
+              input_hash: inputHash,
+            },
+          ],
+        }),
+    };
+
+    const summary = await runMuseReviews(
+      db as never,
+      { limit: 1, concurrency: 1 },
+      {
+        config,
+        evaluateModel: async () => {
+          throw new OpenRouterClientError("invalid_structured_output", false, [
+            {
+              attempt: 1,
+              model: "meta/muse-observed-first",
+              provider: "controlled-test",
+              status: "schema_error",
+              httpStatus: 200,
+              promptSha256: "prompt-sha",
+              responseSha256: "first-response-sha",
+              inputTokens: 2,
+              outputTokens: 2,
+              totalTokens: 4,
+              costUsd: 0.11,
+              latencyMs: 1,
+              retryDelayMs: null,
+              errorCode: "invalid_structured_output",
+            },
+            {
+              attempt: 2,
+              model: "meta/muse-observed-final",
+              provider: "controlled-test",
+              status: "schema_error",
+              httpStatus: 200,
+              promptSha256: "prompt-sha",
+              responseSha256: "final-response-sha",
+              inputTokens: 2,
+              outputTokens: 2,
+              totalTokens: 4,
+              costUsd: 0.11,
+              latencyMs: 1,
+              retryDelayMs: null,
+              errorCode: "invalid_structured_output",
+            },
+          ]);
+        },
+        getDailySpendUsd: async () => 0,
+        dailyBudgetCapUsd: () => 1,
+      },
+    );
+
+    expect(summary).toEqual({
+      verified: 0,
+      confirmed: 0,
+      overruled: 0,
+      costUsd: 0.22,
+      deferred: 0,
+      errors: 1,
+      stale: 0,
+    });
+    expect(
+      signalReviewMocks.insertFaaReviewModelUsageReceipt,
+    ).toHaveBeenCalledOnce();
+    expect(
+      signalReviewMocks.insertFaaReviewModelUsageReceipt,
+    ).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({
+        sourceSignalId: claim.signalId,
+        configuredModel: config.modelA,
+        returnedModel: "meta/muse-observed-final",
+        phase: "muse",
+        costUsd: "0.22",
+      }),
+    );
+    expect(signalReviewMocks.failSignalReview).toHaveBeenCalledWith(
+      db,
+      claim,
+      "OpenRouter returned invalid structured output",
+    );
+    expect(signalReviewMocks.commitSignalReview).not.toHaveBeenCalled();
+  });
+
+  it("defers quota-exhausted Muse while retaining billed attempts and JEv linkage", async () => {
+    const config = unitReviewConfig();
+    const evidence = packageFixture();
+    const manifest = buildFaaReviewInputManifest(evidence, config, 0);
+    const inputHash = hashFaaReviewInput(manifest);
+    const claim = reviewClaim("muse", {
+      inputHash,
+      inputManifest: manifest,
+      jevEvaluationId: "00000000-0000-0000-0000-000000000010",
+    });
+    signalReviewMocks.claimSignalReviews.mockResolvedValue([claim]);
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [sourceRow()] })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: claim.jevEvaluationId,
+              decision: "research",
+              confidence: "80",
+              input_hash: inputHash,
+            },
+          ],
+        }),
+    };
+
+    const summary = await runMuseReviews(
+      db as never,
+      { limit: 1, concurrency: 1 },
+      {
+        config,
+        evaluateModel: async () => {
+          throw new OpenRouterClientError("quota_exhausted", false, [
+            {
+              attempt: 1,
+              model: "meta/muse-billed-before-quota",
+              provider: "controlled-test",
+              status: "schema_error",
+              httpStatus: 200,
+              promptSha256: "prompt-sha",
+              responseSha256: "billed-response-sha",
+              inputTokens: 2,
+              outputTokens: 2,
+              totalTokens: 4,
+              costUsd: 0.11,
+              latencyMs: 1,
+              retryDelayMs: null,
+              errorCode: "invalid_structured_output",
+            },
+            {
+              attempt: 2,
+              model: config.modelA,
+              provider: null,
+              status: "failed",
+              httpStatus: 403,
+              promptSha256: "prompt-sha",
+              responseSha256: null,
+              inputTokens: null,
+              outputTokens: null,
+              totalTokens: null,
+              costUsd: null,
+              latencyMs: 1,
+              retryDelayMs: null,
+              errorCode: "quota_exhausted",
+            },
+          ]);
+        },
+        getDailySpendUsd: async () => 0,
+        dailyBudgetCapUsd: () => 1,
+      },
+    );
+
+    expect(summary).toEqual({
+      verified: 0,
+      confirmed: 0,
+      overruled: 0,
+      costUsd: 0.11,
+      deferred: 1,
+      errors: 0,
+      stale: 0,
+    });
+    expect(
+      signalReviewMocks.insertFaaReviewModelUsageReceipt,
+    ).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({
+        sourceSignalId: claim.signalId,
+        returnedModel: "meta/muse-billed-before-quota",
+        phase: "muse",
+        costUsd: "0.11",
+      }),
+    );
+    expect(signalReviewMocks.commitSignalReview).not.toHaveBeenCalled();
+  });
+
+  it("keeps an unknown failed Muse cost nullable", async () => {
+    const config = unitReviewConfig();
+    const evidence = packageFixture();
+    const manifest = buildFaaReviewInputManifest(evidence, config, 0);
+    const inputHash = hashFaaReviewInput(manifest);
+    const claim = reviewClaim("muse", {
+      inputHash,
+      inputManifest: manifest,
+      jevEvaluationId: "00000000-0000-0000-0000-000000000010",
+    });
+    signalReviewMocks.claimSignalReviews.mockResolvedValue([claim]);
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [sourceRow()] })
+        .mockResolvedValueOnce({
+          rows: [
+            {
+              id: claim.jevEvaluationId,
+              decision: "research",
+              confidence: "80",
+              input_hash: inputHash,
+            },
+          ],
+        }),
+    };
+
+    const summary = await runMuseReviews(
+      db as never,
+      { limit: 1, concurrency: 1 },
+      {
+        config,
+        evaluateModel: async () => {
+          throw new OpenRouterClientError("network_error", true, [
+            {
+              attempt: 1,
+              model: config.modelA,
+              provider: null,
+              status: "transient_error",
+              httpStatus: null,
+              promptSha256: "prompt-sha",
+              responseSha256: null,
+              inputTokens: null,
+              outputTokens: null,
+              totalTokens: null,
+              costUsd: null,
+              latencyMs: 1,
+              retryDelayMs: null,
+              errorCode: "network_error",
+            },
+          ]);
+        },
+        getDailySpendUsd: async () => 0,
+        dailyBudgetCapUsd: () => 1,
+      },
+    );
+
+    expect(summary).toMatchObject({ costUsd: 0, errors: 1 });
+    expect(
+      signalReviewMocks.insertFaaReviewModelUsageReceipt,
+    ).toHaveBeenCalledWith(
+      db,
+      expect.objectContaining({
+        returnedModel: null,
+        phase: "muse",
+        costUsd: null,
+      }),
+    );
+    expect(signalReviewMocks.commitSignalReview).not.toHaveBeenCalled();
+  });
+
+  it("preserves deterministic JEv progress when no paid call is needed", async () => {
+    const research = sourcedResearch({
+      ownership: {
+        status: "public_parent",
+        owner: "Public Parent",
+        year: null,
+        supportEvidenceIds: ["ownership-row"],
+      },
+      evidenceRefs: [
+        supportRef("domain", "Acme Aero LLC"),
+        supportRef("website", "AX-10 actuator"),
+        supportRef("ownership", "Acme is a subsidiary of Public Parent."),
+      ],
+    });
+    const claim = reviewClaim("jev", { researchEvidence: research });
+    signalReviewMocks.claimSignalReviews.mockResolvedValue([claim]);
+    const db = {
+      execute: vi
+        .fn()
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValue({ rows: [sourceRow()] }),
+    };
+    const callJev = vi.fn();
+    const readSpend = vi.fn(async () => 1);
+
+    const summary = await runJevReviews(
+      db as never,
+      { limit: 1, concurrency: 1 },
+      {
+        config: unitReviewConfig(),
+        callJev,
+        getDailySpendUsd: readSpend,
+        dailyBudgetCapUsd: () => 1,
+      },
+    );
+
+    expect(summary).toMatchObject({
+      screened: 1,
+      rejected: 1,
+      deferred: 0,
+      errors: 0,
+    });
+    expect(readSpend).not.toHaveBeenCalled();
+    expect(callJev).not.toHaveBeenCalled();
+    expect(signalReviewMocks.commitSignalReview).toHaveBeenCalledOnce();
   });
 });

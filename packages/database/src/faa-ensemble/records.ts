@@ -4,18 +4,52 @@ import type { Database } from "../client.js";
 import {
   faaEnsembleEvaluations,
   faaEnsembleResults,
+  faaReviewModelUsage,
   sourceSignals,
   type FaaEnsembleEvaluation,
   type FaaEnsembleResult,
+  type FaaReviewModelUsage,
   type NewFaaEnsembleEvaluation,
   type NewFaaEnsembleResult,
+  type NewFaaReviewModelUsage,
   type SourceSignal,
   type SourceSignalStatus,
 } from "../schema.js";
 
+export type FaaReviewModelUsageReceiptInput = NewFaaReviewModelUsage & {
+  readonly id: string;
+};
+
 /**
- * Persist one model's vote once; a repeated (signal, model, prompt) vote is a
- * duplicate and resolves to null instead of a second row.
+ * Append one provider-response receipt. The caller allocates the UUID before
+ * the provider call and reuses it for any persistence retry; a retry after an
+ * ambiguous database outcome therefore cannot duplicate the observed charge.
+ */
+export async function insertFaaReviewModelUsageReceipt(
+  db: Database,
+  input: FaaReviewModelUsageReceiptInput,
+): Promise<FaaReviewModelUsage> {
+  const inserted = await db
+    .insert(faaReviewModelUsage)
+    .values(input)
+    .onConflictDoNothing({ target: faaReviewModelUsage.id })
+    .returning();
+  if (inserted[0] !== undefined) return inserted[0];
+
+  const existing = await db
+    .select()
+    .from(faaReviewModelUsage)
+    .where(eq(faaReviewModelUsage.id, input.id))
+    .limit(1);
+  if (existing[0] === undefined) {
+    throw new Error(`FAA review usage receipt ${input.id} was not persisted`);
+  }
+  return existing[0];
+}
+
+/**
+ * Persist one model's vote once per immutable input revision. A repeated
+ * (signal, model, prompt, input) vote resolves to null instead of a second row.
  */
 export async function insertEvaluation(
   db: Database,
@@ -29,6 +63,7 @@ export async function insertEvaluation(
         faaEnsembleEvaluations.signalId,
         faaEnsembleEvaluations.modelId,
         faaEnsembleEvaluations.promptVersion,
+        faaEnsembleEvaluations.inputHash,
       ],
     })
     .returning();
@@ -63,10 +98,15 @@ export async function insertOrUpdateResult(
   const created = inserted[0];
   if (created !== undefined) return created;
 
-  const { id: _ignoredId, signalId: _ignoredSignal, ...rest } = input;
+  const updates: Partial<NewFaaEnsembleResult> = {
+    ...input,
+    updatedAt: new Date(),
+  };
+  delete updates.id;
+  delete updates.signalId;
   const rows = await db
     .update(faaEnsembleResults)
-    .set({ ...rest, updatedAt: new Date() })
+    .set(updates)
     .where(eq(faaEnsembleResults.signalId, input.signalId))
     .returning();
   const updated = rows[0];
@@ -108,12 +148,7 @@ export async function listSignalsWithoutResults(
       faaEnsembleResults,
       eq(faaEnsembleResults.signalId, sourceSignals.id),
     )
-    .where(
-      and(
-        eq(sourceSignals.status, status),
-        isNull(faaEnsembleResults.id),
-      ),
-    )
+    .where(and(eq(sourceSignals.status, status), isNull(faaEnsembleResults.id)))
     .orderBy(
       sql`CASE WHEN ${sourceSignals.status} = 'queued_qualification' THEN 0 ELSE 1 END`,
       asc(sourceSignals.createdAt),

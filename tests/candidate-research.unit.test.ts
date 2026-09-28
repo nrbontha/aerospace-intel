@@ -48,19 +48,20 @@ import {
   runCandidateResearchWorkflow,
 } from "../packages/research/src/campaigns/candidate-research.js";
 import { OpenRouterClient } from "../packages/research/src/openrouter.js";
-import type {
-  CompanyResearchInput,
-} from "../packages/research/src/company-workflow.js";
-import type {
-  OpenRouterClient as OpenRouterClientType,
-} from "../packages/research/src/openrouter.js";
+import type { CompanyResearchInput } from "../packages/research/src/company-workflow.js";
+import type { OpenRouterClient as OpenRouterClientType } from "../packages/research/src/openrouter.js";
 
 function openRouterEnvelope(content: string): unknown {
   return {
     model: "stealth/ox-alpha",
     provider: "openrouter",
     choices: [{ message: { content } }],
-    usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15, cost: 0 },
+    usage: {
+      prompt_tokens: 10,
+      completion_tokens: 5,
+      total_tokens: 15,
+      cost: 0,
+    },
   };
 }
 
@@ -94,7 +95,9 @@ describe("OpenRouterClient structured-output repair", () => {
       prompt: "p",
     });
     expect(result.data).toEqual({ answer: 42 });
-    const requestInit = (fetchMock.mock.calls[0] as unknown[])[1] as RequestInit;
+    const requestInit = (
+      fetchMock.mock.calls[0] as unknown[]
+    )[1] as RequestInit;
     const body = JSON.parse(String(requestInit.body)) as {
       messages: Array<{ role: string; content: string }>;
     };
@@ -103,7 +106,7 @@ describe("OpenRouterClient structured-output repair", () => {
 
   it("repairs markdown-fenced JSON when response_format is ignored", async () => {
     const fenced =
-      "```json\n{\n  \"facts\": []\n}\n```\nI extracted nothing further.";
+      '```json\n{\n  "facts": []\n}\n```\nI extracted nothing further.';
     vi.stubGlobal(
       "fetch",
       vi.fn(async () => jsonResponse(openRouterEnvelope(fenced))),
@@ -148,6 +151,86 @@ describe("OpenRouterClient structured-output repair", () => {
         maxAttempts: 1,
       }),
     ).rejects.toThrowError();
+  });
+
+  it("retains structured quota classification for an OpenRouter 403", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message:
+                "Key limit exceeded (total limit). Manage it using https://openrouter.ai/workspaces/default/keys/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+              code: 403,
+            },
+          }),
+          { status: 403 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new OpenRouterClient("test-key");
+
+    await expect(
+      client.generateStructured({
+        route: "fast",
+        models,
+        schemaName: "simple",
+        schema: simpleSchema,
+        systemPrompt: "s",
+        prompt: "p",
+      }),
+    ).rejects.toMatchObject({
+      code: "quota_exhausted",
+      retryable: false,
+      attempts: [
+        expect.objectContaining({
+          httpStatus: 403,
+          errorCode: "quota_exhausted",
+          status: "failed",
+        }),
+      ],
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
+  });
+
+  it("keeps an ordinary numeric 403 as a terminal request rejection", async () => {
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: {
+              message:
+                "Forbidden for resource 503187f18bf3097567905f785a3965ab7693f97",
+              code: 403,
+            },
+          }),
+          { status: 403 },
+        ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const client = new OpenRouterClient("test-key");
+
+    await expect(
+      client.generateStructured({
+        route: "fast",
+        models,
+        schemaName: "simple",
+        schema: simpleSchema,
+        systemPrompt: "s",
+        prompt: "p",
+      }),
+    ).rejects.toMatchObject({
+      code: "request_rejected",
+      retryable: false,
+      attempts: [
+        expect.objectContaining({
+          httpStatus: 403,
+          errorCode: "request_rejected",
+          status: "failed",
+        }),
+      ],
+    });
+    expect(fetchMock).toHaveBeenCalledOnce();
   });
 });
 
@@ -209,7 +292,8 @@ describe("runCandidateResearchWorkflow", () => {
     let call = 0;
     return {
       generateStructured: vi.fn(async () => {
-        const facts = factsPerCall[Math.min(call, factsPerCall.length - 1)] ?? [];
+        const facts =
+          factsPerCall[Math.min(call, factsPerCall.length - 1)] ?? [];
         call += 1;
         return {
           data: { facts },
@@ -286,7 +370,9 @@ describe("runCandidateResearchWorkflow", () => {
     const fieldKeys = outcome.facts.map((fact) => fact.fieldKey).sort();
     expect(fieldKeys).toEqual(["description", "headquarters_location"]);
     // Known website_url fact is never re-reported; excerpts must be in-document.
-    expect(outcome.facts.every((fact) => fact.fieldKey !== "website_url")).toBe(true);
+    expect(outcome.facts.every((fact) => fact.fieldKey !== "website_url")).toBe(
+      true,
+    );
     expect(outcome.skippedFactCount).toBe(1);
     expect(outcome.totalTokens).toBe(240);
   });

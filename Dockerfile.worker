@@ -26,4 +26,4 @@ RUN apt-get update \
     && mkdir -p /var/lib/asi/storage
 COPY --from=build /app ./
 EXPOSE 3000
-CMD ["sh", "-c", "exec npm run start --workspace @asi/worker"]
+CMD ["sh", "-c", "exec npm run start:worker"]

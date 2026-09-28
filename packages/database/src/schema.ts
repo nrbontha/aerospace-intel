@@ -55,6 +55,7 @@ import {
   numeric,
   pgEnum,
   pgTable,
+  primaryKey,
   text,
   timestamp,
   unique,
@@ -2308,6 +2309,7 @@ export const sourceSignals = pgTable(
   "source_signals",
   {
     id: uuid("id").primaryKey().defaultRandom(),
+    reviewRevision: integer("review_revision").notNull().default(0),
     sourceKey: text("source_key").notNull(),
     sourceLocator: text("source_locator").notNull(),
     sourceFingerprint: text("source_fingerprint").notNull().unique(),
@@ -2392,6 +2394,8 @@ export const faaEnsembleEvaluations = pgTable(
     promptVersion: text("prompt_version")
       .notNull()
       .default("faa_qualification_v1"),
+    inputHash: text("input_hash"),
+    inputManifest: jsonb("input_manifest").$type<Record<string, unknown>>(),
     rawResponse: text("raw_response"),
     parsed: jsonb("parsed").$type<Record<string, unknown>>(),
     decision: text("decision"),
@@ -2422,11 +2426,9 @@ export const faaEnsembleEvaluations = pgTable(
   },
   (t) => [
     index("faa_ensemble_evaluations_signal_idx").on(t.signalId),
-    unique("faa_ensemble_evaluations_signal_model_prompt_uidx").on(
-      t.signalId,
-      t.modelId,
-      t.promptVersion,
-    ),
+    unique("faa_ensemble_evaluations_signal_model_prompt_input_uidx")
+      .on(t.signalId, t.modelId, t.promptVersion, t.inputHash)
+      .nullsNotDistinct(),
     check(
       "faa_ensemble_evaluations_decision_chk",
       sql`${t.decision} IS NULL OR ${t.decision} IN ('reject', 'research', 'high_priority')`,
@@ -2437,6 +2439,58 @@ export const faaEnsembleEvaluations = pgTable(
     ),
   ],
 );
+
+/**
+ * Append-only receipts for observed FAA review provider responses. These rows
+ * are deliberately independent of verdict publication: a paid response remains
+ * accounted for when a later rung fails or a lease/current-input fence rejects
+ * the review. `legacyEvaluationId` identifies migration backfills without
+ * coupling receipt retention to mutable evaluation history.
+ */
+export const faaReviewModelUsage = pgTable(
+  "faa_review_model_usage",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceSignalId: uuid("source_signal_id").references(
+      () => sourceSignals.id,
+      {
+        onDelete: "set null",
+      },
+    ),
+    configuredModel: text("configured_model").notNull(),
+    returnedModel: text("returned_model"),
+    phase: text("phase"),
+    rung: text("rung"),
+    promptVersion: text("prompt_version").notNull(),
+    inputHash: text("input_hash"),
+    costUsd: numeric("cost_usd"),
+    legacyEvaluationId: uuid("legacy_evaluation_id").unique(),
+    observedAt: timestamp("observed_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    index("faa_review_model_usage_observed_at_cost_idx")
+      .on(t.observedAt)
+      .where(sql`${t.costUsd} IS NOT NULL`),
+    index("faa_review_model_usage_source_signal_idx").on(t.sourceSignalId),
+    check(
+      "faa_review_model_usage_phase_chk",
+      sql`${t.phase} IS NULL OR ${t.phase} IN ('jev', 'muse')`,
+    ),
+    check(
+      "faa_review_model_usage_rung_chk",
+      sql`${t.rung} IS NULL OR ${t.rung} IN ('r1', 'r2', 'r3', 'r4')`,
+    ),
+    check(
+      "faa_review_model_usage_cost_chk",
+      sql`${t.costUsd} IS NULL OR ${t.costUsd} >= 0`,
+    ),
+  ],
+);
+
+export type FaaReviewModelUsage = SelectRow<typeof faaReviewModelUsage>;
+export type NewFaaReviewModelUsage = InsertRow<typeof faaReviewModelUsage>;
 
 export const faaEnsembleResults = pgTable(
   "faa_ensemble_results",
@@ -2449,6 +2503,15 @@ export const faaEnsembleResults = pgTable(
     promptVersion: text("prompt_version").default("faa_qualification_v1"),
     adjudicatorPromptVersion: text("adjudicator_prompt_version").default(
       "faa_adjudicator_v1",
+    ),
+    inputHash: text("input_hash"),
+    jevEvaluationId: uuid("jev_evaluation_id").references(
+      () => faaEnsembleEvaluations.id,
+      { onDelete: "set null" },
+    ),
+    museEvaluationId: uuid("muse_evaluation_id").references(
+      () => faaEnsembleEvaluations.id,
+      { onDelete: "set null" },
     ),
     modelAId: text("model_a_id"),
     modelBId: text("model_b_id"),
@@ -2484,6 +2547,102 @@ export type NewFaaEnsembleEvaluation = InsertRow<typeof faaEnsembleEvaluations>;
 export type FaaEnsembleResult = SelectRow<typeof faaEnsembleResults>;
 export type NewFaaEnsembleResult = InsertRow<typeof faaEnsembleResults>;
 export type FaaEnsembleDecision = "reject" | "research" | "high_priority";
+
+export const signalReviewState = pgTable(
+  "signal_review_state",
+  {
+    signalId: uuid("signal_id")
+      .primaryKey()
+      .references(() => sourceSignals.id, { onDelete: "cascade" }),
+    sourceRevision: integer("source_revision").notNull().default(0),
+    phase: text("phase").notNull().default("research"),
+    inputHash: text("input_hash"),
+    inputManifest: jsonb("input_manifest").$type<Record<string, unknown>>(),
+    researchEvidence: jsonb("research_evidence")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    jevEvaluationId: uuid("jev_evaluation_id").references(
+      () => faaEnsembleEvaluations.id,
+      { onDelete: "set null" },
+    ),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    attemptCount: integer("attempt_count").notNull().default(0),
+    lastError: text("last_error"),
+    leaseToken: uuid("lease_token"),
+    leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+    researchDueAt: timestamp("research_due_at", { withTimezone: true }),
+    lastResearchOutcome: jsonb("last_research_outcome").$type<
+      Record<string, unknown>
+    >(),
+    inputsCheckedAt: timestamp("inputs_checked_at", { withTimezone: true }),
+    createdAt: ct(),
+    updatedAt: ut(),
+  },
+  (t) => [
+    index("signal_review_state_due_idx").on(
+      t.phase,
+      t.nextAttemptAt,
+      t.createdAt,
+    ),
+    index("signal_review_state_research_due_idx").on(
+      t.researchDueAt,
+      t.createdAt,
+    ),
+    check(
+      "signal_review_state_phase_chk",
+      sql`${t.phase} IN ('research', 'jev', 'muse', 'settled')`,
+    ),
+    check("signal_review_state_attempt_count_chk", sql`${t.attemptCount} >= 0`),
+    check(
+      "signal_review_state_lease_pair_chk",
+      sql`(${t.leaseToken} IS NULL) = (${t.leaseExpiresAt} IS NULL)`,
+    ),
+  ],
+);
+
+export const sourceSignalEvidenceLinks = pgTable(
+  "source_signal_evidence_links",
+  {
+    signalId: uuid("signal_id")
+      .notNull()
+      .references(() => sourceSignals.id, { onDelete: "cascade" }),
+    evidenceId: uuid("evidence_id")
+      .notNull()
+      .references(() => evidence.id, { onDelete: "restrict" }),
+    stage: text("stage").notNull(),
+    researchRevision: text("research_revision").notNull(),
+    createdAt: ct(),
+  },
+  (t) => [
+    primaryKey({
+      columns: [t.signalId, t.evidenceId],
+      name: "source_signal_evidence_links_pk",
+    }),
+    index("source_signal_evidence_links_evidence_idx").on(t.evidenceId),
+    check(
+      "source_signal_evidence_links_stage_chk",
+      sql`${t.stage} IN ('domain', 'website', 'ownership', 'size')`,
+    ),
+  ],
+);
+
+export type SignalReviewPhase = "research" | "jev" | "muse" | "settled";
+export type SignalReviewState = Omit<
+  SelectRow<typeof signalReviewState>,
+  "phase"
+> & {
+  phase: SignalReviewPhase;
+};
+export type NewSignalReviewState = InsertRow<typeof signalReviewState>;
+export type SourceSignalEvidenceLink = SelectRow<
+  typeof sourceSignalEvidenceLinks
+>;
+export type NewSourceSignalEvidenceLink = InsertRow<
+  typeof sourceSignalEvidenceLinks
+>;
 
 export const unifiedTargets = pgTable(
   "unified_targets",
