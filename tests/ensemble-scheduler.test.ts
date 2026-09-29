@@ -18,7 +18,7 @@ const config: FunnelStageConfig = {
   concurrency: 2,
   ladderConcurrency: 2,
   verifyLimit: 10,
-  analystMode: "disabled",
+  analystMode: "free_only",
 };
 
 const db = {} as Database;
@@ -47,11 +47,64 @@ function captureLogger(): {
 async function run(
   stages: readonly FunnelStage[],
   logger: QueueLogger,
+  analystMode = config.analystMode,
 ): Promise<FunnelRunSummary> {
-  return runFunnelStages({ stages, loop: "slow", db, config, logger });
+  return runFunnelStages({
+    stages,
+    loop: "slow",
+    db,
+    config: { ...config, analystMode },
+    logger,
+  });
 }
 
 describe("ensemble scheduler stage isolation", () => {
+  it("skips every mutating stage in disabled analyst mode and logs that status", async () => {
+    const stages = [
+      {
+        key: "jev-ladder",
+        label: "Current-input JEv review",
+        run: vi.fn(async () => ({ done: 1, note: "screened=1" })),
+      },
+      {
+        key: "muse-verify",
+        label: "Muse verification",
+        run: vi.fn(async () => ({ done: 1, note: "verified=1" })),
+      },
+      {
+        key: "unify-refresh",
+        label: "Unified refresh",
+        run: vi.fn(async () => ({ done: 1, note: "sources=1" })),
+      },
+      {
+        key: "promote",
+        label: "Lead promotion",
+        run: vi.fn(async () => ({ done: 1, note: "promoted=1" })),
+      },
+    ] satisfies readonly FunnelStage[];
+    const { logger, events } = captureLogger();
+
+    await expect(run(stages, logger, "disabled")).resolves.toEqual({
+      completed: 0,
+      failed: 0,
+    });
+
+    for (const stage of stages) {
+      expect(stage.run).not.toHaveBeenCalled();
+    }
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        level: "info",
+        event: "ensemble.scheduler_stages_skipped",
+        fields: {
+          analystMode: "disabled",
+          loop: "slow",
+          reason: "analyst_mode_disabled",
+        },
+      }),
+    );
+  });
+
   it("continues database reconciliation when Muse is unavailable", async () => {
     const reconcile = vi.fn(async () => ({ done: 3, note: "reconciled=3" }));
     const { logger, events } = captureLogger();

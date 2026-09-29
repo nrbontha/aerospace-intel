@@ -303,29 +303,38 @@ export async function startWorker(): Promise<WorkerRuntime> {
     });
     log("info", "campaign.sweep_started", {});
 
-    // Cheap Jev, persistent Muse, and database-only reconciliation use
-    // independent locks. Startup passes the typed mode and immutable scope;
-    // the scheduler never creates or activates provider allowance.
-    ensembleScheduler = startEnsembleScheduler({
-      logger: log,
-      analystMode: env.FAA_ANALYST_MODE,
-      ...(env.EXA_BUDGET_SCOPE_ID === undefined
-        ? {}
-        : { exaBudgetScopeId: env.EXA_BUDGET_SCOPE_ID }),
-      ...(env.FAA_JEV_SOURCE_SIGNAL_IDS === undefined
-        ? {}
-        : { jevSourceSignalIds: env.FAA_JEV_SOURCE_SIGNAL_IDS }),
-    });
-    log("info", "ensemble.scheduler_started", {
-      analystMode: env.FAA_ANALYST_MODE,
-      exaConfigured: env.EXA_API_KEY !== undefined,
-      exaScopeConfigured: env.EXA_BUDGET_SCOPE_ID !== undefined,
-      jevSourceScope:
-        env.FAA_JEV_SOURCE_SIGNAL_IDS === undefined
-          ? "full"
-          : env.FAA_JEV_SOURCE_SIGNAL_IDS.length,
-      openRouterConfigured: env.OPENROUTER_API_KEY !== undefined,
-    });
+    // Disabled analyst mode leaves worker health and queue lifecycle active,
+    // but starts no investor pipeline scheduler stages or timers.
+    if (env.FAA_ANALYST_MODE === "disabled") {
+      log("info", "ensemble.scheduler_disabled", {
+        analystMode: env.FAA_ANALYST_MODE,
+        reason: "analyst_mode_disabled",
+      });
+    } else {
+      // Cheap Jev, persistent Muse, and database-only reconciliation use
+      // independent locks. Startup passes the typed mode and immutable scope;
+      // the scheduler never creates or activates provider allowance.
+      ensembleScheduler = startEnsembleScheduler({
+        logger: log,
+        analystMode: env.FAA_ANALYST_MODE,
+        ...(env.EXA_BUDGET_SCOPE_ID === undefined
+          ? {}
+          : { exaBudgetScopeId: env.EXA_BUDGET_SCOPE_ID }),
+        ...(env.FAA_JEV_SOURCE_SIGNAL_IDS === undefined
+          ? {}
+          : { jevSourceSignalIds: env.FAA_JEV_SOURCE_SIGNAL_IDS }),
+      });
+      log("info", "ensemble.scheduler_started", {
+        analystMode: env.FAA_ANALYST_MODE,
+        exaConfigured: env.EXA_API_KEY !== undefined,
+        exaScopeConfigured: env.EXA_BUDGET_SCOPE_ID !== undefined,
+        jevSourceScope:
+          env.FAA_JEV_SOURCE_SIGNAL_IDS === undefined
+            ? "full"
+            : env.FAA_JEV_SOURCE_SIGNAL_IDS.length,
+        openRouterConfigured: env.OPENROUTER_API_KEY !== undefined,
+      });
+    }
   } catch (error) {
     try {
       await stopComponents(healthServer, queue, supervisor);
