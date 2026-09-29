@@ -393,7 +393,11 @@ export function investorRankingSql(options: InvestorRankingSqlOptions): SQL {
   }
 
   return sql`
-    WITH proof AS (
+    -- PostgreSQL otherwise inlines these singly referenced CTEs, re-evaluating
+    -- the complete current-proof predicate and final-review EXISTS checks in
+    -- downstream score and JSON projections. Materialization preserves one
+    -- complete proof evaluation per source signal for those projections.
+    WITH proof AS MATERIALIZED (
       SELECT
         s.id AS signal_id,
         s.raw_name,
@@ -506,9 +510,20 @@ export function investorRankingSql(options: InvestorRankingSqlOptions): SQL {
         LIMIT 1
       ) analyst ON TRUE
       WHERE ${sourceScope}
-    ), facts AS (
+    ), facts AS MATERIALIZED (
       SELECT
-        proof.*,
+        proof.signal_id,
+        proof.raw_name,
+        proof.raw_domain,
+        proof.created_at,
+        proof.signal_updated_at,
+        proof.review_updated_at,
+        proof.jev_updated_at,
+        proof.result_updated_at,
+        proof.muse_updated_at,
+        proof.analyst_updated_at,
+        proof.triage_current,
+        proof.jev_parsed,
         proof.review_input_manifest->'evidence' AS evidence,
         (
           proof.triage_current
@@ -645,7 +660,7 @@ export function investorRankingSql(options: InvestorRankingSqlOptions): SQL {
           )
         ) AS aligned_final_review
       FROM proof
-    ), scored AS (
+    ), scored AS MATERIALIZED (
       SELECT
         facts.*,
         CASE
