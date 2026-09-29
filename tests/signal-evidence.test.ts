@@ -309,6 +309,149 @@ describe("raw signal official-site identity", () => {
     expect(result).toMatchObject({
       status: "ambiguous",
       nameMatched: false,
+    });
+  });
+
+  it("rejects chamber member copy and its context-stripped retained quote", () => {
+    const pageUrl =
+      "https://members.nashuachamber.com/list/member/bae-systems-20240";
+    const signal = {
+      rawName: "BAE SYSTEMS",
+      uei: null,
+      cage: null,
+      city: "Nashua",
+      state: "NH",
+    } as const;
+    const content = [
+      "<title>BAE Systems | Manufacturing - Greater Nashua Chamber of Commerce</title>",
+      "<h1>BAE Systems</h1>",
+      "<h5>Categories</h5><p>Manufacturing</p>",
+      '<a href="http://www.baesystems.com">Visit Website</a>',
+      "<h3>About Us</h3>",
+      "<p>At BAE Systems, we provide some of the world's most advanced, technology-led defense, aerospace and security solutions.</p>",
+      "<p>PO Box 868, NHQ1-747 Nashua NH 03061</p>",
+      "<footer>60 Main Street, Suite 200 Nashua, NH 03060 © 2026 Greater Nashua Chamber of Commerce. All Rights Reserved.</footer>",
+    ].join("");
+    const retainedQuote = [
+      "At BAE Systems, we provide some of the world's most advanced, technology-led defense, aerospace and security solutions.",
+      "Nashua, NH 03060",
+    ].join("\n");
+
+    for (const evidence of [content, retainedQuote]) {
+      expect(
+        assessSignalSiteIdentity(signal, [evidence], [pageUrl]),
+      ).toMatchObject({
+        status: "ambiguous",
+        nameMatched: false,
+        corroboratedBy: null,
+      });
+    }
+    const assessment = assessSignalSiteIdentity(signal, [content], [pageUrl]);
+    expect(
+      buildSignalIdentityQuote(content, pageUrl, signal, assessment),
+    ).toBe("");
+  });
+
+  it("rejects a copied target Organization when the site publishes data profiles", () => {
+    const signal = {
+      rawName: "Avtech Tyee Inc",
+      uei: null,
+      cage: null,
+      city: "Everett",
+      state: "WA",
+    } as const;
+    const pageUrl = "https://trade-data.example/records/avtech-tyee";
+    const content = [
+      `<script type="application/ld+json">${JSON.stringify({
+        "@context": "https://schema.org",
+        "@graph": [
+          {
+            "@type": "WebSite",
+            url: "https://trade-data.example/",
+            publisher: {
+              "@type": "Organization",
+              name: "Global Trade Data Ltd",
+            },
+          },
+          {
+            "@type": "Organization",
+            name: signal.rawName,
+            url: "https://trade-data.example/",
+          },
+        ],
+      })}</script>`,
+      "<nav>Our Data Pricing Market Intelligence</nav>",
+      "<main>Supplier profile. Avtech Tyee Inc imports and exports aircraft components. Address: 6500 Merrill Creek Parkway, Everett, WA 98203.</main>",
+      "<footer>© Copyright 2026, Global Trade Data Ltd. All rights reserved.</footer>",
+    ].join("");
+    expect(
+      assessSignalSiteIdentity(signal, [content], [pageUrl]),
+    ).toMatchObject({
+      status: "ambiguous",
+      nameMatched: false,
+      corroboratedBy: null,
+    });
+
+    const retainedPageUrl =
+      "https://data.example/en/company/avtech-tyee-inc/4d4ebc460fa287d13610f99e08c1527a3288e049846f6cf33e60fb0a8685246f";
+    const retainedQuote = [
+      '[normalized JSON-LD publisher evidence; not a verbatim quote; role=Organization.root; locator="https://data.example"]',
+      '<script type="application/ld+json">{"@type":"Organization","url":"https://data.example","name":"Avtech Tyee Inc"}</script>',
+      "6500 Merrill Creek Parkway Everett, WA 98203",
+    ].join("\n");
+    expect(
+      assessSignalSiteIdentity(
+        signal,
+        [retainedQuote],
+        [retainedPageUrl],
+      ),
+    ).toMatchObject({
+      status: "ambiguous",
+      nameMatched: false,
+      corroboratedBy: null,
+    });
+  });
+
+  it("preserves a manufacturer page hosted within its parent's site", () => {
+    const pageUrl =
+      "https://www.pccfasteners.com/companies/pcc-fasteners/pb-fasteners.html";
+    const signal = {
+      rawName: "PB Fasteners",
+      uei: null,
+      cage: null,
+      city: "Gardena",
+      state: "CA",
+    } as const;
+    const content = [
+      "<title>PCC Fasteners | PCC Fasteners - PB Fasteners</title>",
+      "<h1>PCC Fasteners - PB Fasteners</h1>",
+      "<h2>PB Fasteners</h2>",
+      "<p>Our company manufactures airframe structural bolts, fuse pins, screws, and nuts for aerospace customers.</p>",
+      "<p>PB Fasteners is devoted to manufacturing high-strength aerospace fasteners and maintains its own quality system.</p>",
+      "<address>1700 W. 132nd Street, Gardena, CA 90249</address>",
+    ].join("");
+    const assessment = assessSignalSiteIdentity(
+      signal,
+      [content],
+      [pageUrl],
+    );
+    const quote = buildSignalIdentityQuote(
+      content,
+      pageUrl,
+      signal,
+      assessment,
+    );
+
+    expect(assessment).toMatchObject({
+      status: "verified",
+      nameMatched: true,
+      corroboratedBy: "location",
+    });
+    expect(quote).not.toBe("");
+    expect(quote.length).toBeLessThanOrEqual(500);
+    expect(assessSignalSiteIdentity(signal, [quote], [pageUrl])).toMatchObject({
+      status: "verified",
+      nameMatched: true,
       corroboratedBy: "location",
     });
   });
@@ -1517,6 +1660,350 @@ describe.skipIf(!DB_TESTS_ENABLED)("official site retry semantics (DB)", () => {
           status: "unknown",
           supportEvidenceIds: [],
         });
+        expect(publisherOnlyRejected.researchEvidence.website).toMatchObject({
+          status: "not_checked",
+          offering: "unknown",
+          namedProductEvidenceIds: [],
+        });
+
+        const candidateId = randomUUID();
+        const candidateSignal = {
+          ...signal,
+          id: candidateId,
+          sourceLocator: `test:${candidateId}`,
+          sourceFingerprint: `signal-evidence-test:${candidateId}`,
+          city: "Denver",
+          state: "CO",
+        };
+        const candidateEvidence: SourcedSignalResearchEvidence = {
+          ...currentEvidence,
+          signalId: candidateId,
+          sourceContext: {
+            ...currentEvidence.sourceContext,
+            sourceLocator: candidateSignal.sourceLocator,
+            sourceFingerprint: candidateSignal.sourceFingerprint,
+            city: candidateSignal.city,
+            state: candidateSignal.state,
+          },
+        };
+        const candidatePublisherText = [
+          "Beacon Aerospace LLC designs and manufactures aerospace controls for aircraft operators.",
+          "Product, quality, engineering, and customer support resources are published by our team.",
+          "Copyright © 2026 Beacon Aerospace LLC. All Rights Reserved.",
+        ].join(" ");
+        const candidatePublisher: typeof publisherObservation = {
+          ...publisherObservation,
+          requestHash: "9".repeat(64),
+          body: candidatePublisherText,
+          originalByteLength: candidatePublisherText.length,
+          retainedCharacters: candidatePublisherText.length,
+          sourceReferences: publisherObservation.sourceReferences.map(
+            (reference) => ({
+              ...reference,
+              contentSha256: "9".repeat(64),
+            }),
+          ),
+        };
+        await tx.insert(sourceSignals).values(candidateSignal);
+        const retainedCandidate = await admitSignalResourceEvidence({
+          db: tx as unknown as Database,
+          signal: candidateSignal,
+          currentEvidence: candidateEvidence,
+          observations: [candidatePublisher],
+        });
+        expect(retainedCandidate.researchEvidence.identity).toMatchObject({
+          status: "ambiguous",
+          verifiedDomain: null,
+          proofEvidenceIds: [],
+        });
+        expect(retainedCandidate.researchEvidence.evidenceRefs).toEqual([
+          expect.objectContaining({
+            role: "checked_only",
+            stage: "domain",
+            url: "https://beacon.test/",
+          }),
+        ]);
+
+        const candidateReplacementText = [
+          "Unrelated Robotics Corporation designs warehouse automation systems.",
+          "Its headquarters are located in Seattle, Washington.",
+          "Product and support resources serve logistics customers.",
+        ].join(" ");
+        const candidateReplacement: typeof publisherObservation = {
+          ...candidatePublisher,
+          requestHash: "a".repeat(64),
+          body: candidateReplacementText,
+          originalByteLength: candidateReplacementText.length,
+          retainedCharacters: candidateReplacementText.length,
+          sourceReferences: candidatePublisher.sourceReferences.map(
+            (reference) => ({
+              ...reference,
+              contentSha256: "a".repeat(64),
+              retrievedAt: "2026-09-29T12:00:00.000Z",
+            }),
+          ),
+        };
+        const supersededCandidate = await admitSignalResourceEvidence({
+          db: tx as unknown as Database,
+          signal: candidateSignal,
+          currentEvidence: retainedCandidate.researchEvidence,
+          observations: [candidateReplacement],
+        });
+        expect(supersededCandidate.researchEvidence.identity).toMatchObject({
+          status: "ambiguous",
+          verifiedDomain: null,
+          proofEvidenceIds: [],
+        });
+        expect(
+          supersededCandidate.researchEvidence.evidenceRefs.filter(
+            (reference) =>
+              reference.stage === "domain" &&
+              reference.url === "https://beacon.test/",
+          ),
+        ).toEqual([]);
+
+        const separateLocationText =
+          "Our office is located at 100 Flight Way, Denver, CO 80202. Contact this office for technical support.";
+        const separateLocation: typeof publisherObservation = {
+          ...candidatePublisher,
+          requestHash: "b".repeat(64),
+          body: separateLocationText,
+          originalByteLength: separateLocationText.length,
+          retainedCharacters: separateLocationText.length,
+          sourceReferences: candidatePublisher.sourceReferences.map(
+            (reference) => ({
+              ...reference,
+              locator: "https://beacon.test/contact",
+              finalUrl: "https://beacon.test/contact",
+              contentSha256: "b".repeat(64),
+              retrievedAt: "2026-09-29T12:05:00.000Z",
+            }),
+          ),
+        };
+        const noResurrection = await admitSignalResourceEvidence({
+          db: tx as unknown as Database,
+          signal: candidateSignal,
+          currentEvidence: supersededCandidate.researchEvidence,
+          observations: [separateLocation],
+        });
+        expect(noResurrection.researchEvidence.identity).toMatchObject({
+          status: "ambiguous",
+          verifiedDomain: null,
+          proofEvidenceIds: [],
+        });
+
+        const primaryOnlyId = randomUUID();
+        const primaryOnlySignal = {
+          ...signal,
+          id: primaryOnlyId,
+          sourceLocator: `test:${primaryOnlyId}`,
+          sourceFingerprint: `signal-evidence-test:${primaryOnlyId}`,
+          uei: "ABC123DEF456",
+          cage: null,
+          city: null,
+          state: null,
+        };
+        const primaryOnlyEvidence: SourcedSignalResearchEvidence = {
+          ...currentEvidence,
+          signalId: primaryOnlyId,
+          sourceContext: {
+            ...currentEvidence.sourceContext,
+            sourceLocator: primaryOnlySignal.sourceLocator,
+            sourceFingerprint: primaryOnlySignal.sourceFingerprint,
+            uei: primaryOnlySignal.uei,
+            cage: primaryOnlySignal.cage,
+            city: primaryOnlySignal.city,
+            state: primaryOnlySignal.state,
+          },
+          identity: {
+            ...currentEvidence.identity,
+            status: "verified",
+            verifiedDomain: "stale-publisher.test",
+          },
+          website: {
+            ...currentEvidence.website,
+            status: "supported",
+            excerpts: "Unvalidated stale publisher facts.",
+            productHints: ["Unvalidated stale product"],
+          },
+        };
+        await tx.insert(sourceSignals).values(primaryOnlySignal);
+        const primaryOnly = await admitSignalResourceEvidence({
+          db: tx as unknown as Database,
+          signal: primaryOnlySignal,
+          currentEvidence: primaryOnlyEvidence,
+          observations: [primaryObservation],
+        });
+        expect(primaryOnly.researchEvidence.identity).toMatchObject({
+          status: "verified",
+          verifiedDomain: null,
+        });
+        expect(primaryOnly.researchEvidence.identity.proofEvidenceIds).toHaveLength(
+          1,
+        );
+        expect(primaryOnly.researchEvidence.evidenceRefs).toEqual([
+          expect.objectContaining({
+            role: "support",
+            stage: "domain",
+            sourceKind: "registry",
+            url: "sam://entity/ABC123DEF456",
+          }),
+        ]);
+        expect(primaryOnly.researchEvidence.website).toMatchObject({
+          status: "not_checked",
+          offering: "unknown",
+          excerpts: "",
+          productHints: [],
+          namedProductEvidenceIds: [],
+        });
+
+        const unrelatedPrimaryFollowupText = [
+          "Unrelated Robotics Corporation designs warehouse automation systems.",
+          "Its headquarters are located in Seattle, Washington.",
+          "Product and support resources serve logistics customers.",
+        ].join(" ");
+        const unrelatedPrimaryFollowup: typeof publisherObservation = {
+          ...publisherObservation,
+          requestHash: "6".repeat(64),
+          body: unrelatedPrimaryFollowupText,
+          originalByteLength: unrelatedPrimaryFollowupText.length,
+          retainedCharacters: unrelatedPrimaryFollowupText.length,
+          sourceReferences: publisherObservation.sourceReferences.map(
+            (reference) => ({
+              ...reference,
+              locator: "https://unrelated.test/",
+              finalUrl: "https://unrelated.test/",
+              contentSha256: "6".repeat(64),
+            }),
+          ),
+        };
+        const retainedPrimaryOnly = await admitSignalResourceEvidence({
+          db: tx as unknown as Database,
+          signal: primaryOnlySignal,
+          currentEvidence: primaryOnly.researchEvidence,
+          observations: [unrelatedPrimaryFollowup],
+        });
+        expect(retainedPrimaryOnly.researchEvidence.identity).toEqual(
+          primaryOnly.researchEvidence.identity,
+        );
+        expect(retainedPrimaryOnly.researchEvidence.website).toMatchObject({
+          status: "not_checked",
+          offering: "unknown",
+          excerpts: "",
+          productHints: [],
+          namedProductEvidenceIds: [],
+        });
+
+        const checkedOnlyPrimary = await admitSignalResourceEvidence({
+          db: tx as unknown as Database,
+          signal: primaryOnlySignal,
+          currentEvidence: {
+            ...primaryOnly.researchEvidence,
+            evidenceRefs: primaryOnly.researchEvidence.evidenceRefs.map(
+              (reference) => ({ ...reference, role: "checked_only" as const }),
+            ),
+          },
+          observations: [unrelatedPrimaryFollowup],
+        });
+        expect(checkedOnlyPrimary.researchEvidence.identity).toMatchObject({
+          status: "ambiguous",
+          verifiedDomain: null,
+          proofEvidenceIds: [],
+        });
+
+        const retainedLocationPublisherText = [
+          "Beacon Aerospace LLC designs and manufactures aerospace controls.",
+          "Headquartered at 100 Flight Way, Denver, CO 80202.",
+          "Copyright © 2026 Beacon Aerospace LLC. All Rights Reserved.",
+        ].join(" ");
+        const retainedLocationPublisher: typeof publisherObservation = {
+          ...publisherObservation,
+          requestHash: "7".repeat(64),
+          body: retainedLocationPublisherText,
+          originalByteLength: retainedLocationPublisherText.length,
+          retainedCharacters: retainedLocationPublisherText.length,
+          sourceReferences: publisherObservation.sourceReferences.map(
+            (reference) => ({
+              ...reference,
+              contentSha256: "7".repeat(64),
+            }),
+          ),
+        };
+        const retainedPrimaryWebsite = await admitSignalResourceEvidence({
+          db: tx as unknown as Database,
+          signal: primaryOnlySignal,
+          currentEvidence: primaryOnly.researchEvidence,
+          observations: [retainedLocationPublisher],
+        });
+        expect(retainedPrimaryWebsite.researchEvidence.identity).toMatchObject({
+          status: "verified",
+          verifiedDomain: "beacon.test",
+        });
+        expect(
+          retainedPrimaryWebsite.researchEvidence.identity.proofEvidenceIds,
+        ).toHaveLength(2);
+        const retainedPrimaryProofs =
+          retainedPrimaryWebsite.researchEvidence.evidenceRefs.filter(
+            (reference) =>
+              retainedPrimaryWebsite.researchEvidence.identity.proofEvidenceIds.includes(
+                reference.evidenceId,
+              ),
+          );
+        expect(retainedPrimaryProofs).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              sourceKind: "registry",
+              quote: expect.stringContaining("location: Denver, CO"),
+            }),
+            expect.objectContaining({
+              sourceKind: "official_site",
+              url: "https://beacon.test/",
+            }),
+          ]),
+        );
+
+        const freshConflictingPrimary: typeof primaryObservation = {
+          ...primaryObservation,
+          requestHash: "8".repeat(64),
+          records: primaryObservation.records.map((record) => ({
+            ...record,
+            sourceFingerprint: "sam-beacon-abc123-phoenix",
+            sourceLocator: "sam://entity/ABC123DEF456?revision=phoenix",
+            city: "Phoenix",
+            state: "AZ",
+            payloadJson: JSON.stringify({
+              legalName: signal.rawName,
+              uei: "ABC123DEF456",
+              city: "Phoenix",
+              state: "AZ",
+            }),
+          })),
+        };
+        const refreshedPrimary = await admitSignalResourceEvidence({
+          db: tx as unknown as Database,
+          signal: primaryOnlySignal,
+          currentEvidence: primaryOnly.researchEvidence,
+          observations: [freshConflictingPrimary],
+        });
+        expect(refreshedPrimary.researchEvidence.identity).toMatchObject({
+          status: "verified",
+          verifiedDomain: null,
+        });
+        expect(
+          refreshedPrimary.researchEvidence.identity.proofEvidenceIds,
+        ).toHaveLength(1);
+        const refreshedPrimaryProof =
+          refreshedPrimary.researchEvidence.evidenceRefs.find((reference) =>
+            refreshedPrimary.researchEvidence.identity.proofEvidenceIds.includes(
+              reference.evidenceId,
+            ),
+          );
+        expect(refreshedPrimaryProof?.quote).toContain(
+          "location: Phoenix, AZ",
+        );
+        expect(refreshedPrimaryProof?.quote).not.toContain(
+          "location: Denver, CO",
+        );
 
         const transitionId = randomUUID();
         const transitionSignal = {
@@ -1574,6 +2061,53 @@ describe.skipIf(!DB_TESTS_ENABLED)("official site retry semantics (DB)", () => {
           status: "acquired",
           owner: "Atlas Group",
         });
+
+        const replacementText = [
+          "Unrelated Robotics Corporation designs warehouse automation systems.",
+          "Its headquarters are located in Seattle, Washington.",
+          "Product and support resources serve logistics customers.",
+        ].join(" ");
+        const replacementPage: typeof publisherObservation = {
+          ...transitionPage,
+          requestHash: "e".repeat(64),
+          body: replacementText,
+          originalByteLength: replacementText.length,
+          retainedCharacters: replacementText.length,
+          sourceReferences: transitionPage.sourceReferences.map(
+            (reference) => ({
+              ...reference,
+              contentSha256: "e".repeat(64),
+              retrievedAt: "2026-09-29T12:00:00.000Z",
+            }),
+          ),
+        };
+        const superseded = await admitSignalResourceEvidence({
+          db: tx as unknown as Database,
+          signal: transitionSignal,
+          currentEvidence: initiallyVerified.researchEvidence,
+          observations: [replacementPage],
+        });
+        expect(superseded.researchEvidence.identity).toMatchObject({
+          status: "ambiguous",
+          verifiedDomain: null,
+          proofEvidenceIds: [],
+        });
+        expect(superseded.researchEvidence.website).toMatchObject({
+          status: "not_checked",
+          offering: "unknown",
+          excerpts: "",
+          productHints: [],
+          namedProductEvidenceIds: [],
+        });
+        expect(superseded.researchEvidence.checkedSources).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              url: "https://beacon.test/",
+              contentSha256: "e".repeat(64),
+              retrievedAt: "2026-09-29T12:00:00.000Z",
+            }),
+          ]),
+        );
 
         const invalidated = await admitSignalResourceEvidence({
           db: tx as unknown as Database,
@@ -2769,6 +3303,7 @@ describe("sourced product and size semantics", () => {
       fetchedWebsitePages(
         "We are headquartered in Washington, DC.",
         "We are headquartered in Washington, District of Columbia.",
+        "We are headquartered in Washington, D.C.",
       ),
       "Beacon Aerospace LLC",
     );
@@ -2777,6 +3312,118 @@ describe("sourced product and size semantics", () => {
       headquartersStatus: "supported",
       headquarters: { city: "Washington", state: "DC", country: "US" },
     });
+  });
+
+  it("keeps NMB's governed headquarters separate from its listed offices", () => {
+    const statement =
+      "NMB Technologies Corporation, a MinebeaMitsumi Group Company, is headquartered in Novi, Michigan, with offices in San Jose, CA, Chatsworth, CA, Marysville, OH and Boston, MA.";
+    const facts = extractWebsiteFacts(
+      fetchedWebsiteWithTitle("About Us | NMB Technologies", statement),
+      "NMB Technologies Corporation",
+    );
+
+    expect(facts).toMatchObject({
+      headquartersStatus: "supported",
+      headquarters: { city: "Novi", state: "MI", country: "US" },
+      headquartersObservations: [
+        { city: "Novi", state: "MI", country: "US" },
+      ],
+    });
+    expect(
+      facts.headquartersDocuments.map((document) => document.quote),
+    ).toEqual([statement]);
+  });
+
+  it("parses only the governed US address before office or parent clauses", () => {
+    const address = extractWebsiteFacts(
+      fetchedWebsite(
+        "Our headquarters are located at 123 Aviation Way, Austin, Texas 78701, with offices in Denver, CO and Boston, MA.",
+      ),
+      "Beacon Aerospace LLC",
+    );
+    const parent = extractWebsiteFacts(
+      fetchedWebsite(
+        "We are headquartered in Austin, Texas, while our parent is headquartered in Chicago, Illinois.",
+      ),
+      "Beacon Aerospace LLC",
+    );
+
+    expect(address).toMatchObject({
+      headquartersStatus: "supported",
+      headquarters: { city: "Austin", state: "TX", country: "US" },
+    });
+    expect(parent).toMatchObject({
+      headquartersStatus: "supported",
+      headquarters: { city: "Austin", state: "TX", country: "US" },
+    });
+  });
+
+  it("preserves a multiword foreign country in the governed location", () => {
+    const facts = extractWebsiteFacts(
+      fetchedWebsite(
+        "Our headquarters are in Port of Spain, Trinidad and Tobago, with offices in Miami, FL.",
+      ),
+      "Beacon Aerospace LLC",
+    );
+
+    expect(facts).toMatchObject({
+      headquartersStatus: "supported",
+      headquarters: {
+        city: "Port of Spain",
+        state: null,
+        country: "Trinidad and Tobago",
+      },
+    });
+  });
+
+  it("does not extend headquarters into trailing predicates or office clauses", () => {
+    const foreignWithOffice = extractWebsiteFacts(
+      fetchedWebsite(
+        "We are headquartered in Toronto, Canada with offices in Austin, TX.",
+      ),
+      "Beacon Aerospace LLC",
+    );
+    const usWithPredicate = extractWebsiteFacts(
+      fetchedWebsite(
+        "We are headquartered in Austin, Texas and have 30 employees.",
+      ),
+      "Beacon Aerospace LLC",
+    );
+    const foreignWithUsOffice = extractWebsiteFacts(
+      fetchedWebsite(
+        "Our headquarters are in Toronto, Canada, and our US office is in Austin, TX.",
+      ),
+      "Beacon Aerospace LLC",
+    );
+
+    expect(foreignWithOffice).toMatchObject({
+      headquartersStatus: "supported",
+      headquarters: { city: "Toronto", state: null, country: "Canada" },
+    });
+    expect(usWithPredicate).toMatchObject({
+      headquartersStatus: "supported",
+      headquarters: { city: "Austin", state: "TX", country: "US" },
+    });
+    expect(foreignWithUsOffice).toMatchObject({
+      headquartersStatus: "supported",
+      headquarters: { city: "Toronto", state: null, country: "Canada" },
+    });
+  });
+
+  it("abstains from a compound headquarters location instead of combining it", () => {
+    const facts = extractWebsiteFacts(
+      fetchedWebsite(
+        "We are headquartered in Austin, Texas and Denver, Colorado, United States.",
+      ),
+      "Beacon Aerospace LLC",
+    );
+
+    expect(facts).toMatchObject({
+      headquartersStatus: "unknown",
+      headquarters: null,
+      headquartersObservations: [],
+    });
+    expect(facts.headquartersDocuments).toEqual([]);
   });
 
   it("attributes McNeil's current headcount and owned headquarters without borrowing nearby facts", () => {

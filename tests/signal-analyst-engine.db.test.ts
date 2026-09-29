@@ -602,6 +602,215 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       ).toHaveLength(0);
     });
 
+    it("promotes only jointly retained publisher and location proof across Muse admissions", async () => {
+      const observedAt = new Date("2026-09-28T12:00:00.000Z");
+      const publisherUrl = "https://nmbtc.com/";
+      const locationUrl = "https://nmbtc.com/contact";
+      const organizationId = `${publisherUrl}#organization`;
+      const publisherBody = [
+        `<script type="application/ld+json">${JSON.stringify({
+          "@context": "https://schema.org",
+          "@graph": [
+            {
+              "@type": "WebSite",
+              "@id": `${publisherUrl}#website`,
+              url: publisherUrl,
+              publisher: { "@id": organizationId },
+            },
+            {
+              "@type": "Organization",
+              "@id": organizationId,
+              name: "NMB Technologies Corporation",
+              url: publisherUrl,
+            },
+          ],
+        })}</script>`,
+        "Our product catalog includes cooling fans and precision motors for aerospace applications.",
+      ].join("\n");
+      const locationBody =
+        "Our office is located at 9730 Independence Avenue, Chatsworth, CA 91311. Contact this office for sales and technical support.";
+      const signalId = await createRawSignal("joint-identity-proof", {
+        rawName: "NMB Technologies Corporation",
+        rawDomain: "nmbtc.com",
+        uei: "NMBTC1234567",
+        cage: "0NMB1",
+        city: "Chatsworth",
+        state: "CA",
+      });
+      await runJev(signalId);
+      const scopeId = await createScope(signalId, "joint-identity-proof");
+      const requests = [
+        { tool: "public_page" as const, url: publisherUrl },
+        { tool: "public_page" as const, url: locationUrl },
+      ];
+      let modelCalls = 0;
+      let resourceCalls = 0;
+      const dependencies = museDependencies(
+        async (): Promise<AnalystModelCallResult> => {
+          const request = requests[modelCalls];
+          modelCalls += 1;
+          return {
+            turn:
+              request === undefined ? finalTurn() : actionTurn(request),
+            returnedModel: config.modelA,
+            costUsd: 0,
+          };
+        },
+        {
+          execute: async (context, request) => {
+            resourceCalls += 1;
+            if (request.tool !== "public_page") {
+              throw new Error("unexpected controlled resource request");
+            }
+            const body =
+              request.url === publisherUrl
+                ? publisherBody
+                : request.url === locationUrl
+                  ? locationBody
+                  : null;
+            if (body === null) {
+              throw new Error(`unexpected controlled page: ${request.url}`);
+            }
+            return successfulPublicPageObservation(request, context, body);
+          },
+        },
+        () => observedAt,
+      );
+      const options = museOptions(scopeId, {
+        maxModelCalls: 4,
+        maxResourceActions: 2,
+        maxActiveWorkMs: 30_000,
+      });
+
+      const publisherAdmission = await runMuseReviews(
+        getDatabase(),
+        options,
+        dependencies,
+      );
+      expect(publisherAdmission).toMatchObject({
+        evidenceRequeued: 1,
+        verified: 0,
+        stale: 0,
+      });
+      expect(resourceCalls).toBe(1);
+      let state = await runJev(signalId);
+      let researchEvidence = state.researchEvidence as {
+        identity?: {
+          status?: string;
+          verifiedDomain?: string | null;
+          proofEvidenceIds?: string[];
+        };
+        website?: {
+          status?: string;
+          excerpts?: string;
+          namedProductEvidenceIds?: string[];
+        };
+        evidenceRefs?: Array<{
+          evidenceId: string;
+          role: string;
+          stage: string;
+          url: string;
+          quote: string;
+          contentSha256: string;
+          retrievedAt: string;
+          sourceKind: string;
+          firstParty: boolean;
+        }>;
+      };
+      expect(researchEvidence.identity).toMatchObject({
+        status: "ambiguous",
+        verifiedDomain: null,
+        proofEvidenceIds: [],
+      });
+      expect(researchEvidence.website).toMatchObject({
+        status: "not_checked",
+        excerpts: "",
+        namedProductEvidenceIds: [],
+      });
+      const retainedPublisher = researchEvidence.evidenceRefs?.find(
+        (reference) =>
+          reference.stage === "domain" && reference.url === publisherUrl,
+      );
+      expect(retainedPublisher).toMatchObject({
+        role: "checked_only",
+        contentSha256: createHash("sha256").update(publisherBody).digest("hex"),
+        retrievedAt: observedAt.toISOString(),
+        sourceKind: "publisher_site",
+        firstParty: false,
+      });
+      expect(retainedPublisher?.quote).toContain(
+        "NMB Technologies Corporation",
+      );
+      expect(retainedPublisher?.quote).toContain("WebSite.publisher");
+      expect(retainedPublisher?.quote.length).toBeLessThanOrEqual(500);
+
+      const completedProof = await runMuseReviews(
+        getDatabase(),
+        options,
+        dependencies,
+      );
+      expect(completedProof).toMatchObject({
+        evidenceRequeued: 1,
+        verified: 0,
+        stale: 0,
+      });
+      expect(resourceCalls).toBe(2);
+      state = await runJev(signalId);
+      researchEvidence = state.researchEvidence as typeof researchEvidence;
+      expect(researchEvidence.identity).toMatchObject({
+        status: "verified",
+        verifiedDomain: "nmbtc.com",
+      });
+      const proofIds = researchEvidence.identity?.proofEvidenceIds ?? [];
+      const proofRefs =
+        researchEvidence.evidenceRefs?.filter((reference) =>
+          proofIds.includes(reference.evidenceId),
+        ) ?? [];
+      expect(proofRefs).toHaveLength(2);
+      expect(proofRefs).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            role: "support",
+            url: publisherUrl,
+            contentSha256: createHash("sha256")
+              .update(publisherBody)
+              .digest("hex"),
+            retrievedAt: observedAt.toISOString(),
+            sourceKind: "official_site",
+            firstParty: true,
+          }),
+          expect.objectContaining({
+            role: "support",
+            url: locationUrl,
+            contentSha256: createHash("sha256")
+              .update(locationBody)
+              .digest("hex"),
+            retrievedAt: observedAt.toISOString(),
+            sourceKind: "official_site",
+            firstParty: true,
+          }),
+        ]),
+      );
+      expect(
+        proofRefs.every(
+          (reference) =>
+            reference.quote.trim() !== "" && reference.quote.length <= 500,
+        ),
+      ).toBe(true);
+      expect(
+        proofRefs.find((reference) => reference.url === publisherUrl)?.quote,
+      ).toContain("NMB Technologies Corporation");
+      expect(
+        proofRefs.find((reference) => reference.url === publisherUrl)?.quote,
+      ).toContain("WebSite.publisher");
+      expect(
+        proofRefs.find((reference) => reference.url === locationUrl)?.quote,
+      ).toContain("Chatsworth, CA 91311");
+      expect(researchEvidence.website?.excerpts).not.toContain(
+        "cooling fans and precision motors",
+      );
+    });
+
     it("grounds published named products in their retained quote instead of unrelated website hints", async () => {
       const namedProductQuote =
         "Our most recent product updates include a redesign to our Mega Bore Valve system, and our IN-95 Inflator Adaptor.";

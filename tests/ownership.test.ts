@@ -126,6 +126,61 @@ describe("classifySentence acquisition verbs", () => {
     ).toMatchObject({ status: "acquired", owner: "TransDigm" });
   });
 
+  it("attributes strategic acquisition headlines only to a complete subject", () => {
+    const predicateOnly =
+      "Enhances Critical Aerospace Capabilities With Acquisition of PB Fasteners";
+    expect(classifySentence(predicateOnly, "PB Fasteners")).toMatchObject({
+      status: "acquired",
+      owner: null,
+      currentRelation: false,
+    });
+    expect(
+      classifySentence(
+        `Precision Castparts Corp. ${predicateOnly}`,
+        "PB Fasteners",
+      ),
+    ).toMatchObject({
+      status: "acquired",
+      owner: "Precision Castparts Corp",
+      currentRelation: false,
+    });
+  });
+
+  it("does not borrow headline decoration as the strategic buyer", () => {
+    expect(
+      classifySentence(
+        "Industry commentary discussed Legacy Holdings Inc. Enhances Critical Aerospace Capabilities With Acquisition of PB Fasteners",
+        "PB Fasteners",
+      ),
+    ).toMatchObject({
+      status: "acquired",
+      owner: null,
+      currentRelation: false,
+    });
+  });
+
+  it.each([
+    "Precision Castparts Corp. may enhance critical aerospace capabilities with acquisition of PB Fasteners.",
+    "Precision Castparts Corp. plans to enhance critical aerospace capabilities through acquisition of PB Fasteners.",
+    "Precision Castparts Corp. Enhances Critical Aerospace Capabilities With Acquisition of PB Fasteners, subject to regulatory approval.",
+  ])(
+    "does not treat a proposed or conditional strategic headline as completed",
+    (sentence) => {
+      expect(classifySentence(sentence, "PB Fasteners")).toBeNull();
+    },
+  );
+
+  it.each([
+    "Enhanced Critical Aerospace Capabilities With Acquisition of PB Fasteners",
+    "Accelerates Aerospace Growth Through Acquisition of PB Fasteners",
+    "Precision Castparts Corp. will accelerate aerospace growth through acquisition of PB Fasteners",
+  ])(
+    "fails closed for unsupported connector-governed acquisition syntax",
+    (sentence) => {
+      expect(classifySentence(sentence, "PB Fasteners")).toBeNull();
+    },
+  );
+
   it.each([
     "Atlas Group has not acquired Beacon Aerospace LLC.",
     "Atlas Group never acquired Beacon Aerospace LLC.",
