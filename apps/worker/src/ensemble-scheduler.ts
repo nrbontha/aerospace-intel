@@ -121,6 +121,15 @@ export async function runFunnelStages(input: {
   config: FunnelStageConfig;
   logger: QueueLogger;
 }): Promise<FunnelRunSummary> {
+  if (input.config.analystMode === "disabled") {
+    input.logger("info", "ensemble.scheduler_stages_skipped", {
+      analystMode: input.config.analystMode,
+      loop: input.loop,
+      reason: "analyst_mode_disabled",
+    });
+    return { completed: 0, failed: 0 };
+  }
+
   let completed = 0;
   let failed = 0;
   for (const stage of input.stages) {
@@ -155,6 +164,16 @@ export function startEnsembleScheduler(
   options: EnsembleSchedulerOptions,
 ): EnsembleSchedulerHandle {
   const config = resolveSchedulerConfig(options);
+  if (config.analystMode === "disabled") {
+    options.logger("info", "ensemble.scheduler_disabled", {
+      analystMode: config.analystMode,
+      reason: "analyst_mode_disabled",
+    });
+    return {
+      stop(): void {},
+    };
+  }
+
   let stopped = false;
   const fastLoop: EnsembleLoopState = { inFlight: false };
   const museLoop: EnsembleLoopState = { inFlight: false };

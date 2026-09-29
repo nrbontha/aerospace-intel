@@ -170,7 +170,7 @@ Explicit backfill controls (set on the worker; use the same model/policy values 
 | ----------------------------------------------------------------- | ----------------------------------------------------------------------------- |
 | `EXA_DAILY_BUDGET_USD`, `EXA_BUDGET_SCOPE_ID`                     | Additional daily constraint and explicit durable total-allowance identity    |
 | `OPENROUTER_MAX_COST_PER_DAY_USD`                                 | Recorded model-spend threshold across generic usage and FAA response receipts |
-| `FAA_ANALYST_MODE`                                              | `disabled`, `free_only`, or `bounded_paid`; paid mode also requires an active allowance |
+| `FAA_ANALYST_MODE`                                              | `disabled` starts no Jev, Muse, refresh, or promotion scheduler stages and logs `ensemble.scheduler_disabled`; `free_only` or `bounded_paid` enables them, with paid mode also requiring an active allowance |
 | `ENSEMBLE_BATCH_LIMIT`, `JEV_LADDER_CONCURRENCY`                  | Jev claim batch and parallelism                                               |
 | `FAA_JEV_SOURCE_SIGNAL_IDS`                                    | Optional cheap-screening UUID allowlist; an explicit empty list claims nothing |
 | `VERIFY_BATCH_LIMIT`, `ENSEMBLE_CONCURRENCY`                     | Muse claim batch and bounded parallelism                                      |
