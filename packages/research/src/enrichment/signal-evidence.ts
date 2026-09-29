@@ -383,15 +383,18 @@ function assessSignalIdentityContent(
   pageUrls: readonly (string | null)[],
   enforceMinimumTextLength: boolean,
 ): SignalIdentityAssessment {
-  const text = pageTexts.map(normalizePageText).join("\n\n");
-  const structuredPublisherMatched = pageTexts.some((content, index) => {
-    const pageUrl = pageUrls[index];
-    return (
-      pageUrl !== undefined &&
-      pageUrl !== null &&
-      structuredPublisherExcerpt(content, pageUrl, signal.rawName) !== null
-    );
+  const attributablePages = pageTexts.flatMap((content, index) => {
+    const pageUrl = pageUrls[index] ?? null;
+    return hasThirdPartyProfileContext(content, pageUrl, signal.rawName)
+      ? []
+      : [{ content, pageUrl, text: normalizePageText(content) }];
   });
+  const text = attributablePages.map((page) => page.text).join("\n\n");
+  const structuredPublisherMatched = attributablePages.some(
+    ({ content, pageUrl }) =>
+      pageUrl !== null &&
+      structuredPublisherExcerpt(content, pageUrl, signal.rawName) !== null,
+  );
   const textOverlapRatio = identityOverlapRatio(signal.rawName, text);
   const overlapRatio = structuredPublisherMatched ? 1 : textOverlapRatio;
   const plainPublisherMatched =
@@ -404,16 +407,18 @@ function assessSignalIdentityContent(
       ),
     );
   const nameMatched = plainPublisherMatched || structuredPublisherMatched;
+  const attributableContents = attributablePages.map((page) => page.content);
+  const attributableUrls = attributablePages.map((page) => page.pageUrl);
   const ueiAssessment = targetPublisherIdentifierAssessment(
-    pageTexts,
-    pageUrls,
+    attributableContents,
+    attributableUrls,
     signal.rawName,
     "UEI",
     signal.uei,
   );
   const cageAssessment = targetPublisherIdentifierAssessment(
-    pageTexts,
-    pageUrls,
+    attributableContents,
+    attributableUrls,
     signal.rawName,
     "CAGE",
     signal.cage,
@@ -787,6 +792,10 @@ export async function admitSignalResourceEvidence(
     ...checkedSourcesFromObservations(options.observations),
   ];
   const pages = admittedPages(options.observations);
+  const refreshedCurrentEvidence = supersedeRefreshedIdentityEvidence(
+    options.currentEvidence,
+    pages,
+  );
   const primary = admittedPrimaryRecords(options.observations);
   const ambiguousPrimaryCandidates = primary.ambiguous
     ? primary.records.map((record) => record.sourceLocator)
@@ -795,7 +804,7 @@ export async function admitSignalResourceEvidence(
     explicitlyConflictingPrimaryDomains(options.signal, pages, primary),
   );
   const retainedVerifiedDomain =
-    options.currentEvidence.identity.verifiedDomain;
+    refreshedCurrentEvidence.identity.verifiedDomain;
   if (
     retainedVerifiedDomain !== null &&
     primary.records.some(
@@ -807,16 +816,68 @@ export async function admitSignalResourceEvidence(
   ) {
     identityRejectedDomains.add(retainedVerifiedDomain);
   }
-  const retainedCurrentEvidence = invalidateRejectedPublisherEvidence(
-    options.currentEvidence,
+  const publisherConflictFilteredEvidence = invalidateRejectedPublisherEvidence(
+    refreshedCurrentEvidence,
     identityRejectedDomains,
+  );
+  const retainedPrimary = retainedPrimaryIdentities(
+    publisherConflictFilteredEvidence,
+    options.signal,
+    primary,
+  );
+  const retainedPrimaryEvidenceIds = new Set(
+    retainedPrimary.map((candidate) => candidate.evidenceId),
+  );
+  const registryProofIds = new Set(
+    publisherConflictFilteredEvidence.evidenceRefs
+      .filter(
+        (reference) =>
+          reference.stage === "domain" &&
+          reference.sourceKind === "registry" &&
+          publisherConflictFilteredEvidence.identity.proofEvidenceIds.includes(
+            reference.evidenceId,
+          ),
+      )
+      .map((reference) => reference.evidenceId),
+  );
+  const conflictFilteredCurrentEvidence =
+    registryProofIds.size === retainedPrimaryEvidenceIds.size
+      ? publisherConflictFilteredEvidence
+      : {
+          ...publisherConflictFilteredEvidence,
+          identity: {
+            ...publisherConflictFilteredEvidence.identity,
+            proofEvidenceIds:
+              publisherConflictFilteredEvidence.identity.proofEvidenceIds.filter(
+                (evidenceId) =>
+                  !registryProofIds.has(evidenceId) ||
+                  retainedPrimaryEvidenceIds.has(evidenceId),
+              ),
+          },
+        };
+  const identityPages = admittedIdentityProofPages(
+    conflictFilteredCurrentEvidence,
+    pages,
   );
   const identity = resolveAdmittedIdentity(
     options.signal,
-    retainedCurrentEvidence,
-    pages,
+    identityPages,
     primary,
     identityRejectedDomains,
+    retainedPrimary,
+  );
+  const invalidatedRetainedDomains = new Set(identityRejectedDomains);
+  const previousVerifiedDomain =
+    conflictFilteredCurrentEvidence.identity.verifiedDomain;
+  if (
+    previousVerifiedDomain !== null &&
+    (!identity.verified || identity.domain !== previousVerifiedDomain)
+  ) {
+    invalidatedRetainedDomains.add(previousVerifiedDomain);
+  }
+  const retainedCurrentEvidence = invalidateRejectedPublisherEvidence(
+    conflictFilteredCurrentEvidence,
+    invalidatedRetainedDomains,
   );
   const verifiedPages =
     identity.domain === null
@@ -825,38 +886,34 @@ export async function admitSignalResourceEvidence(
           (page) => normalizeCandidateDomain(page.url) === identity.domain,
         );
   const documents: PendingEvidenceDocument[] = [];
-  for (const page of verifiedPages) {
-    const pageAssessment = assessSignalSiteIdentity(
-      identity.identitySignal,
-      [page.text],
-      [page.url],
-    );
-    const proof = buildSignalIdentityQuote(
-      page.text,
-      page.url,
-      identity.identitySignal,
-      pageAssessment,
-    );
-    if (proof !== "") {
-      documents.push({
-        stage: "domain",
-        url: page.url,
-        title: page.title || `Official-site identity: ${options.signal.rawName}`,
-        quote: proof,
-        contentSha256: page.contentSha256,
-        retrievedAt: page.retrievedAt,
-        sourceKind: "official_site",
-        firstParty: true,
-        metadata: {
-          identityOutcome: "verified",
-          corroboratedBy: identity.corroboratedBy,
-          representation: page.representation,
-        },
-      });
+  if (identity.verified && identity.domain !== null) {
+    for (const proof of identity.proofQuotes) {
+      const page = identityPages[proof.pageIndex];
+      if (page === undefined) continue;
+      documents.push(
+        admittedIdentityDocument(
+          page,
+          proof.quote,
+          options.signal.rawName,
+          "verified",
+          identity.corroboratedBy,
+        ),
+      );
     }
+    for (const page of verifiedPages) {
+      documents.push(
+        websitePageDocument(page, options.signal.rawName),
+        ...websiteProductDocuments(page, options.signal.rawName),
+      );
+    }
+  } else {
     documents.push(
-      websitePageDocument(page, options.signal.rawName),
-      ...websiteProductDocuments(page, options.signal.rawName),
+      ...admittedIdentityCandidateDocuments(
+        options.signal,
+        pages,
+        identityPages,
+        identityRejectedDomains,
+      ),
     );
   }
   for (const support of identity.supportingPrimaryRecords) {
@@ -899,8 +956,8 @@ export async function admitSignalResourceEvidence(
     documents,
   );
   const evidenceRefs = dedupeEvidenceReferences([
-    ...options.currentEvidence.evidenceRefs,
     ...persisted.map(toEvidenceReference),
+    ...retainedCurrentEvidence.evidenceRefs,
   ]);
   const conflicts: string[] = [];
   const ownership = mergeOwnership(
@@ -925,7 +982,11 @@ export async function admitSignalResourceEvidence(
     conflicts,
   );
   const identityEvidenceIds = persisted
-    .filter((document) => document.stage === "domain")
+    .filter(
+      (document) =>
+        document.stage === "domain" &&
+        document.metadata["identityOutcome"] === "verified",
+    )
     .map((document) => document.evidenceId);
   const namedProductEvidenceIds = persisted
     .filter(
@@ -937,7 +998,9 @@ export async function admitSignalResourceEvidence(
     .map((document) => document.evidenceId);
   const identityStatus = identity.verified
     ? "verified"
-    : primary.ambiguous || pages.length > 0
+    : primary.ambiguous ||
+        identityPages.length > 0 ||
+        options.currentEvidence.identity.status === "verified"
       ? "ambiguous"
       : retainedCurrentEvidence.identity.status;
   const allNamedProducts = uniqueStrings([
@@ -965,12 +1028,13 @@ export async function admitSignalResourceEvidence(
     identity: {
       ...retainedCurrentEvidence.identity,
       status: identityStatus,
-      verifiedDomain:
-        identity.domain ?? retainedCurrentEvidence.identity.verifiedDomain,
-      proofEvidenceIds: uniqueStrings([
-        ...retainedCurrentEvidence.identity.proofEvidenceIds,
-        ...identityEvidenceIds,
-      ]),
+      verifiedDomain: identity.verified ? identity.domain : null,
+      proofEvidenceIds: identity.verified
+        ? uniqueStrings([
+            ...identity.retainedPrimaryEvidenceIds,
+            ...identityEvidenceIds,
+          ])
+        : [],
     },
     website: {
       status:
@@ -1019,9 +1083,29 @@ interface AdmittedPage extends WebsiteFetchedPage {
     | "provider_extracted_text";
 }
 
+interface AdmittedIdentityProofPage {
+  readonly content: string;
+  readonly finalUrl: string;
+  readonly title: string | null;
+  readonly contentSha256: string;
+  readonly retrievedAt: string;
+  readonly representation:
+    | "normalized_publisher_text"
+    | "provider_extracted_text"
+    | null;
+}
+
 interface AdmittedPrimarySet {
   readonly records: readonly AnalystPrimaryRecord[];
   readonly ambiguous: boolean;
+}
+
+interface RetainedPrimaryIdentity {
+  readonly evidenceId: string;
+  readonly identitySignal: Pick<
+    SignalEvidenceSourceSignal,
+    "rawName" | "uei" | "cage" | "city" | "state"
+  >;
 }
 
 function admittedPages(
@@ -1085,6 +1169,159 @@ function admittedPages(
   return dedupeAdmittedPages(pages);
 }
 
+function supersedeRefreshedIdentityEvidence(
+  evidence: SourcedSignalResearchEvidence,
+  pages: readonly AdmittedPage[],
+): SourcedSignalResearchEvidence {
+  if (pages.length === 0) return evidence;
+  const refreshedUrls = new Set(pages.map((page) => page.url));
+  const supersededEvidenceIds = new Set(
+    evidence.evidenceRefs
+      .filter(
+        (reference) =>
+          reference.stage === "domain" &&
+          (reference.sourceKind === "official_site" ||
+            reference.sourceKind === "publisher_site") &&
+          refreshedUrls.has(reference.url),
+      )
+      .map((reference) => reference.evidenceId),
+  );
+  if (supersededEvidenceIds.size === 0) return evidence;
+  return {
+    ...evidence,
+    identity: {
+      ...evidence.identity,
+      proofEvidenceIds: evidence.identity.proofEvidenceIds.filter(
+        (evidenceId) => !supersededEvidenceIds.has(evidenceId),
+      ),
+    },
+    evidenceRefs: evidence.evidenceRefs.filter(
+      (reference) => !supersededEvidenceIds.has(reference.evidenceId),
+    ),
+  };
+}
+
+function admittedIdentityProofPages(
+  current: SourcedSignalResearchEvidence,
+  pages: readonly AdmittedPage[],
+): AdmittedIdentityProofPage[] {
+  const freshPageUrls = new Set<string>();
+  const proofPages = pages.map((page) => {
+    freshPageUrls.add(page.url);
+    return admittedPageIdentityProofPage(page);
+  });
+  const retainedProofIds = new Set(current.identity.proofEvidenceIds);
+  for (const reference of current.evidenceRefs) {
+    if (
+      reference.stage !== "domain" ||
+      (reference.role !== "checked_only" &&
+        !retainedProofIds.has(reference.evidenceId)) ||
+      (reference.sourceKind !== "official_site" &&
+        reference.sourceKind !== "publisher_site") ||
+      reference.quote.trim() === "" ||
+      reference.quote.length > EVIDENCE_QUOTE_MAX_CHARS ||
+      normalizeCandidateDomain(reference.url) === null ||
+      freshPageUrls.has(reference.url)
+    ) {
+      continue;
+    }
+    proofPages.push({
+      content: reference.quote,
+      finalUrl: reference.url,
+      title: reference.title,
+      contentSha256: reference.contentSha256,
+      retrievedAt: reference.retrievedAt,
+      representation: null,
+    });
+  }
+  return proofPages;
+}
+
+function admittedPageIdentityProofPage(
+  page: AdmittedPage,
+): AdmittedIdentityProofPage {
+  return {
+    content: page.text,
+    finalUrl: page.url,
+    title: page.title || null,
+    contentSha256: page.contentSha256,
+    retrievedAt: page.retrievedAt,
+    representation: page.representation,
+  };
+}
+
+function admittedIdentityDocument(
+  page: AdmittedIdentityProofPage,
+  quote: string,
+  companyName: string,
+  identityOutcome: "verified" | "ambiguous",
+  corroboratedBy: "identifier" | "location" | null,
+): PendingEvidenceDocument {
+  return {
+    stage: "domain",
+    url: page.finalUrl,
+    title: page.title ?? `Official-site identity: ${companyName}`,
+    quote,
+    contentSha256: page.contentSha256,
+    retrievedAt: page.retrievedAt,
+    sourceKind:
+      identityOutcome === "verified" ? "official_site" : "publisher_site",
+    firstParty: identityOutcome === "verified",
+    metadata: {
+      identityOutcome,
+      corroboratedBy,
+      ...(page.representation === null
+        ? {}
+        : { representation: page.representation }),
+    },
+  };
+}
+
+function admittedIdentityCandidateDocuments(
+  signal: SignalEvidenceSourceSignal,
+  pages: readonly AdmittedPage[],
+  proofPages: readonly AdmittedIdentityProofPage[],
+  rejectedDomains: ReadonlySet<string>,
+): PendingEvidenceDocument[] {
+  const pagesByDomain = new Map<string, AdmittedIdentityProofPage[]>();
+  for (const page of proofPages) {
+    const domain = normalizeCandidateDomain(page.finalUrl);
+    if (domain === null) continue;
+    const grouped = pagesByDomain.get(domain) ?? [];
+    grouped.push(page);
+    pagesByDomain.set(domain, grouped);
+  }
+  const documents: PendingEvidenceDocument[] = [];
+  for (const page of pages) {
+    const domain = normalizeCandidateDomain(page.url);
+    if (domain === null || rejectedDomains.has(domain)) continue;
+    const grouped = pagesByDomain.get(domain) ?? [];
+    const assessment = assessSignalSiteIdentity(
+      signal,
+      grouped.map((candidate) => candidate.content),
+      grouped.map((candidate) => candidate.finalUrl),
+    );
+    const proofPage = admittedPageIdentityProofPage(page);
+    for (const quote of signalIdentityPageQuotes(
+      page.text,
+      page.url,
+      signal,
+      assessment,
+    )) {
+      documents.push(
+        admittedIdentityDocument(
+          proofPage,
+          quote,
+          signal.rawName,
+          "ambiguous",
+          assessment.corroboratedBy,
+        ),
+      );
+    }
+  }
+  return documents;
+}
+
 function admittedPrimaryRecords(
   observations: readonly AnalystResourceObservation[],
 ): AdmittedPrimarySet {
@@ -1116,6 +1353,91 @@ function admittedPrimaryRecords(
   };
 }
 
+function retainedPrimaryIdentities(
+  evidence: SourcedSignalResearchEvidence,
+  signal: SignalEvidenceSourceSignal,
+  primary: AdmittedPrimarySet,
+): RetainedPrimaryIdentity[] {
+  if (primary.ambiguous) return [];
+  const proofEvidenceIds = new Set(evidence.identity.proofEvidenceIds);
+  const retained: RetainedPrimaryIdentity[] = [];
+  for (const reference of evidence.evidenceRefs) {
+    if (
+      reference.stage !== "domain" ||
+      reference.role !== "support" ||
+      reference.sourceKind !== "registry" ||
+      !proofEvidenceIds.has(reference.evidenceId) ||
+      reference.quote.trim() === "" ||
+      reference.quote.length > EVIDENCE_QUOTE_MAX_CHARS
+    ) {
+      continue;
+    }
+    const legalName =
+      /(?:^|;\s*)legal name:\s*([^;\n]+)/iu.exec(reference.quote)?.[1]?.trim() ??
+      null;
+    if (legalName === null || !exactLegalName(signal.rawName, legalName)) {
+      continue;
+    }
+    const rawUei =
+      /(?:^|;\s*)UEI:\s*([^;\s]+)/iu.exec(reference.quote)?.[1]?.trim() ??
+      null;
+    const rawCage =
+      /(?:^|;\s*)CAGE:\s*([^;\s]+)/iu.exec(reference.quote)?.[1]?.trim() ??
+      null;
+    const location =
+      /(?:^|;\s*)location:\s*([^,;\n]+),\s*([^;\n]+)/iu.exec(reference.quote);
+    const uei =
+      rawUei !== null &&
+      normalizedValidPublishedIdentifier("UEI", rawUei) !== null
+        ? rawUei
+        : null;
+    const cage =
+      rawCage !== null &&
+      normalizedValidPublishedIdentifier("CAGE", rawCage) !== null
+        ? rawCage
+        : null;
+    const city = location?.[1]?.trim() || null;
+    const state = location?.[2]?.trim() || null;
+    if (
+      uei === null &&
+      cage === null &&
+      (city === null || state === null)
+    ) {
+      continue;
+    }
+    const retainedValues = { uei, cage, city, state };
+    if (
+      !primaryRecordCompatibleWithSignal(signal, retainedValues) ||
+      primary.records.some(
+        (record) =>
+          exactLegalName(signal.rawName, record.legalName) &&
+          !primaryRecordCompatibleWithSignal(
+            {
+              uei: signal.uei ?? uei,
+              cage: signal.cage ?? cage,
+              city: signal.city ?? city,
+              state: signal.state ?? state,
+            },
+            record,
+          ),
+      )
+    ) {
+      continue;
+    }
+    retained.push({
+      evidenceId: reference.evidenceId,
+      identitySignal: {
+        rawName: signal.rawName,
+        uei: signal.uei ?? uei,
+        cage: signal.cage ?? cage,
+        city: signal.city ?? city,
+        state: signal.state ?? state,
+      },
+    });
+  }
+  return retained;
+}
+
 interface ResolvedAdmittedIdentity {
   readonly verified: boolean;
   readonly domain: string | null;
@@ -1124,6 +1446,8 @@ interface ResolvedAdmittedIdentity {
     SignalEvidenceSourceSignal,
     "rawName" | "uei" | "cage" | "city" | "state"
   >;
+  readonly proofQuotes: readonly SignalIdentityPageQuote[];
+  readonly retainedPrimaryEvidenceIds: readonly string[];
   readonly supportingPrimaryRecords: readonly {
     readonly record: AnalystPrimaryRecord;
     readonly identitySignal: Pick<
@@ -1135,24 +1459,11 @@ interface ResolvedAdmittedIdentity {
 
 function resolveAdmittedIdentity(
   signal: SignalEvidenceSourceSignal,
-  current: SourcedSignalResearchEvidence,
-  pages: readonly AdmittedPage[],
+  pages: readonly AdmittedIdentityProofPage[],
   primary: AdmittedPrimarySet,
   rejectedDomains: ReadonlySet<string>,
+  retainedPrimary: readonly RetainedPrimaryIdentity[],
 ): ResolvedAdmittedIdentity {
-  if (
-    current.identity.status === "verified" &&
-    current.identity.verifiedDomain !== null &&
-    !rejectedDomains.has(current.identity.verifiedDomain)
-  ) {
-    return {
-      verified: true,
-      domain: current.identity.verifiedDomain,
-      corroboratedBy: null,
-      identitySignal: signal,
-      supportingPrimaryRecords: [],
-    };
-  }
   const directMatches = verifiedDomainMatches(signal, pages).filter(
     (match) => !rejectedDomains.has(match.domain),
   );
@@ -1164,6 +1475,10 @@ function resolveAdmittedIdentity(
       corroboratedBy: match.assessment.corroboratedBy,
       identitySignal: signal,
       supportingPrimaryRecords: [],
+      proofQuotes: match.proofQuotes,
+      retainedPrimaryEvidenceIds: retainedPrimary.map(
+        (candidate) => candidate.evidenceId,
+      ),
     };
   }
   if (directMatches.length > 1) {
@@ -1184,9 +1499,13 @@ function resolveAdmittedIdentity(
       : "location";
     return {
       verified: true,
-      domain: current.identity.verifiedDomain,
+      domain: null,
       corroboratedBy: basis,
       identitySignal: signal,
+      proofQuotes: [],
+      retainedPrimaryEvidenceIds: retainedPrimary.map(
+        (candidate) => candidate.evidenceId,
+      ),
       supportingPrimaryRecords: exactPrimary.map((record) => ({
         record,
         identitySignal: signal,
@@ -1228,10 +1547,61 @@ function resolveAdmittedIdentity(
       domain: match.domain,
       corroboratedBy: match.assessment.corroboratedBy,
       identitySignal: match.identitySignal,
+      proofQuotes: match.proofQuotes,
+      retainedPrimaryEvidenceIds: retainedPrimary.map(
+        (candidate) => candidate.evidenceId,
+      ),
       supportingPrimaryRecords: pagePrimaryMatches.map((candidate) => ({
         record: candidate.record,
         identitySignal: candidate.identitySignal,
       })),
+    };
+  }
+  const retainedPagePrimaryMatches = retainedPrimary.flatMap((candidate) =>
+    verifiedDomainMatches(candidate.identitySignal, pages).map((match) => ({
+      ...candidate,
+      ...match,
+    })),
+  );
+  const retainedMatchedDomains = uniqueStrings(
+    retainedPagePrimaryMatches.map((match) => match.domain),
+  );
+  if (
+    retainedMatchedDomains.length === 1 &&
+    retainedPagePrimaryMatches.length > 0
+  ) {
+    const match = retainedPagePrimaryMatches[0]!;
+    return {
+      verified: true,
+      domain: match.domain,
+      corroboratedBy: match.assessment.corroboratedBy,
+      identitySignal: match.identitySignal,
+      proofQuotes: match.proofQuotes,
+      retainedPrimaryEvidenceIds: retainedPrimary.map(
+        (candidate) => candidate.evidenceId,
+      ),
+      supportingPrimaryRecords: [],
+    };
+  }
+  if (retainedMatchedDomains.length > 1) {
+    return unresolvedAdmittedIdentity(signal);
+  }
+  if (retainedPrimary.length > 0) {
+    const retained = retainedPrimary[0]!;
+    return {
+      verified: true,
+      domain: null,
+      corroboratedBy:
+        retained.identitySignal.uei !== null ||
+        retained.identitySignal.cage !== null
+          ? "identifier"
+          : "location",
+      identitySignal: retained.identitySignal,
+      proofQuotes: [],
+      retainedPrimaryEvidenceIds: retainedPrimary.map(
+        (candidate) => candidate.evidenceId,
+      ),
+      supportingPrimaryRecords: [],
     };
   }
   return unresolvedAdmittedIdentity(signal);
@@ -1245,6 +1615,8 @@ function unresolvedAdmittedIdentity(
     domain: null,
     corroboratedBy: null,
     identitySignal: signal,
+    proofQuotes: [],
+    retainedPrimaryEvidenceIds: [],
     supportingPrimaryRecords: [],
   };
 }
@@ -1254,35 +1626,52 @@ function verifiedDomainMatches(
     SignalEvidenceSourceSignal,
     "rawName" | "uei" | "cage" | "city" | "state"
   >,
-  pages: readonly AdmittedPage[],
+  pages: readonly AdmittedIdentityProofPage[],
 ): readonly {
   readonly domain: string;
   readonly assessment: SignalIdentityAssessment;
+  readonly proofQuotes: readonly SignalIdentityPageQuote[];
 }[] {
-  const groups = new Map<string, AdmittedPage[]>();
-  for (const page of pages) {
-    const domain = normalizeCandidateDomain(page.url);
+  const groups = new Map<
+    string,
+    Array<{
+      readonly page: AdmittedIdentityProofPage;
+      readonly pageIndex: number;
+    }>
+  >();
+  for (const [pageIndex, page] of pages.entries()) {
+    const domain = normalizeCandidateDomain(page.finalUrl);
     if (domain === null) continue;
     const group = groups.get(domain) ?? [];
-    group.push(page);
+    group.push({ page, pageIndex });
     groups.set(domain, group);
   }
   const matches: Array<{
     readonly domain: string;
     readonly assessment: SignalIdentityAssessment;
+    readonly proofQuotes: readonly SignalIdentityPageQuote[];
   }> = [];
   for (const [domain, group] of groups) {
+    const groupedPages = group.map((entry) => entry.page);
     const assessment = assessSignalSiteIdentity(
       signal,
-      group.map((page) => page.text),
-      group.map((page) => page.url),
+      groupedPages.map((page) => page.content),
+      groupedPages.map((page) => page.finalUrl),
     );
-    const hasCompleteProof = group.some(
-      (page) =>
-        buildSignalIdentityQuote(page.text, page.url, signal, assessment) !== "",
+    const proofQuotes = buildSignalIdentityProofQuotes(
+      groupedPages,
+      signal,
+      assessment,
     );
-    if (assessment.status === "verified" && hasCompleteProof) {
-      matches.push({ domain, assessment });
+    if (proofQuotes.length > 0) {
+      matches.push({
+        domain,
+        assessment,
+        proofQuotes: proofQuotes.map((proof) => ({
+          pageIndex: group[proof.pageIndex]!.pageIndex,
+          quote: proof.quote,
+        })),
+      });
     }
   }
   return matches;
@@ -1321,6 +1710,7 @@ function explicitlyConflictingPrimaryDomains(
     );
     if (uei.conflicting || cage.conflicting) rejected.add(domain);
   }
+  const observedIdentityPages = pages.map(admittedPageIdentityProofPage);
   for (const record of primary.records) {
     if (
       !exactLegalName(signal.rawName, record.legalName) ||
@@ -1336,7 +1726,10 @@ function explicitlyConflictingPrimaryDomains(
       city: record.city,
       state: record.state,
     };
-    for (const match of verifiedDomainMatches(recordIdentity, pages)) {
+    for (const match of verifiedDomainMatches(
+      recordIdentity,
+      observedIdentityPages,
+    )) {
       rejected.add(match.domain);
     }
   }
@@ -1581,7 +1974,10 @@ function primaryRecordCompatibleWithSignal(
     SignalEvidenceSourceSignal,
     "uei" | "cage" | "city" | "state"
   >,
-  record: AnalystPrimaryRecord,
+  record: Pick<
+    SignalEvidenceSourceSignal,
+    "uei" | "cage" | "city" | "state"
+  >,
 ): boolean {
   return (
     !conflictingOptionalIdentity(signal.uei, record.uei) &&
@@ -1592,7 +1988,7 @@ function primaryRecordCompatibleWithSignal(
 
 function exactPrimaryLocation(
   signal: Pick<SignalEvidenceSourceSignal, "city" | "state">,
-  record: AnalystPrimaryRecord,
+  record: Pick<SignalEvidenceSourceSignal, "city" | "state">,
 ): boolean {
   return (
     signal.city !== null &&
@@ -1606,7 +2002,7 @@ function exactPrimaryLocation(
 
 function conflictingPrimaryLocation(
   signal: Pick<SignalEvidenceSourceSignal, "city" | "state">,
-  record: AnalystPrimaryRecord,
+  record: Pick<SignalEvidenceSourceSignal, "city" | "state">,
 ): boolean {
   const cityConflicts =
     signal.city !== null &&
@@ -1659,25 +2055,26 @@ function primaryIdentityDocument(
     `${primaryIssuer(record.sourceKey)} primary record; ` +
     `legal name: ${record.legalName}`;
   const corroboration = [
-    exactIdentifier(signal.uei, record.uei) && record.uei !== null
+    record.uei !== null &&
+    (signal.uei === null || exactIdentifier(signal.uei, record.uei))
       ? `UEI: ${record.uei}`
       : null,
-    exactIdentifier(signal.cage, record.cage) && record.cage !== null
+    record.cage !== null &&
+    (signal.cage === null || exactIdentifier(signal.cage, record.cage))
       ? `CAGE: ${record.cage}`
       : null,
-    signal.city !== null &&
-    signal.state !== null &&
     record.city !== null &&
     record.state !== null &&
-    HEADQUARTERS_VALUE_COLLATOR.compare(signal.city, record.city) === 0 &&
-    normalizeState(signal.state) === normalizeState(record.state)
+    (signal.city === null ||
+      HEADQUARTERS_VALUE_COLLATOR.compare(signal.city, record.city) === 0) &&
+    (signal.state === null ||
+      normalizeState(signal.state) === normalizeState(record.state))
       ? `location: ${record.city}, ${record.state}`
       : null,
   ].filter((value): value is string => value !== null);
-  const quote = corroboration
-    .map((field) => `${prefix}; ${field}`)
-    .find((candidate) => candidate.length <= EVIDENCE_QUOTE_MAX_CHARS);
-  if (quote === undefined) return null;
+  if (corroboration.length === 0) return null;
+  const quote = `${prefix}; ${corroboration.join("; ")}`;
+  if (quote.length > EVIDENCE_QUOTE_MAX_CHARS) return null;
   return {
     stage: "domain",
     url: record.sourceLocator,
@@ -3089,59 +3486,6 @@ function researchRevision(
   );
 }
 
-const US_STATE_CODES: Record<string, true> = {
-  AL: true,
-  AK: true,
-  AZ: true,
-  AR: true,
-  CA: true,
-  CO: true,
-  CT: true,
-  DE: true,
-  FL: true,
-  GA: true,
-  HI: true,
-  ID: true,
-  IL: true,
-  IN: true,
-  IA: true,
-  KS: true,
-  KY: true,
-  LA: true,
-  ME: true,
-  MD: true,
-  MA: true,
-  MI: true,
-  MN: true,
-  MS: true,
-  MO: true,
-  MT: true,
-  NE: true,
-  NV: true,
-  NH: true,
-  NJ: true,
-  NM: true,
-  NY: true,
-  NC: true,
-  ND: true,
-  OH: true,
-  OK: true,
-  OR: true,
-  PA: true,
-  RI: true,
-  SC: true,
-  SD: true,
-  TN: true,
-  TX: true,
-  UT: true,
-  VT: true,
-  VA: true,
-  WA: true,
-  WV: true,
-  WI: true,
-  WY: true,
-  DC: true,
-};
 
 interface ParsedLegalIdentity {
   readonly rootTokens: readonly string[];
@@ -3656,6 +4000,168 @@ function structuredPublisherMatches(
     if (publisher !== null) publishers.push(publisher);
   }
   return publishers;
+}
+
+function structuredWebsitePublisherNames(
+  content: string,
+  pageUrl: string,
+): readonly string[] {
+  const names: string[] = [];
+  const scripts =
+    /<script\b(?=[^>]*\btype\s*=\s*(?:"application\/ld\+json"|'application\/ld\+json'|application\/ld\+json))[^>]*>([\s\S]*?)<\/script\s*>/giu;
+  for (const match of content.matchAll(scripts)) {
+    const body = match[1]?.replace(/^\s*<!--|-->\s*$/gu, "").trim();
+    if (body === undefined || body === "") continue;
+    let document: unknown;
+    try {
+      document = JSON.parse(body);
+    } catch {
+      continue;
+    }
+    const roots = Array.isArray(document) ? document : [document];
+    const nodes: Record<string, unknown>[] = [];
+    for (const root of roots) {
+      if (typeof root !== "object" || root === null || Array.isArray(root)) {
+        continue;
+      }
+      const rootNode = root as Record<string, unknown>;
+      nodes.push(rootNode);
+      const graph = rootNode["@graph"];
+      if (Array.isArray(graph)) {
+        for (const entry of graph) {
+          if (
+            typeof entry === "object" &&
+            entry !== null &&
+            !Array.isArray(entry)
+          ) {
+            nodes.push(entry as Record<string, unknown>);
+          }
+        }
+      }
+    }
+    const nodesById = new Map<string, Record<string, unknown>>();
+    for (const node of nodes) {
+      if (typeof node["@id"] === "string") {
+        nodesById.set(node["@id"], node);
+      }
+    }
+    for (const node of nodes) {
+      if (
+        !structuredTypeIncludes(node, "website") ||
+        sameSiteStructuredRootField(node, pageUrl) === null
+      ) {
+        continue;
+      }
+      const rawPublisher = node["publisher"];
+      const publisherObject =
+        typeof rawPublisher === "object" &&
+        rawPublisher !== null &&
+        !Array.isArray(rawPublisher)
+          ? (rawPublisher as Record<string, unknown>)
+          : null;
+      const rawPublisherReference = publisherObject?.["@id"];
+      const publisherReference =
+        typeof rawPublisherReference === "string"
+          ? rawPublisherReference
+          : null;
+      const publisher =
+        typeof rawPublisher === "string"
+          ? (nodesById.get(rawPublisher) ?? rawPublisher)
+          : publisherReference === null
+            ? rawPublisher
+            : (nodesById.get(publisherReference) ?? rawPublisher);
+      if (typeof publisher === "string") {
+        if (!/^https?:/iu.test(publisher)) names.push(publisher);
+        continue;
+      }
+      if (
+        typeof publisher === "object" &&
+        publisher !== null &&
+        !Array.isArray(publisher)
+      ) {
+        const publisherName = (publisher as Record<string, unknown>)["name"];
+        if (typeof publisherName === "string") names.push(publisherName);
+      }
+    }
+  }
+  return uniqueStrings(names);
+}
+
+function hasProfileResourceUrl(pageUrl: string | null): boolean {
+  if (pageUrl === null) return false;
+  try {
+    const path = new URL(pageUrl).pathname.toLocaleLowerCase("en-US");
+    return (
+      /\/(?:list\/member|directory\/(?:company|member)|profiles?\/(?:company|member))(?:\/|$)/u.test(
+        path,
+      ) ||
+      /\/(?:[a-z]{2}\/)?company\/[^/]+\/[a-f0-9]{24,}\/?$/u.test(path)
+    );
+  } catch {
+    return false;
+  }
+}
+
+function hasOtherCopyrightPublisher(
+  text: string,
+  companyName: string,
+): boolean {
+  for (const line of text.split("\n")) {
+    if (!/(?:©|\(c\)|\bcopyright\b)/iu.test(line)) continue;
+    const afterMarker = line
+      .replace(/^.*?(?:©|\(c\)|\bcopyright\b)/iu, "")
+      .replace(/^\s*(?:(?:©|\(c\)|copyright\b)\s*)+/iu, "")
+      .replace(
+        /^\s*(?:[-–—,.:;]\s*)?(?:19|20)\d{2}(?:\s*[-–—]\s*(?:19|20)?\d{2})?\s*[,.:;-]?\s*/u,
+        "",
+      );
+    const owner = afterMarker
+      .split(
+        /\b(?:all\s+rights?\s+reserved|privacy\s+policy|terms\s+of\s+(?:service|use)|website\s+(?:created|designed|developed|hosted|powered))\b/iu,
+      )[0]
+      ?.split(/\s+[|•]\s+/u)[0]
+      ?.replace(/^[\s,.:;—–-]+|[\s,.:;—–-]+$/gu, "")
+      .trim();
+    if (
+      owner !== undefined &&
+      parsedLegalIdentity(owner) !== null &&
+      !publisherIdentityEquivalent(owner, companyName)
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function hasThirdPartyProfileContext(
+  content: string,
+  pageUrl: string | null,
+  companyName: string,
+): boolean {
+  if (hasProfileResourceUrl(pageUrl)) return true;
+  const text = normalizePageText(content);
+  const roleSignals = [
+    /\bchamber of commerce\b/iu,
+    /\b(?:business|company|manufacturer|member|supplier)\s+(?:directory|listing|profile)\b/iu,
+    /\bvisit (?:company )?website\b/iu,
+  ].some((pattern) => pattern.test(text));
+  const dataServiceSignals = [
+    /\bour data\b/iu,
+    /\bpricing\b/iu,
+    /\bmarket intelligence\b/iu,
+    /\bsupply chain analytics\b/iu,
+    /\bbill of lading\b/iu,
+    /\bimports?\b[^.!?\n]{0,80}\bexports?\b/iu,
+    /\bbuyer-supplier discovery\b/iu,
+  ].filter((pattern) => pattern.test(text)).length;
+  if (!roleSignals && dataServiceSignals < 2) return false;
+  const otherCopyrightPublisher = hasOtherCopyrightPublisher(text, companyName);
+  const otherStructuredPublisher =
+    pageUrl !== null &&
+    structuredWebsitePublisherNames(content, pageUrl).some(
+      (publisher) => !publisherIdentityEquivalent(publisher, companyName),
+    );
+  return otherCopyrightPublisher || otherStructuredPublisher;
 }
 
 function structuredPublisherExcerpt(
@@ -4620,6 +5126,7 @@ function signalIdentityPageQuotes(
   >,
   assessment: SignalIdentityAssessment,
 ): string[] {
+  if (hasThirdPartyProfileContext(content, pageUrl, signal.rawName)) return [];
   const text = normalizePageText(content);
   const sentences = splitPageSentences(text);
   const publisher =
@@ -5250,56 +5757,94 @@ function extractHeadquarters(sentence: string): {
     sentence,
   );
   if (headquarters === null) return null;
-  const governed = sentence
+  const governedPrefix = sentence
     .slice(headquarters.index + headquarters[0].length)
     .replace(
       /^\s*(?:and\s+(?:(?:its|our|the)\s+)?(?:manufacturing\s+)?(?:facility|plant))?\s*(?:is|are|'s)?\s*(?:located\s+)?(?:in|at)?\s*/iu,
       "",
+    );
+  const currentClause =
+    governedPrefix.split(
+      /\s+\b(?:but|while|(?:and\s+)?serv(?:e|es|ing)|(?:and\s+)?support(?:s|ing)?|and\s+(?:also\s+)?(?:am|are|employs?|has|have|is|maintains?|manufactures?|offers?|operates?|provides?))\b/iu,
+    )[0] ?? "";
+  const governed = currentClause
+    .replace(
+      /(?:,\s*|\s+)(?:(?:and|along with)\s+)?(?:with\s+)?(?:(?:its|our|the)\s+)?(?:(?:additional|domestic|global|international|regional|satellite|u\.?s\.?)\s+)*(?:branches?|facilit(?:y|ies)|locations?|offices?|operations?|plants?|sites?)\b[\s\S]*$/iu,
+      "",
     )
-    .split(/\s+\b(?:and|but|while|serv(?:e|es|ing)|support(?:s|ing)?)\b/iu)[0]
-    ?.replace(/[.;].*$/u, "")
+    .replace(/;\s*[\s\S]*$/u, "")
+    .replace(/[.,]\s*$/u, "")
     .trim();
-  if (governed === undefined || governed === "") return null;
-  const address =
-    /(?:^|,\s*)([A-Z][A-Za-z.' -]{1,50}),\s*([A-Z]{2})(?:\s+\d{5}(?:-\d{4})?)?\b/u.exec(
-      governed,
-    );
-  const namedStateLocation =
-    /^(?:the\s+)?([A-Z][A-Za-z.' -]{1,50}),\s*([A-Z][A-Za-z.' -]{1,50}?)(?:\s+\d{5}(?:-\d{4})?)?(?:,\s*(?:united states(?: of america)?|u\.s\.a?\.?|usa))?$/iu.exec(
-      governed,
-    );
-  const namedStateCode =
-    namedStateLocation?.[2] === undefined
-      ? null
-      : getUsStateCode(namedStateLocation[2]);
-  const state =
-    address?.[2] ?? namedStateCode?.toLocaleUpperCase("en-US") ?? null;
+  if (governed === "") return null;
+
   const explicitUsCountry =
     /\b(?:united states(?: of america)?|u\.s\.a?\.?|usa)\b/iu.test(governed);
-  const namedStateCity =
-    namedStateCode === null ? null : (namedStateLocation?.[1]?.trim() ?? null);
-  const foreignCountry =
-    /,\s*([A-Z][A-Za-z.' -]{2,50})$/u.exec(governed)?.[1]?.trim() ?? null;
-  const country =
-    (state !== null && US_STATE_CODES[state] === true) ||
-    explicitUsCountry ||
-    namedStateCode !== null
-      ? "US"
-      : foreignCountry;
   const countryOnly =
     explicitUsCountry &&
     /^(?:the\s+)?(?:united states(?: of america)?|u\.s\.a?\.?|usa)$/iu.test(
       governed,
     );
-  const city = countryOnly
-    ? null
-    : (address?.[1]?.trim() ??
-      namedStateCity ??
-      /^(?:the\s+)?([A-Z][A-Za-z.' -]{1,50}?)(?:,\s*[A-Z][A-Za-z.' -]+)?$/u
-        .exec(governed)?.[1]
-        ?.trim() ??
-      null);
-  return { city, state, country };
+  if (countryOnly) return { city: null, state: null, country: "US" };
+
+  const parts = governed
+    .split(/\s*,\s*/u)
+    .map((part) => part.trim())
+    .filter((part) => part !== "");
+  if (parts.length === 0) return null;
+  if (parts.some((part, index) => index < parts.length - 1 && /\band\b/iu.test(part))) {
+    return null;
+  }
+  if (
+    explicitUsCountry &&
+    /^(?:the\s+)?(?:united states(?: of america)?|u\.s\.a?\.?|usa)$/iu.test(
+      parts.at(-1) ?? "",
+    )
+  ) {
+    parts.pop();
+  }
+
+  const rawStateCandidate = (parts.at(-1) ?? "").replace(
+    /\s+\d{5}(?:-\d{4})?\s*$/u,
+    "",
+  );
+  const stateCandidate = /^d\.?\s*c\.?$/iu.test(rawStateCandidate)
+    ? "DC"
+    : rawStateCandidate;
+  const stateCode = getUsStateCode(stateCandidate);
+  if (stateCode !== null) {
+    return {
+      city: parts.length > 1 ? (parts.at(-2) ?? null) : null,
+      state: stateCode.toLocaleUpperCase("en-US"),
+      country: "US",
+    };
+  }
+  if (explicitUsCountry) {
+    return {
+      city: parts.at(-1) ?? null,
+      state: null,
+      country: "US",
+    };
+  }
+  if (parts.length === 1) {
+    return { city: parts[0] ?? null, state: null, country: null };
+  }
+
+  const firstPartIsStreetAddress =
+    /^\d+\b/u.test(parts[0] ?? "") &&
+    /\b(?:avenue|ave|boulevard|blvd|drive|dr|highway|hwy|lane|ln|parkway|pkwy|road|rd|route|street|st|way)\b/iu.test(
+      parts[0] ?? "",
+    );
+  const cityIndex =
+    parts.length === 2
+      ? 0
+      : parts.length === 3 && firstPartIsStreetAddress
+        ? 1
+        : parts.length - 3;
+  return {
+    city: parts[cityIndex] ?? null,
+    state: null,
+    country: parts.at(-1) ?? null,
+  };
 }
 function reconcileHeadquartersFacts(facts: readonly HeadquartersFact[]): {
   readonly status: "supported" | "unknown" | "conflicting";

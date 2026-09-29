@@ -120,6 +120,10 @@ const ACTIVE_ACQUISITION_OWNER_PATTERNS: readonly RegExp[] = [
     "i",
   ),
 ];
+const STRATEGIC_ACQUISITION_HEADLINE_RE =
+  /\b(?:adds?|advances?|bolsters?|broadens?|builds?|diversif(?:y|ies)|enhances?|expands?|extends?|grows?|strengthens?)\b[^.;!?]{0,120}\b(?:with|through|via)\s+(?:the\s+)?acquisition\b/iu;
+const HEADLINE_OWNER_SUBJECT_RE =
+  /^[A-Z0-9][\w'’&,-]*(?:\s+(?:[A-Z0-9][\w'’&,-]*|&|and|of|the)){0,5}\.?$/u;
 const RELATIONSHIP_OWNER_PATTERNS: readonly RegExp[] = [
   new RegExp(`(?:subsidiary|division|unit)\\s+of\\s+${OWNER_PHRASE}`, "i"),
   new RegExp(`(?:wholly[-\\s]?\\s*)?owned\\s+by\\s+${OWNER_PHRASE}`, "i"),
@@ -233,6 +237,38 @@ function cleanOwner(raw: string, companyName: string): string | null {
   return owner;
 }
 
+function headlineSubjectOwner(
+  sentence: string,
+  predicateStart: number,
+  companyName: string,
+): string | null {
+  const prefix = sentence.slice(0, predicateStart).trimEnd();
+  if (prefix.length === 0) return null;
+
+  // A legal suffix period can be internal to a headline ("Acme Corp. Expands")
+  // rather than ending the subject. Other punctuation still bounds the clause,
+  // so an earlier sentence cannot be mistaken for the buyer.
+  const boundaryText =
+    prefix.endsWith(".") && LEGAL_SUFFIX_RE.test(prefix)
+      ? prefix.slice(0, -1)
+      : prefix;
+  const clauseBoundary = Math.max(
+    boundaryText.lastIndexOf("."),
+    boundaryText.lastIndexOf(";"),
+    boundaryText.lastIndexOf(":"),
+    boundaryText.lastIndexOf("!"),
+    boundaryText.lastIndexOf("?"),
+  );
+  const subject = prefix.slice(clauseBoundary + 1).trim();
+  if (!HEADLINE_OWNER_SUBJECT_RE.test(subject)) return null;
+
+  const owner = cleanOwner(subject, companyName);
+  const completeSubject = subject
+    .replace(/[.,;:'"]+$/gu, "")
+    .replace(/['’]s$/u, "");
+  return owner === completeSubject ? owner : null;
+}
+
 const NEGATED_ACQUISITION_PREFIX_RE =
   /\b(?:has|have|had|do|does|did|is|are|was|were|be|been)(?:\s+[\p{L}-]+){0,2}\s+(?:not(?!\s+only\b)|never)(?:\s+[\p{L}-]+){0,2}\s*$/iu;
 const CONTRACTED_NEGATED_ACQUISITION_PREFIX_RE =
@@ -331,19 +367,46 @@ export function classifySentence(
     `\\bacquir(?:e|es|ed|ing)\\s+(?:the\\s+)?${companyPattern}${completeTargetBoundary}`,
     "iu",
   ).exec(sentence);
+  const strategicHeadline = STRATEGIC_ACQUISITION_HEADLINE_RE.exec(sentence);
+  const strategicHeadlineAcquisition =
+    companyAcquisitionNoun !== null &&
+    strategicHeadline !== null &&
+    strategicHeadline.index < companyAcquisitionNoun.index &&
+    strategicHeadline.index + strategicHeadline[0].length ===
+      companyAcquisitionNoun.index + "acquisition".length;
+  const connectorGovernedAcquisition =
+    companyAcquisitionNoun !== null &&
+    /\b(?:with|through|via)\s+(?:the\s+)?$/iu.test(
+      sentence.slice(0, companyAcquisitionNoun.index),
+    );
+  const strategicActionLength =
+    strategicHeadline?.[0].match(/^\p{L}+/u)?.[0].length ?? 0;
+  const affirmativeStrategicHeadline =
+    strategicHeadlineAcquisition &&
+    strategicHeadline !== null &&
+    isAffirmativeAcquisitionPredicate(
+      sentence,
+      strategicHeadline.index,
+      strategicHeadline.index + strategicActionLength,
+    );
+  const affirmativeAcquisitionNoun =
+    companyAcquisitionNoun !== null &&
+    isAffirmativeAcquisitionPredicate(
+      sentence,
+      companyAcquisitionNoun.index,
+      companyAcquisitionNoun.index + companyAcquisitionNoun[0].length,
+    );
+  const affirmativeAcquisitionVerb =
+    companyAcquisitionVerb !== null &&
+    isAffirmativeAcquisitionPredicate(
+      sentence,
+      companyAcquisitionVerb.index,
+      companyAcquisitionVerb.index + companyAcquisitionVerb[0].length,
+    );
   const companyAcquisitionObject =
-    (companyAcquisitionNoun !== null &&
-      isAffirmativeAcquisitionPredicate(
-        sentence,
-        companyAcquisitionNoun.index,
-        companyAcquisitionNoun.index + companyAcquisitionNoun[0].length,
-      )) ||
-    (companyAcquisitionVerb !== null &&
-      isAffirmativeAcquisitionPredicate(
-        sentence,
-        companyAcquisitionVerb.index,
-        companyAcquisitionVerb.index + companyAcquisitionVerb[0].length,
-      ));
+    (affirmativeAcquisitionNoun &&
+      (!connectorGovernedAcquisition || affirmativeStrategicHeadline)) ||
+    affirmativeAcquisitionVerb;
   const acquired = ACQUIRE_RE.test(sentence);
   const companyDead =
     companySubject !== null &&
@@ -360,12 +423,17 @@ export function classifySentence(
     : companyRelationship
       ? RELATIONSHIP_OWNER_PATTERNS
       : ACTIVE_ACQUISITION_OWNER_PATTERNS;
-  let owner: string | null = null;
-  for (const pattern of ownerPatterns) {
-    const match = pattern.exec(sentence);
-    if (match?.[1] !== undefined) {
-      owner = cleanOwner(match[1], companyName);
-      if (owner !== null) break;
+  let owner =
+    strategicHeadlineAcquisition && strategicHeadline !== null
+      ? headlineSubjectOwner(sentence, strategicHeadline.index, companyName)
+      : null;
+  if (!strategicHeadlineAcquisition) {
+    for (const pattern of ownerPatterns) {
+      const match = pattern.exec(sentence);
+      if (match?.[1] !== undefined) {
+        owner = cleanOwner(match[1], companyName);
+        if (owner !== null) break;
+      }
     }
   }
   if (owner === null) {
