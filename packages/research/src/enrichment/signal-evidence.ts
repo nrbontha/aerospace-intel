@@ -1093,6 +1093,7 @@ interface AdmittedIdentityProofPage {
     | "normalized_publisher_text"
     | "provider_extracted_text"
     | null;
+  readonly isRetainedProof: boolean;
 }
 
 interface AdmittedPrimarySet {
@@ -1232,6 +1233,7 @@ function admittedIdentityProofPages(
       contentSha256: reference.contentSha256,
       retrievedAt: reference.retrievedAt,
       representation: null,
+      isRetainedProof: true,
     });
   }
   return proofPages;
@@ -1247,6 +1249,7 @@ function admittedPageIdentityProofPage(
     contentSha256: page.contentSha256,
     retrievedAt: page.retrievedAt,
     representation: page.representation,
+    isRetainedProof: false,
   };
 }
 
@@ -1467,23 +1470,30 @@ function resolveAdmittedIdentity(
   const directMatches = verifiedDomainMatches(signal, pages).filter(
     (match) => !rejectedDomains.has(match.domain),
   );
-  if (directMatches.length === 1) {
-    const match = directMatches[0]!;
+  const directMatch =
+    directMatches.length === 1
+      ? directMatches[0]
+      : directMatches.find((candidate) =>
+          directMatches.every(
+            (match) =>
+              match.domain === candidate.domain ||
+              match.domain.endsWith(`.${candidate.domain}`),
+          ),
+        );
+  if (directMatch !== undefined) {
     return {
       verified: true,
-      domain: match.domain,
-      corroboratedBy: match.assessment.corroboratedBy,
+      domain: directMatch.domain,
+      corroboratedBy: directMatch.assessment.corroboratedBy,
       identitySignal: signal,
       supportingPrimaryRecords: [],
-      proofQuotes: match.proofQuotes,
+      proofQuotes: directMatch.proofQuotes,
       retainedPrimaryEvidenceIds: retainedPrimary.map(
         (candidate) => candidate.evidenceId,
       ),
     };
   }
-  if (directMatches.length > 1) {
-    return unresolvedAdmittedIdentity(signal);
-  }
+  if (directMatches.length > 1) return unresolvedAdmittedIdentity(signal);
   const exactPrimary = primary.records.filter(
     (record) =>
       primaryRecordMatchesSignal(signal, record) &&
@@ -1651,28 +1661,36 @@ function verifiedDomainMatches(
     readonly assessment: SignalIdentityAssessment;
     readonly proofQuotes: readonly SignalIdentityPageQuote[];
   }> = [];
-  for (const [domain, group] of groups) {
-    const groupedPages = group.map((entry) => entry.page);
-    const assessment = assessSignalSiteIdentity(
-      signal,
-      groupedPages.map((page) => page.content),
-      groupedPages.map((page) => page.finalUrl),
-    );
+  for (const [domain, entriesForAssessment] of groups) {
+    const pagesForAssessment = entriesForAssessment.map((entry) => entry.page);
+    const assessment = entriesForAssessment.some(
+      (entry) => entry.page.isRetainedProof,
+    )
+      ? assessSignalIdentityContent(
+          signal,
+          pagesForAssessment.map((page) => page.content),
+          pagesForAssessment.map((page) => page.finalUrl),
+          false,
+        )
+      : assessSignalSiteIdentity(
+          signal,
+          pagesForAssessment.map((page) => page.content),
+          pagesForAssessment.map((page) => page.finalUrl),
+        );
     const proofQuotes = buildSignalIdentityProofQuotes(
-      groupedPages,
+      pagesForAssessment,
       signal,
       assessment,
     );
-    if (proofQuotes.length > 0) {
-      matches.push({
-        domain,
-        assessment,
-        proofQuotes: proofQuotes.map((proof) => ({
-          pageIndex: group[proof.pageIndex]!.pageIndex,
-          quote: proof.quote,
-        })),
-      });
-    }
+    if (proofQuotes.length === 0) continue;
+    matches.push({
+      domain,
+      assessment,
+      proofQuotes: proofQuotes.map((proof) => ({
+        pageIndex: entriesForAssessment[proof.pageIndex]!.pageIndex,
+        quote: proof.quote,
+      })),
+    });
   }
   return matches;
 }
@@ -1787,6 +1805,15 @@ function invalidateRejectedPublisherEvidence(
     headquartersSupportIds.length === 0;
   return {
     ...evidence,
+    evidenceRefs: evidence.evidenceRefs.map((reference) =>
+      rejectedEvidenceIds.has(reference.evidenceId) && reference.firstParty
+        ? {
+            ...reference,
+            sourceKind: "publisher_site",
+            firstParty: false,
+          }
+        : reference,
+    ),
     identity: {
       ...evidence.identity,
       status: identityInvalidated ? "ambiguous" : evidence.identity.status,
@@ -2789,9 +2816,10 @@ async function researchOfficialSite(
       });
     }
     if (durableVerified) {
-      const domain = normalizeCandidateDomain(
-        pages[0]?.finalUrl ?? candidate.domain,
-      );
+      // Candidate redirects are constrained above to the candidate host or one
+      // of its subdomains. Preserve the candidate's canonical domain rather
+      // than promoting a serving subdomain (for example, web.example.com).
+      const domain = candidate.domain;
       if (domain !== null) {
         return {
           status: "verified",
@@ -3630,32 +3658,41 @@ function copyrightPublisherExcerpt(
     `(?:^|[^a-z0-9])(${publisherPatterns.join("|")})(?![a-z0-9])`,
     "iu",
   );
-  for (const line of text.split("\n")) {
-    const markerMatch = marker.exec(line);
-    if (markerMatch === null) continue;
-    const statement = line.slice(markerMatch.index);
-    const afterMarker = statement.slice(markerMatch[0].length);
-    const publisherMatch = publisher.exec(afterMarker);
-    const identity = publisherMatch?.[1];
-    if (
-      publisherMatch === null ||
-      identity === undefined ||
-      publisherMatch.index === undefined
-    ) {
-      continue;
+  const lines = text.split("\n");
+  for (const [index, line] of lines.entries()) {
+    // Normalized publisher text may wrap "All rights reserved" onto the next
+    // line. Try the literal line first, then one bounded continuation.
+    const statements = [
+      line,
+      lines[index + 1] === undefined ? line : `${line}\n${lines[index + 1]}`,
+    ];
+    for (const candidate of statements) {
+      const markerMatch = marker.exec(candidate);
+      if (markerMatch === null) continue;
+      const statement = candidate.slice(markerMatch.index);
+      const afterMarker = statement.slice(markerMatch[0].length);
+      const publisherMatch = publisher.exec(afterMarker);
+      const identity = publisherMatch?.[1];
+      if (
+        publisherMatch === null ||
+        identity === undefined ||
+        publisherMatch.index === undefined
+      ) {
+        continue;
+      }
+      const identityStart =
+        publisherMatch.index + publisherMatch[0].indexOf(identity);
+      if (
+        !copyrightPrefixIsAttributable(afterMarker.slice(0, identityStart)) ||
+        !copyrightSuffixIsAttributable(
+          afterMarker.slice(identityStart + identity.length),
+        )
+      ) {
+        continue;
+      }
+      const excerpt = statement.trim();
+      if (excerpt.length <= maxChars) return excerpt;
     }
-    const identityStart =
-      publisherMatch.index + publisherMatch[0].indexOf(identity);
-    if (
-      !copyrightPrefixIsAttributable(afterMarker.slice(0, identityStart)) ||
-      !copyrightSuffixIsAttributable(
-        afterMarker.slice(identityStart + identity.length),
-      )
-    ) {
-      continue;
-    }
-    const excerpt = statement.trim();
-    if (excerpt.length <= maxChars) return excerpt;
   }
   return null;
 }
@@ -4095,11 +4132,50 @@ function hasProfileResourceUrl(pageUrl: string | null): boolean {
       /\/(?:list\/member|directory\/(?:company|member)|profiles?\/(?:company|member))(?:\/|$)/u.test(
         path,
       ) ||
-      /\/(?:[a-z]{2}\/)?company\/[^/]+\/[a-f0-9]{24,}\/?$/u.test(path)
+      /\/(?:[a-z]{2}\/)?company\/[^/]+\/[a-f0-9]{24,}\/?$/u.test(path) ||
+      /\/c\/[^/]+-email-format\/?$/u.test(path) ||
+      /\/company\/(?:\d+|[^/]+-\d+)\/?$/u.test(path) ||
+      /\/documents?\/[^/]+-[a-z0-9]{10,}\/?$/u.test(path)
     );
   } catch {
     return false;
   }
+}
+
+function hasExternalLabeledPublisherUrl(
+  text: string,
+  pageUrl: string | null,
+): boolean {
+  if (pageUrl === null) return false;
+  let pageHost: string;
+  try {
+    pageHost = new URL(pageUrl).hostname
+      .toLocaleLowerCase("en-US")
+      .replace(/^www\./u, "");
+  } catch {
+    return false;
+  }
+  // A standalone field label followed by a URL is profile metadata; a prose
+  // mention of "website" or an unrelated navigation link is not. The newline
+  // form allows at most two blank field-separator lines, never intervening text.
+  const labeledUrl =
+    /(?:^|\n)[^\S\n]*(?:company website|domain name|website)[^\S\n]*(?:(?:[|:][^\S\n]*)|(?:\n[^\S\n]*){1,3})((?:https?:\/\/|www\.)[^\s|<>"']+)/gimu;
+  for (const match of text.matchAll(labeledUrl)) {
+    const value = match[1]?.replace(/[),.;]+$/gu, "");
+    if (value === undefined) continue;
+    try {
+      const candidate = new URL(
+        /^www\./iu.test(value) ? `https://${value}` : value,
+      );
+      const candidateHost = candidate.hostname
+        .toLocaleLowerCase("en-US")
+        .replace(/^www\./u, "");
+      if (candidateHost !== pageHost) return true;
+    } catch {
+      continue;
+    }
+  }
+  return false;
 }
 
 function hasOtherCopyrightPublisher(
@@ -4138,12 +4214,20 @@ function hasThirdPartyProfileContext(
   pageUrl: string | null,
   companyName: string,
 ): boolean {
-  if (hasProfileResourceUrl(pageUrl)) return true;
+  const profileResourceUrl = hasProfileResourceUrl(pageUrl);
   const text = normalizePageText(content);
+  const externalHostSignals =
+    /\b(?:this )?document was uploaded by (?:a |the )?user\b/iu.test(text) ||
+    hasExternalLabeledPublisherUrl(text, pageUrl);
   const roleSignals = [
     /\bchamber of commerce\b/iu,
-    /\b(?:business|company|manufacturer|member|supplier)\s+(?:directory|listing|profile)\b/iu,
+    /\b(?:business|company|manufacturer|member|supplier)\s+(?:directory|listing)\b/iu,
     /\bvisit (?:company )?website\b/iu,
+    /\b(?:uploaded by|document was uploaded by|report (?:this )?document)\b/iu,
+    /\bget (?:verified|authenticated) emails?\b/iu,
+    /\b(?:company website|domain name)\b[\s|:]{0,40}(?:https?:\/\/|www\.)/iu,
+    /\bthousands of companies,\s*people and products\b/iu,
+    /\bpost your profile\b/iu,
   ].some((pattern) => pattern.test(text));
   const dataServiceSignals = [
     /\bour data\b/iu,
@@ -4154,14 +4238,39 @@ function hasThirdPartyProfileContext(
     /\bimports?\b[^.!?\n]{0,80}\bexports?\b/iu,
     /\bbuyer-supplier discovery\b/iu,
   ].filter((pattern) => pattern.test(text)).length;
-  if (!roleSignals && dataServiceSignals < 2) return false;
   const otherCopyrightPublisher = hasOtherCopyrightPublisher(text, companyName);
   const otherStructuredPublisher =
     pageUrl !== null &&
     structuredWebsitePublisherNames(content, pageUrl).some(
       (publisher) => !publisherIdentityEquivalent(publisher, companyName),
     );
-  return otherCopyrightPublisher || otherStructuredPublisher;
+  if (
+    externalHostSignals ||
+    (profileResourceUrl && otherStructuredPublisher) ||
+    ((roleSignals || dataServiceSignals >= 2) &&
+      (otherCopyrightPublisher || otherStructuredPublisher))
+  ) {
+    return true;
+  }
+  // Profile-shaped routes are ambiguous rather than inherently third-party.
+  // Resolve them only with distinct host-role and copyright publisher signals.
+  if (!profileResourceUrl) return false;
+  return (
+    pageUrl === null ||
+    strongTargetHostPublisherExcerpt(content, pageUrl, companyName) === null
+  );
+}
+
+function normalizedStructuredPublisherExcerpt(
+  publisher: StructuredPublisherMatch,
+  maxChars = Number.POSITIVE_INFINITY,
+): string | null {
+  const normalizedEvidence =
+    `[normalized JSON-LD publisher evidence; not a verbatim quote; ` +
+    `role=${publisher.role}; locator=${JSON.stringify(publisher.locator)}]` +
+    `\n<script type="application/ld+json">` +
+    `${JSON.stringify(publisher.normalizedDocument)}</script>`;
+  return normalizedEvidence.length <= maxChars ? normalizedEvidence : null;
 }
 
 function structuredPublisherExcerpt(
@@ -4175,16 +4284,31 @@ function structuredPublisherExcerpt(
     pageUrl,
     companyName,
   )) {
-    const normalizedEvidence =
-      `[normalized JSON-LD publisher evidence; not a verbatim quote; ` +
-      `role=${publisher.role}; locator=${JSON.stringify(publisher.locator)}]` +
-      `\n<script type="application/ld+json">` +
-      `${JSON.stringify(publisher.normalizedDocument)}</script>`;
-    if (normalizedEvidence.length <= maxChars) {
-      return normalizedEvidence;
-    }
+    const excerpt = normalizedStructuredPublisherExcerpt(publisher, maxChars);
+    if (excerpt !== null) return excerpt;
   }
   return null;
+}
+
+function strongTargetHostPublisherExcerpt(
+  content: string,
+  pageUrl: string,
+  companyName: string,
+  maxChars = Number.POSITIVE_INFINITY,
+): string | null {
+  const targetHostPublisher = structuredPublisherMatches(
+    content,
+    pageUrl,
+    companyName,
+  ).find((publisher) => publisher.role === "WebSite.publisher");
+  if (targetHostPublisher === undefined) return null;
+  const structured = normalizedStructuredPublisherExcerpt(targetHostPublisher);
+  const copyright = copyrightPublisherExcerpt(
+    normalizePageText(content),
+    companyName,
+  );
+  if (structured === null || copyright === null) return null;
+  return boundedPublisherContext([structured, copyright], maxChars);
 }
 
 function publisherOperationalSelfDescriptionExcerpt(
@@ -5129,7 +5253,17 @@ function signalIdentityPageQuotes(
   if (hasThirdPartyProfileContext(content, pageUrl, signal.rawName)) return [];
   const text = normalizePageText(content);
   const sentences = splitPageSentences(text);
+  const profileResourcePublisher = hasProfileResourceUrl(pageUrl)
+    ? strongTargetHostPublisherExcerpt(
+        content,
+        pageUrl,
+        signal.rawName,
+        EVIDENCE_QUOTE_MAX_CHARS,
+      )
+    : undefined;
+  if (profileResourcePublisher === null) return [];
   const publisher =
+    profileResourcePublisher ??
     structuredPublisherExcerpt(
       content,
       pageUrl,
