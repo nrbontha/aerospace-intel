@@ -16,6 +16,12 @@ Copy `.env.example`. Secrets stay in the process environment or a gitignored `.e
 
 Required outside tests: `DATABASE_URL`, `SESSION_SECRET`. Production also needs `APP_URL`, an **absolute** `STORAGE_PATH` on a persistent volume, and `OPENROUTER_API_KEY` for research workers. Relative `STORAGE_PATH` values are resolved from process cwd (`apps/web` for Next, repo root for `npm run ops:*`).
 
+## Investor access onboarding
+
+There is no public registration. An admin creates each investor at `/admin/users`; keep the default `viewer` role unless broader duties are explicitly approved. Use a strong, unique password of at least 12 characters and deliver it through a private channel. The investor signs in at the public `/login` page and lands on `/signals`. Viewer GET browsing, filtering, detail views and exports are read-only and never start research.
+
+Password reset changes the credential for future logins but does **not** revoke existing sessions. When invalidating credentials or offboarding, also use **Revoke sessions** in `/admin/users` (the audited control is `DELETE /api/v1/admin/users/{id}/sessions`). Disabling a user blocks access, but reenabling can make an otherwise-valid old session usable again; revoke sessions before or while disabling when old tokens must stay invalid. Do not claim onboarding or revocation succeeded until the actual public login/session behavior has been exercised.
+
 ## Railway
 
 Observed production project `aerospace-supplier-intelligence` (independent of Almanac):
@@ -176,15 +182,164 @@ Migration `0014_review_model_usage.sql` backfills previously recorded evaluation
 
 Migration `0016_signal_analyst_research.sql` adds analyst journals, provider allowances, immutable source allowlists, reservations/receipts and provider cooldowns. It does not reset primary sources, human decisions or prior model receipts. Each allowance is sealed with a fixed start, total cap and source set; creating it again with the identical definition is idempotent, not a new allowance.
 
-Use `npx tsx scripts/research-provider-scope.mts --help` for the operator CLI. `create` requires an explicit ID, start, total cap and one or more source IDs, and always creates a **paused** allowance. `activate`, `pause`, `close` and `status` address that same ID. Never recreate a funded database or mint a new scope to bypass spent/reserved exposure. The `import-legacy-estimate` command records an explicitly estimated UTC-day carry-forward using a stable idempotency key; do not fabricate exact charges from the old file counter.
+### Funded provider run staging
 
-The repository's `npm run ops:research-scope` convenience wrapper sources `.env.local`. If a database/environment is already explicitly selected by a validation or deployment launcher, invoke the TypeScript CLI directly instead so that the convenience wrapper cannot replace that selection. Keep credentials out of command output.
+Treat a funded run as an explicit paid cohort, not as “all available sources.” Build a private JSON file containing only the approved paid source-signal UUID array, retain the cohort name and selection rationale with the operating record, and keep private inputs out of this repository and image. `create` accepts either repeated `--source-signal-id` values or one `--source-signal-ids-file`, never both. The file form validates UUIDs and removes duplicate entries before the same immutable creation contract is applied. An omitted or empty paid list is an error; there is no implicit paid enrollment.
 
-Jev checks before each paid rung; Muse checks before each model call. An exhausted or unreadable model budget defers the claim without consuming a candidate retry or publishing a verdict. Deterministic zero-cost decisions can continue. Model spending remains a recorded-spend gate, not an atomic reservation or complete provider invoice: concurrent/in-flight calls, failed responses without returned cost telemetry, and failed receipt persistence can exceed it. Exa instead reserves exposure durably before dispatch, requires an active total allowance and source membership, and retains unknown charges conservatively across restarts and UTC rollover. Preserve the former `EXA_SPEND_STATE_PATH` file for estimated baseline import; it is not a competing active spending ledger.
+Keep the worker stopped throughout staging. A stopped Railway service has no container to SSH into, and `railway run` executes on the operator's machine, where `postgres.railway.internal` is not reachable. Run database commands inside the running `web` container instead; its image contains the repository at `/app` and it shares Railway's private network. Selecting `web` for command transport does not move paid configuration onto web or start research.
 
-The provider's key/account limit is separate from the application budget. OpenRouter HTTP 402 and structured quota-exhaustion HTTP 403 responses defer reviews without incrementing candidate attempts or publishing judgments; known charges from earlier attempts remain recorded. A non-resetting exhausted key requires an account owner to raise its limit or replace the Railway credential. Raising `OPENROUTER_MAX_COST_PER_DAY_USD` alone cannot restore provider capacity. Ordinary 403 refusals are not classified as quota exhaustion, and response-body digits cannot turn a terminal failure into a transient retry.
+Use a scope ID that identifies the approved paid cohort and run window. Before any Railway command, set the actual approved selectors and local private-file path in the operator shell; the guards below stop an incomplete command before it opens SSH:
 
-Monitor phase counts and due/leased rows, retrieval failures, same-input Jev/Muse linkage, current outcomes, source-document/evidence counts, and actual spending. A backlog of repeated retrieval errors or all-unknown reviews is not successful screening coverage.
+```bash
+: "${SCOPE_ID:?set the approved paid-cohort scope ID}"
+: "${STARTS_AT:?set the approved scope start instant}"
+: "${TOTAL_CAP_USD:?set the approved total Exa cap}"
+: "${COHORT_UUID_FILE:?set the local approved UUID-array file path}"
+: "${EXPECTED_DATABASE_HOST:?set the expected Railway database host}"
+: "${EXPECTED_DATABASE_NAME:?set the expected Railway database name}"
+```
+
+Creation is always paused and reissuing the identical command is idempotent. This command passes the scalar selectors as quoted positional arguments, streams the local private file over SSH standard input to a protected temporary **remote** file, invokes the script by its remote path, and removes the file on exit:
+
+```bash
+railway ssh --service web --environment production -- \
+  sh -lc '
+      set -eu
+      umask 077
+      cohort_file="$(mktemp /tmp/asi-funded-cohort.XXXXXX)"
+      trap '"'"'rm -f "$cohort_file"'"'"' EXIT
+      trap '"'"'exit 1'"'"' HUP INT TERM
+      cat >"$cohort_file"
+      cd /app
+      npx tsx /app/scripts/research-provider-scope.mts create \
+        --id "$1" \
+        --starts-at "$2" \
+        --total-cap-usd "$3" \
+        --source-signal-ids-file "$cohort_file"
+    ' sh "$SCOPE_ID" "$STARTS_AT" "$TOTAL_CAP_USD" <"$COHORT_UUID_FILE"
+```
+
+Do not create a replacement scope, recreate a funded database, delete receipts, or import a lower estimate to recover allowance. Existing committed and reserved/unknown exposure, histories, memberships, and scope identities are durable. `import-legacy-estimate` is only for an evidenced carry-forward during a quiesced cutover; it is not a reset.
+
+Configure the stopped worker—not the public web service—with the same scope ID in `EXA_BUDGET_SCOPE_ID`, an intentional positive `EXA_DAILY_BUDGET_USD`, `FAA_ANALYST_MODE=bounded_paid`, and the intended `OPENROUTER_MAX_COST_PER_DAY_USD`. `FAA_JEV_SOURCE_SIGNAL_IDS` is independent cheap-screening scope: leave it absent for the full cheap backlog, or set a runtime-valid UUID list that includes every sealed paid target. The explicit list may include additional cheap Jev targets, but that never adds them to the immutable paid scope; the Exa ledger still rejects every source outside the sealed membership. An explicit empty list or a list excluding any paid target is unsafe because admitted evidence cannot finish its Jev recheck. Keep `FAA_ANALYST_MODE=disabled` on web. `EXA_API_KEY` and `OPENROUTER_API_KEY` are independent credentials and are never substitutes for one another.
+
+Run the read-only preflight before activation. Both expected database guards are required. It checks the configured URL host before connecting, checks the connected database name, then reports sealed paid membership, total cap, known actual cost, reserved/unknown estimated exposure, committed cost, remaining exposure, permit, required-key **presence only**, selected worker analyst/Jev configuration, and daily guards. It prints neither keys nor credential-bearing URLs, makes no provider API call or funding probe, and performs no database mutation.
+
+Native/local smoke syntax (not production evidence) uses the current shell environment directly and does not source `.env.local`:
+
+```bash
+npx tsx scripts/research-provider-scope.mts preflight \
+  --id "$SCOPE_ID" \
+  --expected-database-host localhost \
+  --expected-database-name aerospace_supplier_intelligence
+```
+
+For production, use the locally set selectors above. `railway run` starts the first Node process on the operator machine with the selected stopped worker configuration; it only serializes that configuration into SSH standard input and cannot connect to Railway's private PostgreSQL host. The receiving Node process runs `/app/scripts/research-provider-scope.mts` inside `web`, combines web's private `DATABASE_URL` with that selected worker configuration in memory, and never persists or displays the transport payload:
+
+```bash
+railway run --service worker --environment production -- \
+  node -e '
+    const [scopeId, expectedHost, expectedName] = process.argv.slice(1);
+    const names = [
+      "FAA_ANALYST_MODE",
+      "FAA_JEV_SOURCE_SIGNAL_IDS",
+      "EXA_BUDGET_SCOPE_ID",
+      "EXA_DAILY_BUDGET_USD",
+      "OPENROUTER_MAX_COST_PER_DAY_USD",
+      "EXA_API_KEY",
+      "OPENROUTER_API_KEY",
+    ];
+    const selectedWorkerEnv = Object.fromEntries(
+      names.flatMap((name) =>
+        process.env[name] === undefined ? [] : [[name, process.env[name]]],
+      ),
+    );
+    const invocation = { scopeId, expectedHost, expectedName };
+    process.stdout.write(
+      Buffer.from(
+        JSON.stringify({ selectedNames: names, selectedWorkerEnv, invocation }),
+      ).toString("base64"),
+    );
+  ' "$SCOPE_ID" "$EXPECTED_DATABASE_HOST" "$EXPECTED_DATABASE_NAME" |
+  railway ssh --service web --environment production -- \
+    node -e '
+      const { spawnSync } = require("node:child_process");
+      let encoded = "";
+      process.stdin.setEncoding("utf8");
+      process.stdin.on("data", (chunk) => { encoded += chunk; });
+      process.stdin.on("end", () => {
+        try {
+          const payload = JSON.parse(
+            Buffer.from(encoded.trim(), "base64").toString("utf8"),
+          );
+          const { scopeId, expectedHost, expectedName } = payload.invocation;
+          if (![scopeId, expectedHost, expectedName].every(
+            (value) => typeof value === "string" && value.length > 0,
+          )) {
+            throw new Error("local scope and expected database selectors are required");
+          }
+          const childEnv = { ...process.env };
+          for (const name of payload.selectedNames) delete childEnv[name];
+          Object.assign(childEnv, payload.selectedWorkerEnv);
+          const result = spawnSync(
+            "npx",
+            [
+              "tsx",
+              "/app/scripts/research-provider-scope.mts",
+              "preflight",
+              "--id",
+              scopeId,
+              "--expected-database-host",
+              expectedHost,
+              "--expected-database-name",
+              expectedName,
+            ],
+            {
+              cwd: "/app",
+              env: childEnv,
+              stdio: ["ignore", "inherit", "inherit"],
+            },
+          );
+          process.exit(result.status ?? 1);
+        } catch (error) {
+          process.stderr.write(`preflight transport failed: ${
+            error instanceof Error ? error.message : "unknown error"
+          }\n`);
+          process.exit(1);
+        }
+      });
+    '
+```
+
+The direct remote TypeScript invocation does not use the `ops:research-scope` npm launcher and therefore cannot source `.env.local`. A blocked preflight exits nonzero and identifies configuration/scope mismatches. It fails safe for a missing, wrong-provider, unsealed, closed, exhausted, already-active, Jev-excluded, or wrong-database scope. Missing `FAA_JEV_SOURCE_SIGNAL_IDS` is intentionally full cheap triage, not a paid-scope expansion. A blank or absent `OPENROUTER_MAX_COST_PER_DAY_USD` passes the startup parser, but the FAA model-spend gate reads the raw environment and therefore applies its effective $1 default; malformed, non-finite, zero, or negative values prevent the worker configuration from starting and block preflight rather than being reported as an effective fallback. Provider account funding is always reported **NOT VERIFIED**: an account owner must separately confirm provider funding and limits without making a probe call from this command.
+
+After a passing production read-only preflight and separate account-owner confirmation, run the mutation inside the same private-network web container. `activate` changes only the durable Exa permit; the worker deployment remains the run switch:
+
+```bash
+railway ssh --service web --environment production -- \
+  sh -lc 'cd /app && exec npx tsx /app/scripts/research-provider-scope.mts activate --id "$1"' \
+  sh "$SCOPE_ID"
+railway up --service worker --environment production --detach
+```
+
+The worker deployment is the run switch. Railway variables and a successful preflight do not prove the deployed process loaded them. Verify the deployed worker revision, actual replica state, startup log fields (`analystMode`, Exa/key/scope presence, and Jev scope), scheduler activity, durable claims/receipts, and expected paid IDs after startup. `/health` or `/ready` alone is not proof that the funded scheduler is running with the intended scope. The public web service remains an independently deployed, read-only investor surface: sign-in, queue browsing, filtering, refresh, detail views and exports do not start research.
+
+For a planned pause, pause the scope through the web container first to deny new Exa reservations, then stop the worker to stop independent Muse/OpenRouter and provider-free loops:
+
+```bash
+railway ssh --service web --environment production -- \
+  sh -lc 'cd /app && exec npx tsx /app/scripts/research-provider-scope.mts pause --id "$1"' \
+  sh "$SCOPE_ID"
+railway down --service worker --yes
+```
+
+Pausing does not cancel an already dispatched provider request and does not reset reservations, receipts, daily accounting, cases, or membership. It also does not by itself stop model-only work, which is why a full stop includes the independent worker. Run `close --id "$SCOPE_ID"` through the same `railway ssh --service web` contract when an irreversible stop is intended; a closed scope cannot resume. To resume a paused scope, keep the worker down, repeat the selected-worker read-only preflight and account-limit confirmation, run `activate` on the same scope through web, then deploy and repeat runtime verification. Funding added later never activates a scope or starts a worker automatically.
+
+Jev checks before each paid rung; Muse checks before each model call. An exhausted or unreadable model budget defers the claim without consuming a candidate retry or publishing a verdict. Deterministic zero-cost decisions can continue. `OPENROUTER_MAX_COST_PER_DAY_USD` is a threshold over application-observed receipts, **not** an atomic reservation, provider invoice, or hard account cap: concurrent/in-flight calls, failed responses without returned cost telemetry, and failed receipt persistence can exceed it. Exa instead reserves exposure durably before dispatch, requires an active total allowance and source membership, and retains unknown charges conservatively across restarts and UTC rollover. Preserve the former `EXA_SPEND_STATE_PATH` file for estimated baseline import; it is not a competing active spending authority.
+
+Provider key/account limits are independent of application guards. OpenRouter HTTP 402 and structured quota-exhaustion HTTP 403 responses defer reviews without incrementing candidate attempts or publishing judgments; known charges from earlier attempts remain recorded. A non-resetting exhausted key requires its account owner to raise the provider limit or intentionally replace that provider's Railway credential. Raising `OPENROUTER_MAX_COST_PER_DAY_USD` alone cannot restore provider capacity. Ordinary 403 refusals are not classified as quota exhaustion, and response-body digits cannot turn a terminal failure into a transient retry.
+
+Monitor phase counts and due/leased rows, retrieval failures, same-input Jev/Muse linkage, current outcomes, source-document/evidence counts, durable Exa committed/reserved exposure, application-observed model spending, and provider-account limits separately. A backlog of repeated retrieval errors or all-unknown reviews is not successful screening coverage.
 
 Validation separates sourced historical golden references, synthetic controls, and the repeatedly tuned investor sample. `scripts/jev-ladder-bakeoff.mts` uses the production ladder and fact extractor, but supplied reference domains are an explicit identity premise. It does not prove identity discovery, persistence, Muse, promotion, or current acquisition truth. Report false promotions, false rejects, abstentions, coverage and errors; zero false promotions with zero decisive coverage is not a passing quality result. The frozen old autoresearch harness belongs to its old segment and must not be used to claim comparable new metrics.
 
@@ -234,11 +389,11 @@ Stale leases are self-healing: if the worker dies mid-tick, the 90s lease expire
 
 Observe state as an authenticated user via `GET /api/v1/agents/overview` (running count, $ today vs cap, last finds) or `GET /api/v1/agents/:id/ticks` for the per-agent tick journal.
 
-## Limited availability rollout
+## Historical limited-availability snapshot (2026-08-17)
 
-Production is the Railway project above. It is **limited availability**, not generally available. Do not advertise replay, a shared object store, or planned integrations.
+The following section is historical evidence only, not current Railway verification or an activation checklist. Production is the Railway project named above and remains limited availability, not generally available. Do not advertise replay, a shared object store, or planned integrations.
 
-Observed 2026-08-17T13:17Z. **Do not mix the two ops snapshots.**
+Observed 2026-08-17T13:17Z. **Do not mix this snapshot with later operating state or treat it as current.**
 
 Railway production (`https://aero-intel.up.railway.app`):
 

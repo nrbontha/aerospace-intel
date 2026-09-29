@@ -412,6 +412,445 @@ describe("raw signal official-site identity", () => {
     });
   });
 
+  it.each([
+    {
+      label: "Prospeo email profile for Quality Aircraft Acrylics",
+      signal: {
+        rawName: "Quality Aircraft Acrylics Inc",
+        uei: null,
+        cage: null,
+        city: "Kansas City",
+        state: "KS",
+      },
+      url: "https://profiles.example/c/quality-aircraft-acrylics-inc-email-format",
+      body: [
+        `<script type="application/ld+json">${JSON.stringify({
+          "@type": "Organization",
+          name: "Quality Aircraft Acrylics Inc",
+          url: "https://profiles.example/c/quality-aircraft-acrylics-inc-email-format",
+          description: "We repair and manufacture wingtip lenses.",
+        })}</script>`,
+        "Quality Aircraft Acrylics Inc Email Formats",
+        "Get Verified Emails Of Quality Aircraft Acrylics Inc Employees",
+        "Company overview | Headquarters | 2828 Roe Ln, Kansas City, Kansas 66103",
+        "Website | qualityaircraftacrylicsinc.com",
+        "About Quality Aircraft Acrylics Inc | We repair and manufacture wingtip lenses.",
+        "2026©Profiles Data Ltd. All rights reserved.",
+      ].join("\n"),
+      retained:
+        "About Quality Aircraft Acrylics Inc\nWe repair and manufacture wingtip lenses.\n2828 Roe Ln, Kansas City, Kansas 66103",
+    },
+    {
+      label: "Sourcehere-style company profile for Galley Support Innovations",
+      signal: {
+        rawName: "Galley Support Innovations, Inc",
+        uei: null,
+        cage: null,
+        city: "Sherwood",
+        state: "AR",
+      },
+      url: "https://marketplace.example/company/2939",
+      body: [
+        "Products | People | Companies | Events",
+        "At Galley Support Innovations, we transform our clients' concepts into functional products.",
+        "Galley Support Innovations is located in Sherwood, Arkansas.",
+        "We are a family owned and operated business.",
+        "Create an account to find in-depth information on thousands of companies, people and products.",
+        "© 2022 onwards Online Expos LLC. All rights reserved.",
+      ].join("\n"),
+      retained:
+        "At Galley Support Innovations, we transform concepts into products.\nGalley Support Innovations is located in Sherwood, Arkansas.",
+    },
+    {
+      label: "Prospectoo-style management profile for Airworthy Aerospace",
+      signal: {
+        rawName: "Airworthy Aerospace Industries",
+        uei: null,
+        cage: null,
+        city: "Hudson",
+        state: "WI",
+      },
+      url: "https://leads.example/company/AirworthyAerospaceIndustries-1079077/",
+      body: [
+        `<script type="application/ld+json">${JSON.stringify({
+          "@type": "Organization",
+          name: "Airworthy Aerospace Industries",
+          address: { addressLocality: "Hudson, WI" },
+          url: "http://www.airworthy.aero/",
+        })}</script>`,
+        "Get the authenticated email list and mobile details of the top managers.",
+        "Company Website | http://www.airworthy.aero/",
+        "Domain Name | airworthy.aero",
+        "At Airworthy Aerospace Industries, we provide aerospace products in Hudson, WI.",
+        "© 2026 Lead Data Ltd. All rights reserved.",
+      ].join("\n"),
+      retained:
+        "At Airworthy Aerospace Industries, we provide aerospace products in Hudson, WI.",
+    },
+    {
+      label: "uploaded Goodrich Interiors brochure",
+      signal: {
+        rawName: "Goodrich Interiors",
+        uei: null,
+        cage: null,
+        city: "Phoenix",
+        state: "AZ",
+      },
+      url: "https://documents.example/documents/goodrich-interiors-capabilities-2nv83k525olk",
+      body: [
+        "Goodrich Interiors Capabilities",
+        "Uploaded by: Example User",
+        "This document was uploaded by user and they confirmed permission to share it.",
+        "At Goodrich Interiors, we are dedicated to research and development in Phoenix, AZ.",
+        "Goodrich Interiors Web Site: www.parts.interiors.goodrich.com",
+        "Copyright © 2026 Document Library LLC.",
+      ].join("\n"),
+      retained:
+        "At Goodrich Interiors, we are dedicated to research and development in Phoenix, AZ.",
+    },
+  ])(
+    "rejects the hosted subject as publisher: $label",
+    ({ signal, url, body, retained }) => {
+      for (const content of [body, retained]) {
+        const assessment = assessSignalSiteIdentity(
+          signal,
+          [content],
+          [url],
+        );
+        expect(assessment).toMatchObject({
+          status: "ambiguous",
+          nameMatched: false,
+          corroboratedBy: null,
+        });
+        expect(
+          buildSignalIdentityQuote(content, url, signal, assessment),
+        ).toBe("");
+      }
+    },
+  );
+
+  it.each([
+    "https://beacon.example/documents/beacon-guide-2nv83k525olk",
+    "https://beacon.example/company/1234",
+  ])(
+    "accepts strong host-publisher proof at a structurally ambiguous route: %s",
+    (pageUrl) => {
+      const signal = {
+        rawName: "Beacon Aerospace LLC",
+        uei: null,
+        cage: null,
+        city: "Austin",
+        state: "TX",
+      } as const;
+      const content = [
+        sameSitePublisherJsonLd(signal.rawName, pageUrl),
+        "Our company manufactures flight controls for aircraft operators.",
+        "Austin, TX 78701.",
+        "Copyright © 2026 Beacon Aerospace LLC. All rights reserved.",
+      ].join("\n");
+      const assessment = assessSignalSiteIdentity(
+        signal,
+        [content],
+        [pageUrl],
+      );
+      const quote = buildSignalIdentityQuote(
+        content,
+        pageUrl,
+        signal,
+        assessment,
+      );
+
+      expect(assessment).toMatchObject({
+        status: "verified",
+        nameMatched: true,
+        corroboratedBy: "location",
+      });
+      expect(quote).toContain("role=WebSite.publisher");
+      expect(quote).toContain(
+        "Copyright © 2026 Beacon Aerospace LLC. All rights reserved.",
+      );
+      expect(quote.length).toBeLessThanOrEqual(500);
+      expect(
+        assessSignalSiteIdentity(signal, [quote], [pageUrl]),
+      ).toMatchObject({
+        status: "verified",
+        nameMatched: true,
+        corroboratedBy: "location",
+      });
+    },
+  );
+
+  it.each([
+    {
+      label: "same-site Company Website metadata",
+      publisherMetadata: "Company Website: https://beacon.example/",
+    },
+    {
+      label: "an internally credited upload",
+      publisherMetadata: "Guide uploaded by our engineering team",
+    },
+  ])("keeps official publisher identity with $label", ({ publisherMetadata }) => {
+    const pageUrl = "https://beacon.example/about";
+    const signal = {
+      rawName: "Beacon Aerospace LLC",
+      uei: null,
+      cage: null,
+      city: "Austin",
+      state: "TX",
+    } as const;
+    const content = [
+      sameSitePublisherJsonLd(signal.rawName, pageUrl),
+      "Our company manufactures flight controls for aircraft operators.",
+      "Austin, TX 78701.",
+      "Copyright © 2026 Beacon Aerospace LLC. All rights reserved.",
+      publisherMetadata,
+    ].join("\n");
+
+    expect(
+      assessSignalSiteIdentity(signal, [content], [pageUrl]),
+    ).toMatchObject({
+      status: "verified",
+      nameMatched: true,
+      corroboratedBy: "location",
+    });
+  });
+
+  it("rejects a cross-host Website profile field despite copied subject proof", () => {
+    const signal = {
+      rawName: "Leading Edge Composites, Inc.",
+      uei: null,
+      cage: null,
+      city: "Coatesville",
+      state: "PA",
+    } as const;
+    const pageUrl =
+      "https://www.linkedin.com/company/leading-edge-composites-inc.";
+    const content = [
+      "Leading Edge Composites, Inc.",
+      "Website",
+      "http://www.lec-composites.com",
+      "External link for Leading Edge Composites, Inc.",
+      "At Leading Edge Composites, Inc., we design and manufacture composite products.",
+      "Coatesville, PA",
+    ].join("\n");
+
+    const assessment = assessSignalSiteIdentity(signal, [content], [pageUrl]);
+
+    expect(assessment).toMatchObject({
+      status: "ambiguous",
+      nameMatched: false,
+      corroboratedBy: null,
+    });
+    expect(
+      buildSignalIdentityQuote(content, pageUrl, signal, assessment),
+    ).toBe("");
+  });
+
+  it("rejects a cross-host Website profile field separated by a blank line", () => {
+    const signal = {
+      rawName: "Leading Edge Composites, Inc.",
+      uei: null,
+      cage: null,
+      city: "Coatesville",
+      state: "PA",
+    } as const;
+    const pageUrl =
+      "https://www.linkedin.com/company/leading-edge-composites-inc.";
+    const content = [
+      "Leading Edge Composites, Inc.",
+      "Website",
+      "",
+      "http://www.lec-composites.com",
+      "External link for Leading Edge Composites, Inc.",
+      "At Leading Edge Composites, Inc., we design and manufacture composite products.",
+      "Coatesville, PA",
+    ].join("\n");
+
+    const assessment = assessSignalSiteIdentity(signal, [content], [pageUrl]);
+
+    expect(assessment).toMatchObject({
+      status: "ambiguous",
+      nameMatched: false,
+      corroboratedBy: null,
+    });
+    expect(
+      buildSignalIdentityQuote(content, pageUrl, signal, assessment),
+    ).toBe("");
+  });
+
+  it("lets explicit external-host context override copied host-publisher proof", () => {
+    const pageUrl =
+      "https://documents.example/documents/beacon-guide-2nv83k525olk";
+    const signal = {
+      rawName: "Beacon Aerospace LLC",
+      uei: null,
+      cage: null,
+      city: "Austin",
+      state: "TX",
+    } as const;
+    const content = [
+      sameSitePublisherJsonLd(signal.rawName, pageUrl),
+      "Uploaded by: Example User",
+      "This document was uploaded by user and is hosted in our document library.",
+      "At Beacon Aerospace LLC, we manufacture flight controls in Austin, TX 78701.",
+      "Copyright © 2026 Beacon Aerospace LLC. All rights reserved.",
+      "Copyright © 2026 Document Library LLC. All rights reserved.",
+    ].join("\n");
+    const assessment = assessSignalSiteIdentity(
+      signal,
+      [content],
+      [pageUrl],
+    );
+
+    expect(assessment).toMatchObject({
+      status: "ambiguous",
+      nameMatched: false,
+      corroboratedBy: null,
+    });
+    expect(
+      buildSignalIdentityQuote(content, pageUrl, signal, assessment),
+    ).toBe("");
+  });
+
+  it.each([
+    {
+      label: "Leading Edge design credit and copyright",
+      signal: {
+        rawName: "Leading Edge Composites, Inc.",
+        uei: null,
+        cage: null,
+        city: "Coatesville",
+        state: "PA",
+      },
+      pages: [
+        {
+          url: "https://www.lec-composites.example/contact/",
+          body: [
+            "Composite parts manufacturing, engineering, quality, and customer support.",
+            "645 Sands Court, Suite 101, Coatesville, PA 19320",
+            "Designed by HolyStone Studios © 2021 Leading Edge Composites",
+          ].join("\n"),
+        },
+      ],
+    },
+    {
+      label: "Precision Sensors bounded publisher metadata on a parent-owned site",
+      signal: {
+        rawName: "Precision Sensors Inc",
+        uei: null,
+        cage: null,
+        city: "Milford",
+        state: "CT",
+      },
+      pages: [
+        {
+          url: "https://precisionsensors.example/company/company-profile/",
+          body: [
+            sameSitePublisherJsonLd(
+              "Precision Sensors",
+              "https://precisionsensors.example/",
+            ),
+            "Company Profile",
+            "Precision Sensors, located in Milford, CT, was founded to serve aerospace and defense.",
+            "Precision Sensors Inc. Introductory Video",
+            "Division of United Electric Controls",
+            "© 2026 United Electric Controls. All rights reserved.",
+            "Later unrelated navigation and catalog content does not negate the complete publisher and location proof retained above.",
+          ].join("\n"),
+        },
+      ],
+    },
+    {
+      label: "Av-DEC copyright suffix split across normalized lines",
+      signal: {
+        rawName: "Aviation Devices & Electronic Components, LLC",
+        uei: null,
+        cage: null,
+        city: "Fort Worth",
+        state: "TX",
+      },
+      pages: [
+        {
+          url: "https://avdec.example/about",
+          body: [
+            "Contact us:",
+            "Aviation Devices & Electronic Components, LLC",
+            "3215 West Loop 820 South",
+            "Fort Worth, Texas 76116",
+            "Copyright © 2000-2026 Aviation Devices & Electronic Components, LLC. All",
+            "rights reserved.",
+          ].join("\n"),
+        },
+      ],
+    },
+    {
+      label: "LEDtronics mobile and redirected publisher pages",
+      signal: {
+        rawName: "Ledtronics Inc",
+        uei: null,
+        cage: null,
+        city: "Torrance",
+        state: "CA",
+      },
+      pages: [
+        {
+          url: "https://web.ledtronics.example/",
+          body: [
+            "LEDtronics — American LED Lighting & Indicator Experts",
+            "23105 Kashiwa Ct, Torrance, CA 90505",
+            "All images and text on our website are copyrighted property of LEDtronics.",
+            "Copyright © 1997-2025 LEDtronics, Inc., All Rights Reserved.",
+          ].join("\n"),
+        },
+        {
+          url: "https://ledtronics.example/AboutUs/mobile.aspx",
+          body: [
+            "LEDtronics Corporate Information",
+            "LEDtronics, Inc. 23105 Kashiwa Ct, Torrance, CA, 90505",
+            "Copyright © 1997-2016 LEDtronics, Inc., All Rights Reserved.",
+          ].join("\n"),
+        },
+      ],
+    },
+  ])(
+    "retains complete bounded official-site proof: $label",
+    ({ signal, pages }) => {
+      const assessment = assessSignalSiteIdentity(
+        signal,
+        pages.map((page) => page.body),
+        pages.map((page) => page.url),
+      );
+      expect(assessment).toMatchObject({
+        status: "verified",
+        nameMatched: true,
+        corroboratedBy: "location",
+      });
+      const proof = pages.flatMap((page) => {
+        const quote = buildSignalIdentityQuote(
+          page.body,
+          page.url,
+          signal,
+          assessment,
+        );
+        return quote === "" ? [] : [{ quote, url: page.url }];
+      });
+      expect(proof.length).toBeGreaterThan(0);
+      expect(proof.every(({ quote }) => quote.length <= 500)).toBe(true);
+      expect(
+        proof.some(({ quote }) =>
+          quote
+            .toLocaleLowerCase("en-US")
+            .includes(signal.city.toLocaleLowerCase("en-US")),
+        ),
+      ).toBe(true);
+      expect(
+        proof.some(({ quote }) =>
+          /(?:copyright|©|role=WebSite\.publisher)/iu.test(quote),
+        ),
+      ).toBe(true);
+    },
+  );
+
   it("preserves a manufacturer page hosted within its parent's site", () => {
     const pageUrl =
       "https://www.pccfasteners.com/companies/pcc-fasteners/pb-fasteners.html";
@@ -2593,6 +3032,495 @@ describe.skipIf(!DB_TESTS_ENABLED)("official site retry semantics (DB)", () => {
       if (error !== rollback) throw error;
     } finally {
       vi.unstubAllEnvs();
+    }
+  });
+
+  it("reconciles audited publisher attribution during adaptive admission", async () => {
+    const db = getDatabase();
+    const observedAt = "2026-09-29T12:00:00.000Z";
+    const cases = [
+      {
+        label: "Quality Aircraft Acrylics hosted email profile",
+        rawName: "Quality Aircraft Acrylics Inc",
+        city: "Kansas City",
+        state: "KS",
+        expectedDomain: null,
+        pages: [
+          {
+            url: "https://profiles.example/c/quality-aircraft-acrylics-inc-email-format",
+            body: [
+              "Quality Aircraft Acrylics Inc Email Formats",
+              "Get Verified Emails Of Quality Aircraft Acrylics Inc Employees",
+              "Website | qualityaircraftacrylicsinc.com",
+              "At Quality Aircraft Acrylics Inc, we repair wingtip lenses in Kansas City, KS.",
+              "© 2026 Profiles Data Ltd. All rights reserved.",
+            ].join("\n"),
+          },
+        ],
+      },
+      {
+        label: "Galley Support Innovations hosted company profile",
+        rawName: "Galley Support Innovations, Inc",
+        city: "Sherwood",
+        state: "AR",
+        expectedDomain: null,
+        pages: [
+          {
+            url: "https://marketplace.example/company/2939",
+            body: [
+              "Products | People | Companies | Events",
+              "At Galley Support Innovations, we manufacture galley products in Sherwood, Arkansas.",
+              "We are a family owned and operated business.",
+              "Find in-depth information on thousands of companies, people and products.",
+              "© 2022 Online Expos LLC. All rights reserved.",
+            ].join("\n"),
+          },
+        ],
+      },
+      {
+        label: "Airworthy Aerospace hosted management profile",
+        rawName: "Airworthy Aerospace Industries",
+        city: "Hudson",
+        state: "WI",
+        expectedDomain: null,
+        pages: [
+          {
+            url: "https://leads.example/company/AirworthyAerospaceIndustries-1079077/",
+            body: [
+              "Get the authenticated email list of the top managers.",
+              "Company Website | http://www.airworthy.aero/",
+              "Domain Name | airworthy.aero",
+              "At Airworthy Aerospace Industries, we provide aerospace products in Hudson, WI.",
+              "© 2026 Lead Data Ltd. All rights reserved.",
+            ].join("\n"),
+          },
+        ],
+      },
+      {
+        label: "uploaded Goodrich Interiors brochure",
+        rawName: "Goodrich Interiors",
+        city: "Phoenix",
+        state: "AZ",
+        expectedDomain: null,
+        pages: [
+          {
+            url: "https://documents.example/documents/goodrich-interiors-capabilities-2nv83k525olk",
+            body: [
+              "Uploaded by: Example User",
+              "This document was uploaded by user.",
+              "At Goodrich Interiors, we design aircraft interiors in Phoenix, AZ.",
+              "Goodrich Interiors Web Site: www.parts.interiors.goodrich.com",
+              "Copyright © 2026 Document Library LLC.",
+            ].join("\n"),
+          },
+        ],
+      },
+      {
+        label: "Leading Edge design credit",
+        rawName: "Leading Edge Composites, Inc.",
+        city: "Coatesville",
+        state: "PA",
+        expectedDomain: "lec-composites.example",
+        pages: [
+          {
+            url: "https://www.lec-composites.example/contact/",
+            body: [
+              "Composite parts manufacturing, engineering, quality, and support.",
+              "645 Sands Court, Suite 101, Coatesville, PA 19320",
+              "Designed by HolyStone Studios © 2021 Leading Edge Composites",
+            ].join("\n"),
+          },
+        ],
+      },
+      {
+        label: "truncated Precision Sensors company page",
+        rawName: "Precision Sensors Inc",
+        city: "Milford",
+        state: "CT",
+        expectedDomain: "precisionsensors.example",
+        pages: [
+          {
+            url: "https://precisionsensors.example/company/company-profile/",
+            body: [
+              sameSitePublisherJsonLd(
+                "Precision Sensors",
+                "https://precisionsensors.example/",
+              ),
+              "Company Profile",
+              "Precision Sensors, located in Milford, CT, serves aerospace and defense.",
+              "Division of United Electric Controls",
+              "© 2026 United Electric Controls. All rights reserved.",
+              "The retained response ends later in unrelated navigation.",
+            ].join("\n"),
+            truncated: true,
+          },
+        ],
+      },
+      {
+        label: "Av-DEC split copyright suffix",
+        rawName: "Aviation Devices & Electronic Components, LLC",
+        city: "Fort Worth",
+        state: "TX",
+        expectedDomain: "avdec.example",
+        pages: [
+          {
+            url: "https://avdec.example/about",
+            body: [
+              "Aviation Devices & Electronic Components, LLC",
+              "3215 West Loop 820 South",
+              "Fort Worth, Texas 76116",
+              "Copyright © 2000-2026 Aviation Devices & Electronic Components, LLC. All",
+              "rights reserved.",
+            ].join("\n"),
+          },
+        ],
+      },
+      {
+        label: "LEDtronics mobile pages and serving-subdomain redirect",
+        rawName: "Ledtronics Inc",
+        city: "Torrance",
+        state: "CA",
+        expectedDomain: "ledtronics.example",
+        pages: [
+          {
+            locator: "https://ledtronics.example/",
+            url: "https://web.ledtronics.example/",
+            body: [
+              "LEDtronics — American LED Lighting & Indicator Experts",
+              "23105 Kashiwa Ct, Torrance, CA 90505",
+              "Copyright © 1997-2025 LEDtronics, Inc., All Rights Reserved.",
+            ].join("\n"),
+          },
+          {
+            url: "https://ledtronics.example/AboutUs/mobile.aspx",
+            body: [
+              "LEDtronics Corporate Information",
+              "LEDtronics, Inc. 23105 Kashiwa Ct, Torrance, CA, 90505",
+              "Copyright © 1997-2016 LEDtronics, Inc., All Rights Reserved.",
+            ].join("\n"),
+          },
+        ],
+      },
+    ] as const;
+    const rollback = new Error("Rollback isolated evidence fixtures");
+    try {
+      await db.transaction(async (tx) => {
+        for (const [caseIndex, testCase] of cases.entries()) {
+          const signalId = randomUUID();
+          const signal = {
+            id: signalId,
+            sourceKey: "test",
+            sourceLocator: `test:${signalId}`,
+            sourceFingerprint: `signal-evidence-test:${signalId}`,
+            rawName: testCase.rawName,
+            rawDomain: null,
+            uei: null,
+            cage: null,
+            city: testCase.city,
+            state: testCase.state,
+            country: "US",
+            awardCount: 0,
+            sourcePayload: {},
+            createdAt: new Date(observedAt),
+          };
+          const staleDomain =
+            testCase.expectedDomain === null
+              ? new URL(testCase.pages[0].url).hostname.replace(/^www\./u, "")
+              : null;
+          const staleIdentityId = randomUUID();
+          const staleWebsiteId = randomUUID();
+          const staleOwnershipId = randomUUID();
+          const staleReferences: SourcedSignalResearchEvidence["evidenceRefs"] =
+            staleDomain === null
+              ? []
+              : [
+                  {
+                    evidenceId: staleIdentityId,
+                    role: "support",
+                    stage: "domain",
+                    url: testCase.pages[0].url,
+                    title: `Stale identity: ${testCase.rawName}`,
+                    quote: `At ${testCase.rawName}, we operate in ${testCase.city}, ${testCase.state}.`,
+                    contentSha256: "f".repeat(64),
+                    retrievedAt: "2026-09-28T12:00:00.000Z",
+                    sourceKind: "official_site",
+                    firstParty: true,
+                  },
+                  {
+                    evidenceId: staleWebsiteId,
+                    role: "support",
+                    stage: "website",
+                    url: testCase.pages[0].url,
+                    title: `Stale website: ${testCase.rawName}`,
+                    quote: "Previously attributed website content.",
+                    contentSha256: "f".repeat(64),
+                    retrievedAt: "2026-09-28T12:00:00.000Z",
+                    sourceKind: "official_site",
+                    firstParty: true,
+                  },
+                  ...(testCase.rawName === "Galley Support Innovations, Inc"
+                    ? [
+                        {
+                          evidenceId: staleOwnershipId,
+                          role: "support" as const,
+                          stage: "ownership" as const,
+                          url: testCase.pages[0].url,
+                          title: "Stale first-party independence",
+                          quote:
+                            "We are a family owned and operated business.",
+                          contentSha256: "f".repeat(64),
+                          retrievedAt: "2026-09-28T12:00:00.000Z",
+                          sourceKind: "official_site" as const,
+                          firstParty: true,
+                        },
+                      ]
+                    : []),
+                ];
+          const currentEvidence: SourcedSignalResearchEvidence = {
+            version: "signal_research_v1",
+            signalId,
+            sourceContext: {
+              sourceKey: signal.sourceKey,
+              sourceLocator: signal.sourceLocator,
+              sourceFingerprint: signal.sourceFingerprint,
+              rawName: signal.rawName,
+              rawDomain: signal.rawDomain,
+              uei: signal.uei,
+              cage: signal.cage,
+              city: signal.city,
+              state: signal.state,
+              country: signal.country,
+              awardCount: signal.awardCount,
+            },
+            identity: {
+              status: staleDomain === null ? "not_found" : "verified",
+              verifiedDomain: staleDomain,
+              legalName: signal.rawName,
+              proofEvidenceIds:
+                staleDomain === null ? [] : [staleIdentityId],
+            },
+            website: {
+              status: staleDomain === null ? "not_checked" : "supported",
+              offering: "unknown",
+              excerpts:
+                staleDomain === null ? "" : "Previously attributed content.",
+              productHints: [],
+              namedProductEvidenceIds: [],
+            },
+            ownership:
+              signal.rawName === "Galley Support Innovations, Inc"
+                ? {
+                    status: "independent",
+                    owner: null,
+                    year: null,
+                    conflicting: false,
+                    currentness: "explicit_current_independence",
+                    supportEvidenceIds: [staleOwnershipId],
+                  }
+                : {
+                    status: "unknown",
+                    owner: null,
+                    year: null,
+                    conflicting: false,
+                    currentness: "unknown",
+                    supportEvidenceIds: [],
+                  },
+            size: {
+              status: "unknown",
+              assessment: "unknown",
+              conflicting: false,
+              indicators: [],
+            },
+            headquarters: {
+              status: "unknown",
+              city: null,
+              state: null,
+              country: null,
+              supportEvidenceIds: [],
+            },
+            missingFacts: ["verified_official_identity"],
+            checkedSources: [],
+            evidenceRefs: staleReferences,
+          };
+          const observations: AnalystResourceObservation[] =
+            testCase.pages.map((page, pageIndex) => {
+              const hashCharacter = ((caseIndex + pageIndex) % 15 + 1).toString(
+                16,
+              );
+              return {
+                tool: "public_page",
+                requestHash: hashCharacter.repeat(64),
+                observedAt,
+                outcome: "success",
+                supportRole: "candidate_evidence",
+                body: page.body,
+                contentType: "text/html",
+                originalByteLength: page.body.length,
+                retainedCharacters: page.body.length,
+                truncated: "truncated" in page && page.truncated === true,
+                redirects:
+                  "locator" in page
+                    ? [
+                        {
+                          url: page.locator,
+                          status: 301,
+                          resolvedAddresses: [],
+                        },
+                      ]
+                    : [],
+                linkedUrls: [],
+                sourceReferences: [
+                  {
+                    locator: "locator" in page ? page.locator : page.url,
+                    finalUrl: page.url,
+                    contentSha256: hashCharacter.repeat(64),
+                    retrievedAt: observedAt,
+                    representation: "normalized_publisher_text",
+                    replayCaveat: "Controlled public-source excerpt.",
+                  },
+                ],
+                failure: null,
+                accessLimit: null,
+                providerReceiptId: null,
+                providerCostUsd: null,
+                providerCostKnown: false,
+              };
+            });
+          await tx.insert(sourceSignals).values(signal);
+          const result = await admitSignalResourceEvidence({
+            db: tx as unknown as Database,
+            signal,
+            currentEvidence,
+            observations,
+          });
+
+          if (testCase.expectedDomain === null) {
+            expect(
+              result.researchEvidence.identity,
+              testCase.label,
+            ).toMatchObject({
+              status: "ambiguous",
+              verifiedDomain: null,
+              proofEvidenceIds: [],
+            });
+            expect(
+              result.researchEvidence.evidenceRefs.filter((reference) => {
+                if (!reference.url.startsWith("http")) return false;
+                return (
+                  new URL(reference.url).hostname.replace(/^www\./u, "") ===
+                    staleDomain &&
+                  (reference.firstParty ||
+                    reference.sourceKind === "official_site")
+                );
+              }),
+              testCase.label,
+            ).toEqual([]);
+            if (signal.rawName === "Galley Support Innovations, Inc") {
+              expect(result.researchEvidence.ownership).toMatchObject({
+                status: "unknown",
+                owner: null,
+                supportEvidenceIds: [],
+              });
+            }
+            continue;
+          }
+
+          expect(
+            result.researchEvidence.identity,
+            testCase.label,
+          ).toMatchObject({
+            status: "verified",
+            verifiedDomain: testCase.expectedDomain,
+          });
+          const proofReferences =
+            result.researchEvidence.evidenceRefs.filter((reference) =>
+              result.researchEvidence.identity.proofEvidenceIds.includes(
+                reference.evidenceId,
+              ),
+            );
+          expect(proofReferences.length, testCase.label).toBeGreaterThan(0);
+          expect(
+            proofReferences.every(
+              (reference) =>
+                reference.firstParty &&
+                reference.sourceKind === "official_site" &&
+                reference.quote.length <= 500,
+            ),
+            testCase.label,
+          ).toBe(true);
+          const reused = await admitSignalResourceEvidence({
+            db: tx as unknown as Database,
+            signal,
+            currentEvidence: result.researchEvidence,
+            observations: [],
+          });
+          expect(reused.researchEvidence.identity, testCase.label).toEqual(
+            result.researchEvidence.identity,
+          );
+          expect(
+            reused.researchEvidence.evidenceRefs.filter((reference) =>
+              reused.researchEvidence.identity.proofEvidenceIds.includes(
+                reference.evidenceId,
+              ),
+            ),
+            testCase.label,
+          ).toEqual(proofReferences);
+          if (testCase.rawName === "Leading Edge Composites, Inc.") {
+            const shortFreshBody = [
+              "© 2026 Leading Edge Composites, Inc.",
+              "Coatesville, PA",
+            ].join("\n");
+            const sourceObservation = observations[0];
+            if (sourceObservation?.tool !== "public_page") {
+              throw new Error("Expected a controlled public page observation");
+            }
+            const shortFreshObservation: AnalystResourceObservation = {
+              ...sourceObservation,
+              requestHash: "e".repeat(64),
+              body: shortFreshBody,
+              originalByteLength: shortFreshBody.length,
+              retainedCharacters: shortFreshBody.length,
+              sourceReferences: sourceObservation.sourceReferences.map(
+                (reference) => ({
+                  ...reference,
+                  contentSha256: "e".repeat(64),
+                }),
+              ),
+            };
+            const shortFresh = await admitSignalResourceEvidence({
+              db: tx as unknown as Database,
+              signal,
+              currentEvidence,
+              observations: [shortFreshObservation],
+            });
+            expect(
+              shortFresh.researchEvidence.identity,
+              testCase.label,
+            ).toMatchObject({
+              status: "ambiguous",
+              verifiedDomain: null,
+              proofEvidenceIds: [],
+            });
+            const reusedShortFresh = await admitSignalResourceEvidence({
+              db: tx as unknown as Database,
+              signal,
+              currentEvidence: shortFresh.researchEvidence,
+              observations: [],
+            });
+            expect(
+              reusedShortFresh.researchEvidence.identity,
+              testCase.label,
+            ).toMatchObject({
+              status: "ambiguous",
+              verifiedDomain: null,
+              proofEvidenceIds: [],
+            });
+          }
+        }
+        throw rollback;
+      });
+    } catch (error) {
+      if (error !== rollback) throw error;
     }
   });
 });
