@@ -12,7 +12,13 @@ import {
   type ResolutionLogger,
 } from "@asi/database";
 import { getDatabase } from "@asi/database/client";
-import { OpenRouterClient, SafeFetchError, safeFetchUrl } from "@asi/research";
+import {
+  OpenRouterAccountingError,
+  OpenRouterBudgetDeferredError,
+  OpenRouterClient,
+  SafeFetchError,
+  safeFetchUrl,
+} from "@asi/research";
 import type { NextRequest } from "next/server";
 
 import { jsonError, jsonSuccess, jsonValue } from "@/lib/api";
@@ -228,6 +234,12 @@ async function callWithRepair<T>(
       );
       return result.data;
     } catch (error) {
+      if (
+        error instanceof OpenRouterBudgetDeferredError ||
+        error instanceof OpenRouterAccountingError
+      ) {
+        throw error;
+      }
       lastError = error instanceof Error ? error.message : String(error);
     }
   }
@@ -351,6 +363,16 @@ export async function POST(
       headers: { "Cache-Control": "private, no-store" },
     });
   } catch (error) {
+    if (
+      error instanceof OpenRouterBudgetDeferredError ||
+      error instanceof OpenRouterAccountingError
+    ) {
+      return jsonError(
+        "internal_error",
+        "Domain resolution model access is unavailable under the active research budget",
+        503,
+      );
+    }
     if (error instanceof LeadNotFoundError) {
       return jsonError("not_found", error.message, 404);
     }

@@ -42,6 +42,15 @@ import {
   type OpenRouterAttemptTelemetry,
 } from "../openrouter.js";
 import {
+  OpenRouterAccountingError,
+  OpenRouterBudgetDeferredError,
+  openRouterBudgetScopeConfigured,
+  openRouterFailureAccounting,
+  type OpenRouterAccountingContext,
+  type OpenRouterRequestAccounting,
+  type OpenRouterUnsettledAccounting,
+} from "../openrouter-budget.js";
+import {
   analystResourceRequestHash,
   createAnalystResourceExecutor,
   type AnalystResourceExecutor,
@@ -1968,12 +1977,14 @@ export interface AnalystModelCallRequest {
   readonly modelId: string;
   readonly prompt: string;
   readonly mustFinalize: boolean;
+  readonly accounting?: OpenRouterAccountingContext;
 }
 
 export interface AnalystModelCallResult {
   readonly turn: SignalAnalystTurn;
   readonly returnedModel: string | null;
   readonly costUsd: number | null;
+  readonly accounting?: OpenRouterRequestAccounting;
 }
 
 export interface MuseReviewDependencies extends DailyModelBudgetDependencies {
@@ -2545,6 +2556,7 @@ function knownAttemptCost(
     : attempts.reduce((sum, attempt) => sum + (attempt.costUsd ?? 0), 0);
 }
 
+
 async function callConfiguredMuse(
   client: OpenRouterClient,
   request: AnalystModelCallRequest,
@@ -2565,11 +2577,22 @@ async function callConfiguredMuse(
       prompt: request.prompt,
       maxAttempts: 1,
       timeoutMs: 60_000,
+      ...(request.accounting === undefined
+        ? {}
+        : { accounting: request.accounting }),
     });
   return {
     turn: response.data.turn,
     returnedModel: response.telemetry.model,
-    costUsd: response.telemetry.costUsd,
+    costUsd:
+      response.accounting === undefined
+        ? response.telemetry.costUsd
+        : response.accounting.providerCostUsd === null
+          ? null
+          : Number(response.accounting.providerCostUsd),
+    ...(response.accounting === undefined
+      ? {}
+      : { accounting: response.accounting }),
   };
 }
 
@@ -2588,11 +2611,21 @@ async function executeJournalledModelCall(input: {
 }> {
   let result: AnalystModelCallResult | null = null;
   let error: unknown = null;
-  let costUsd: number | null = null;
+  let costUsd: number | null;
+  let costUsdText: string | null;
   let returnedModel: string | null = null;
+  let accounting:
+    | OpenRouterRequestAccounting
+    | OpenRouterUnsettledAccounting
+    | undefined;
   try {
     const received = await input.call();
-    costUsd = received.costUsd;
+    accounting = received.accounting;
+    costUsdText =
+      accounting === undefined
+        ? (received.costUsd === null ? null : received.costUsd.toString())
+        : accounting.providerCostUsd;
+    costUsd = costUsdText === null ? null : Number(costUsdText);
     returnedModel = received.returnedModel;
     const parsedTurn = signalAnalystTurnSchema.safeParse(received.turn);
     if (parsedTurn.success) {
@@ -2602,24 +2635,61 @@ async function executeJournalledModelCall(input: {
     }
   } catch (caught) {
     error = caught;
+    accounting =
+      caught instanceof OpenRouterAccountingError
+        ? caught.unsettledAccounting
+        : caught instanceof OpenRouterClientError
+          ? (caught.accounting ?? openRouterFailureAccounting(caught) ?? undefined)
+          : (openRouterFailureAccounting(caught) ?? undefined);
+    if (caught instanceof OpenRouterBudgetDeferredError) {
+      await finishSignalAnalystStep(input.db, input.step.id, {
+        status: "quota_deferred",
+        error: errorMessage(caught),
+        costKnown: false,
+        costUsd: null,
+      });
+      throw caught;
+    }
     if (caught instanceof OpenRouterClientError) {
-      costUsd = knownAttemptCost(caught.attempts);
       returnedModel = caught.attempts.at(-1)?.model ?? null;
     }
+    if (accounting === undefined) {
+      const fallback =
+        caught instanceof OpenRouterClientError
+          ? knownAttemptCost(caught.attempts)
+          : null;
+      costUsdText = fallback === null ? null : fallback.toString();
+    } else {
+      costUsdText = accounting.providerCostUsd;
+    }
+    costUsd = costUsdText === null ? null : Number(costUsdText);
   }
-  const receiptId = randomUUID();
-  await insertFaaReviewModelUsageReceipt(input.db, {
-    id: receiptId,
-    sourceSignalId: input.claim.signalId,
-    configuredModel: input.config.modelA,
-    returnedModel,
-    phase: "muse",
-    rung: null,
-    promptVersion: input.promptVersion,
-    inputHash: input.claim.inputHash,
-    costUsd: costUsd === null ? null : costUsd.toString(),
-    observedAt: new Date(),
-  });
+  if (
+    result !== null &&
+    accounting === undefined &&
+    openRouterBudgetScopeConfigured()
+  ) {
+    throw new Error(
+      "Funded Muse request completed without a durable accounting receipt",
+    );
+  }
+  const receiptId =
+    accounting?.providerReservationId ??
+    (openRouterBudgetScopeConfigured() ? null : randomUUID());
+  if (receiptId !== null) {
+    await insertFaaReviewModelUsageReceipt(input.db, {
+      id: receiptId,
+      sourceSignalId: input.claim.signalId,
+      configuredModel: input.config.modelA,
+      returnedModel,
+      phase: "muse",
+      rung: null,
+      promptVersion: input.promptVersion,
+      inputHash: input.claim.inputHash,
+      costUsd: costUsdText,
+      observedAt: new Date(),
+    });
+  }
   const finished = await finishSignalAnalystStep(input.db, input.step.id, {
     status:
       result !== null
@@ -2629,9 +2699,9 @@ async function executeJournalledModelCall(input: {
           : "retryable_failure",
     response: result === null ? null : (result.turn as unknown as SignalReviewJson),
     error: result === null ? errorMessage(error) : null,
-    modelUsageReceiptId: receiptId,
-    costKnown: costUsd !== null,
-    costUsd: costUsd === null ? null : costUsd.toString(),
+    ...(receiptId === null ? {} : { modelUsageReceiptId: receiptId }),
+    costKnown: costUsdText !== null,
+    costUsd: costUsdText,
   });
   return { result, error, claimCurrent: finished.claimCurrent, costUsd };
 }
@@ -3468,6 +3538,14 @@ export async function runMuseReviews(
                   modelId: config.modelA,
                   prompt: pendingModel.prompt,
                   mustFinalize: pendingModel.mustFinalize,
+                  accounting: {
+                    db,
+                    sourceSignalId: claim.signalId,
+                    analystStepId: begun.value.step.id,
+                    caseId: begun.value.step.caseId,
+                    inputHash,
+                    promptVersion: pendingModel.promptVersion,
+                  },
                 }),
             });
             summary.costUsd += modelResult.costUsd ?? 0;
@@ -3757,7 +3835,11 @@ export async function runMuseReviews(
           return;
         }
       } catch (error) {
-        if (error instanceof DailyModelBudgetDeferred || isOpenRouterQuotaError(error)) {
+        if (
+          error instanceof DailyModelBudgetDeferred ||
+          error instanceof OpenRouterBudgetDeferredError ||
+          isOpenRouterQuotaError(error)
+        ) {
           if (await deferSignalReview(db, claim, error)) summary.deferred += 1;
           else summary.stale += 1;
           return;
@@ -5037,15 +5119,7 @@ export async function runJevReviews(
     config,
   });
   const apiKey = deps.apiKey ?? process.env["OPENROUTER_API_KEY"] ?? "";
-  const caller: JevLadderCaller =
-    deps.callJev ??
-    ((request) =>
-      callJev(
-        apiKey,
-        { ...request.state },
-        { ...request.questions },
-        { model: config.jevModel, timeoutMs: 60_000, maxRetries: 0 },
-      ));
+  const injectedCaller = deps.callJev;
   let screened = 0;
   let hp = 0;
   let research = 0;
@@ -5099,12 +5173,73 @@ export async function runJevReviews(
           evidence,
           call: async (request) => {
             await ensureBudget();
-            const receiptId = randomUUID();
-            const result = await caller(request);
-            const observedAt = new Date();
-            costUsd += result.costUsd ?? 0;
+            let result: JevCallResult;
+            try {
+              result =
+                injectedCaller === undefined
+                  ? await callJev(
+                      apiKey,
+                      { ...request.state },
+                      { ...request.questions },
+                      {
+                        model: config.jevModel,
+                        timeoutMs: 60_000,
+                        maxRetries: 0,
+                        accounting: {
+                          db,
+                          sourceSignalId: claim.signalId,
+                          inputHash,
+                          promptVersion: request.promptVersion,
+                        },
+                      },
+                    )
+                  : await injectedCaller(request);
+            } catch (error) {
+              const accounting =
+                error instanceof OpenRouterAccountingError
+                  ? error.unsettledAccounting
+                  : error instanceof OpenRouterClientError
+                    ? (error.accounting ??
+                      openRouterFailureAccounting(error) ??
+                      undefined)
+                    : (openRouterFailureAccounting(error) ?? undefined);
+              if (accounting !== undefined) {
+                await insertFaaReviewModelUsageReceipt(db, {
+                  id: accounting.providerReservationId,
+                  sourceSignalId: claim.signalId,
+                  configuredModel: config.jevModel,
+                  returnedModel:
+                    error instanceof OpenRouterClientError
+                      ? (error.attempts.at(-1)?.model ?? null)
+                      : null,
+                  phase: "jev",
+                  rung: request.rung,
+                  promptVersion: request.promptVersion,
+                  inputHash,
+                  costUsd: accounting.providerCostUsd,
+                  observedAt: new Date(),
+                });
+              }
+              throw error;
+            }
+            const accounting = result.accounting;
+            if (
+              accounting === undefined &&
+              openRouterBudgetScopeConfigured()
+            ) {
+              throw new Error(
+                "Funded Jev request completed without a durable accounting receipt",
+              );
+            }
+            const receiptCostUsdText =
+              accounting === undefined
+                ? (result.costUsd === null ? null : result.costUsd.toString())
+                : accounting.providerCostUsd;
+            const receiptCostUsd =
+              receiptCostUsdText === null ? null : Number(receiptCostUsdText);
+            costUsd += receiptCostUsd ?? 0;
             await insertFaaReviewModelUsageReceipt(db, {
-              id: receiptId,
+              id: accounting?.providerReservationId ?? randomUUID(),
               sourceSignalId: claim.signalId,
               configuredModel: config.jevModel,
               returnedModel: result.model,
@@ -5112,9 +5247,8 @@ export async function runJevReviews(
               rung: request.rung,
               promptVersion: request.promptVersion,
               inputHash,
-              costUsd:
-                result.costUsd === null ? null : result.costUsd.toString(),
-              observedAt,
+              costUsd: receiptCostUsdText,
+              observedAt: new Date(),
             });
             return result;
           },
@@ -5208,6 +5342,7 @@ export async function runJevReviews(
       } catch (error) {
         if (
           error instanceof DailyModelBudgetDeferred ||
+          error instanceof OpenRouterBudgetDeferredError ||
           isOpenRouterQuotaError(error)
         ) {
           if (await deferSignalReview(db, claim, error)) {

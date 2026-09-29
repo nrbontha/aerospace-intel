@@ -134,6 +134,7 @@ const serverEnvSchema = z
       .default("disabled"),
     FAA_JEV_SOURCE_SIGNAL_IDS: optionalUuidList,
     EXA_BUDGET_SCOPE_ID: optionalTrimmedString(z.string().min(1)),
+    OPENROUTER_BUDGET_SCOPE_ID: optionalTrimmedString(z.string().min(1)),
     OPENROUTER_MAX_COST_PER_RUN_USD: positiveNumberWithDefault(2),
     OPENROUTER_MAX_COST_PER_DAY_USD: positiveNumberWithDefault(15),
     RESEARCH_MAX_TOOL_CALLS: positiveIntegerWithDefault(50, 10_000),
@@ -174,6 +175,18 @@ const serverEnvSchema = z
         message:
           "EXA_BUDGET_SCOPE_ID is required when FAA_ANALYST_MODE enables Muse",
         path: ["EXA_BUDGET_SCOPE_ID"],
+      });
+    }
+
+    if (
+      env.FAA_ANALYST_MODE === "bounded_paid" &&
+      env.OPENROUTER_BUDGET_SCOPE_ID === undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "OPENROUTER_BUDGET_SCOPE_ID is required when FAA_ANALYST_MODE is bounded_paid",
+        path: ["OPENROUTER_BUDGET_SCOPE_ID"],
       });
     }
 

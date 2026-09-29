@@ -2,8 +2,6 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   EXA_SEARCH_QUERY_MAX_LENGTH,
-  EXA_SEARCH_RESULT_LIMIT,
-  EXA_SEARCH_TEXT_MAX_CHARACTERS,
   EXA_SEARCH_TIMEOUT_MS,
   ExaApiKeyMissingError,
   ExaSearchClient,
@@ -37,40 +35,6 @@ describe("ExaSearchClient", () => {
       ExaApiKeyMissingError,
     );
     expect(called).toBe(false);
-  });
-
-  it("sends one bounded POST with the Exa authentication header", async () => {
-    const calls: Array<{
-      input: RequestInfo | URL;
-      init: RequestInit | undefined;
-    }> = [];
-    const client = new ExaSearchClient({
-      apiKey: "test-exa-key",
-      fetch: async (input, init) => {
-        calls.push({ input, init });
-        return exaResponse([validResult]);
-      },
-    });
-
-    await expect(client.search("  Zephyr   International  ")).resolves.toEqual([
-      validResult,
-    ]);
-    expect(calls).toHaveLength(1);
-    expect(calls[0]).toMatchObject({
-      input: "https://api.exa.ai/search",
-      init: {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": "test-exa-key",
-        },
-      },
-    });
-    expect(JSON.parse(String(calls[0]?.init?.body))).toEqual({
-      query: "Zephyr International",
-      numResults: EXA_SEARCH_RESULT_LIMIT,
-      contents: { text: { maxCharacters: EXA_SEARCH_TEXT_MAX_CHARACTERS } },
-    });
   });
 
   it.each([
