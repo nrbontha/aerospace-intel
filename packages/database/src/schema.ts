@@ -2851,8 +2851,9 @@ export const researchProviderBudgetScopeSignals = pgTable(
 );
 
 /**
- * Before-call paid-provider reservations and after-call receipts. This ledger
- * excludes model usage, which remains in faa_review_model_usage/model_usage.
+ * Before-call Exa/OpenRouter reservations and after-call receipts for scope
+ * exposure. FAA model usage projects the same OpenRouter receipt UUID into
+ * faa_review_model_usage; do not add both ledgers when totaling model spend.
  */
 export const researchProviderUsage = pgTable(
   "research_provider_usage",
