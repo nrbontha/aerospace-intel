@@ -1,4 +1,16 @@
 import { createHash } from "node:crypto";
+import {
+  MUSE_OPENROUTER_ESTIMATED_COST_USD,
+  OpenRouterAccountingError,
+  OpenRouterBudgetDeferredError,
+  executeAccountedOpenRouterRequest,
+  openRouterBudgetScopeConfigured,
+  openRouterFailureAccounting,
+  type AccountedOpenRouterResponse,
+  type OpenRouterAccountingContext,
+  type OpenRouterRequestAccounting,
+} from "./openrouter-budget.js";
+
 import { z } from "zod";
 
 const ENDPOINT = "https://openrouter.ai/api/v1/chat/completions";
@@ -17,6 +29,7 @@ export interface OpenRouterModelRouting {
   readonly deep: string;
   readonly fallback: string;
 }
+
 export type OpenRouterErrorCode =
   | "configuration_error"
   | "cancelled"
@@ -76,10 +89,18 @@ export interface OpenRouterStructuredRequest<T> {
   readonly maxRetryDelayMs?: number;
   readonly signal?: AbortSignal;
   readonly validateResult?: (result: T) => boolean;
+  /**
+   * Required when OPENROUTER_BUDGET_SCOPE_ID enables funded enforcement.
+   * It binds this paid wire request to a permitted source signal.
+   */
+  readonly accounting?: OpenRouterAccountingContext;
+
 }
 export interface OpenRouterStructuredResult<T> {
   readonly data: T;
   readonly telemetry: OpenRouterTelemetry;
+  /** Durable OpenRouter reservation for a scoped successful request. */
+  readonly accounting?: OpenRouterRequestAccounting;
 }
 
 export class OpenRouterClientError extends Error {
@@ -87,6 +108,7 @@ export class OpenRouterClientError extends Error {
     readonly code: OpenRouterErrorCode,
     readonly retryable: boolean,
     readonly attempts: readonly OpenRouterAttemptTelemetry[] = [],
+    readonly accounting?: OpenRouterRequestAccounting,
   ) {
     super(
       {
@@ -190,7 +212,12 @@ const envelopeSchema = z.object({
       prompt_tokens: z.number().finite().nonnegative().optional(),
       completion_tokens: z.number().finite().nonnegative().optional(),
       total_tokens: z.number().finite().nonnegative().optional(),
-      cost: z.number().finite().nonnegative().optional(),
+      cost: z
+        .union([
+          z.number().finite().nonnegative(),
+          z.string().regex(/^(?:0|[1-9]\d*)(?:\.\d+)?$/u),
+        ])
+        .optional(),
     })
     .optional(),
 });
@@ -236,9 +263,16 @@ export class OpenRouterClient {
     ) {
       throw new OpenRouterClientError("configuration_error", false);
     }
+    const scoped = openRouterBudgetScopeConfigured();
+    if (scoped) {
+      if (request.accounting === undefined) {
+        throw new OpenRouterBudgetDeferredError("missing_accounting_context", null);
+      }
+      validateScopedMuseRequest(request);
+    }
     const attempts: OpenRouterAttemptTelemetry[] = [];
     const overallStarted = Date.now();
-    const maxAttempts = request.maxAttempts ?? 3;
+    const maxAttempts = scoped ? 1 : (request.maxAttempts ?? 3);
     const maxDelay = request.maxRetryDelayMs ?? 10_000;
     const fallback = request.models.fallback;
     let model = request.models[request.route];
@@ -248,10 +282,27 @@ export class OpenRouterClient {
       if (request.signal?.aborted === true)
         throw new OpenRouterClientError("cancelled", false, attempts);
       const started = Date.now();
+      const body = structuredRequestBody(model, request, jsonSchema, scoped);
       let response: Response;
+      let responseBody: string | undefined;
+      let accounting: OpenRouterRequestAccounting | undefined;
       try {
-        response = await this.#fetch(model, request, jsonSchema);
+        if (scoped) {
+          const accounted = await this.#executeScopedAttempt(request, body);
+          response = accounted.response;
+          responseBody = accounted.body;
+          accounting = accounted.accounting;
+        } else {
+          response = await this.#fetch(request, body);
+        }
       } catch (error) {
+        if (
+          error instanceof OpenRouterAccountingError ||
+          error instanceof OpenRouterBudgetDeferredError
+        ) {
+          throw error;
+        }
+        const failureAccounting = openRouterFailureAccounting(error);
         const clientError =
           error instanceof OpenRouterClientError ? error : null;
         const code: OpenRouterErrorCode = request.signal?.aborted
@@ -278,7 +329,12 @@ export class OpenRouterClient {
           }),
         );
         if (!canRetry) {
-          throw new OpenRouterClientError(code, retryable, attempts);
+          throw new OpenRouterClientError(
+            code,
+            retryable,
+            attempts,
+            failureAccounting ?? clientError?.accounting,
+          );
         }
         if (attempt === maxAttempts - 1) model = fallback;
         await wait(retryDelayMs ?? 0, request.signal);
@@ -287,9 +343,10 @@ export class OpenRouterClient {
       const latencyMs = Date.now() - started;
       if (!response.ok) {
         const errorBody =
-          response.status === 403
+          responseBody ??
+          (response.status === 403
             ? await readBounded(response).catch(() => "")
-            : "";
+            : "");
         const failure = classifyOpenRouterHttpFailure(
           response.status,
           errorBody,
@@ -298,7 +355,7 @@ export class OpenRouterClient {
         const retryDelayMs = canRetry
           ? retryAfter(response.headers.get("retry-after"), attempt, maxDelay)
           : null;
-        if (response.status !== 403) {
+        if (responseBody === undefined && response.status !== 403) {
           await response.body?.cancel().catch(() => undefined);
         }
         attempts.push(
@@ -318,18 +375,27 @@ export class OpenRouterClient {
             failure.code,
             failure.retryable,
             attempts,
+            accounting,
           );
         }
         if (attempt === maxAttempts - 1) model = fallback;
         await wait(retryDelayMs ?? 0, request.signal);
         continue;
       }
-      const parsed = await parseResponse(
-        response,
-        request.schema,
-        request.validateResult,
-        this.#apiKey,
-      );
+      const parsed =
+        responseBody === undefined
+          ? await parseResponse(
+              response,
+              request.schema,
+              request.validateResult,
+              this.#apiKey,
+            )
+          : parseResponseBody(
+              responseBody,
+              request.schema,
+              request.validateResult,
+              this.#apiKey,
+            );
       if (!parsed.valid || parsed.data === undefined) {
         const canRetry = attempt < maxAttempts && !schemaFallbackAttempted;
         attempts.push(
@@ -354,6 +420,7 @@ export class OpenRouterClient {
             "invalid_structured_output",
             false,
             attempts,
+            accounting,
           );
         schemaFallbackAttempted = true;
         model = fallback;
@@ -393,16 +460,80 @@ export class OpenRouterClient {
           attemptCount: attempts.length,
           attempts,
         },
+        ...(accounting === undefined ? {} : { accounting }),
       };
     }
     throw new OpenRouterClientError("provider_unavailable", true, attempts);
   }
 
-  async #fetch<T>(
-    model: string,
+  async #executeScopedAttempt<T>(
     request: OpenRouterStructuredRequest<T>,
-    jsonSchema: object,
+    body: Readonly<Record<string, unknown>>,
+  ): Promise<AccountedOpenRouterResponse> {
+    const controller = new AbortController();
+    let timedOut = false;
+    const timer = setTimeout(() => {
+      timedOut = true;
+      controller.abort();
+    }, request.timeoutMs ?? 30_000);
+    const abort = () => controller.abort();
+    request.signal?.addEventListener("abort", abort, { once: true });
+    try {
+      return await executeAccountedOpenRouterRequest(
+        {
+          context: request.accounting!,
+          operation: "openrouter_muse_structured",
+          requestBody: body,
+          prompt: request.prompt,
+          estimatedCostUsd: MUSE_OPENROUTER_ESTIMATED_COST_USD,
+        },
+        () => this.#fetch(request, body, controller.signal),
+        readBounded,
+      );
+    } catch (error) {
+      if (
+        timedOut &&
+        request.signal?.aborted !== true &&
+        !(error instanceof OpenRouterAccountingError) &&
+        !(error instanceof OpenRouterBudgetDeferredError)
+      ) {
+        throw new OpenRouterClientError(
+          "timeout",
+          true,
+          [],
+          openRouterFailureAccounting(error) ?? undefined,
+        );
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+      request.signal?.removeEventListener("abort", abort);
+    }
+  }
+
+  async #fetch<T>(
+    request: OpenRouterStructuredRequest<T>,
+    body: Readonly<Record<string, unknown>>,
+    signal?: AbortSignal,
   ): Promise<Response> {
+    if (signal !== undefined) {
+      try {
+        return await fetch(ENDPOINT, {
+          method: "POST",
+          headers: {
+            authorization: `Bearer ${this.#apiKey}`,
+            "content-type": "application/json",
+          },
+          body: JSON.stringify(body),
+          signal,
+        });
+      } catch {
+        if (request.signal?.aborted === true) {
+          throw new OpenRouterClientError("cancelled", false);
+        }
+        throw new OpenRouterClientError("network_error", true);
+      }
+    }
     const controller = new AbortController();
     let timedOut = false;
     const timer = setTimeout(() => {
@@ -418,23 +549,7 @@ export class OpenRouterClient {
           authorization: `Bearer ${this.#apiKey}`,
           "content-type": "application/json",
         },
-        body: JSON.stringify({
-          model,
-          messages: [
-            { role: "system", content: request.systemPrompt + STRUCTURED_OUTPUT_CONTRACT },
-            { role: "user", content: request.prompt },
-          ],
-          response_format: {
-            type: "json_schema",
-            json_schema: {
-              name: request.schemaName,
-              strict: true,
-              schema: sanitizeJsonSchema(jsonSchema),
-            },
-          },
-          max_tokens: request.maxOutputTokens ?? 4_096,
-          temperature: request.temperature ?? 0,
-        }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
     } catch {
@@ -448,6 +563,57 @@ export class OpenRouterClient {
       clearTimeout(timer);
       request.signal?.removeEventListener("abort", abort);
     }
+  }
+}
+
+function structuredRequestBody<T>(
+  model: string,
+  request: OpenRouterStructuredRequest<T>,
+  jsonSchema: object,
+  scoped: boolean,
+): Readonly<Record<string, unknown>> {
+  return {
+    model,
+    messages: [
+      { role: "system", content: request.systemPrompt + STRUCTURED_OUTPUT_CONTRACT },
+      { role: "user", content: request.prompt },
+    ],
+    response_format: {
+      type: "json_schema",
+      json_schema: {
+        name: request.schemaName,
+        strict: true,
+        schema: sanitizeJsonSchema(jsonSchema),
+      },
+    },
+    max_tokens: scoped ? 4_096 : (request.maxOutputTokens ?? 4_096),
+    temperature: request.temperature ?? 0,
+    ...(scoped
+      ? {
+          provider: {
+            max_price: {
+              prompt: "0.10",
+              completion: "0.20",
+              request: "0",
+            },
+            allow_fallbacks: false,
+          },
+        }
+      : {}),
+  };
+}
+
+function validateScopedMuseRequest<T>(
+  request: OpenRouterStructuredRequest<T>,
+): void {
+  const model = request.models[request.route];
+  if (
+    model !== "meta/muse-spark-1.3-contributor" ||
+    (request.maxOutputTokens !== undefined && request.maxOutputTokens !== 4_096) ||
+    request.maxAttempts !== 1 ||
+    (request.temperature !== undefined && request.temperature !== 0)
+  ) {
+    throw new OpenRouterClientError("configuration_error", false);
   }
 }
 
@@ -502,6 +668,28 @@ async function parseResponse<T>(
   let raw = "";
   try {
     raw = await readBounded(response);
+    return parseResponseBody(raw, schema, validate, key);
+  } catch {
+    return {
+      valid: false,
+      responseSha256: sha256(raw),
+      model: "unknown",
+      provider: "openrouter",
+      inputTokens: null,
+      outputTokens: null,
+      totalTokens: null,
+      costUsd: null,
+    };
+  }
+}
+
+function parseResponseBody<T>(
+  raw: string,
+  schema: z.ZodType<T>,
+  validate: ((value: T) => boolean) | undefined,
+  key: string,
+): Parsed<T> {
+  try {
     const envelope = envelopeSchema.parse(JSON.parse(raw));
     const message = envelope.choices[0]?.message;
     const value =
@@ -537,7 +725,12 @@ function responseDetails(envelope: Envelope, responseSha256: string) {
     inputTokens: envelope.usage?.prompt_tokens ?? null,
     outputTokens: envelope.usage?.completion_tokens ?? null,
     totalTokens: envelope.usage?.total_tokens ?? null,
-    costUsd: envelope.usage?.cost ?? null,
+    costUsd:
+      envelope.usage?.cost === undefined
+        ? null
+        : typeof envelope.usage.cost === "number"
+          ? envelope.usage.cost
+          : Number(envelope.usage.cost),
   };
 }
 async function readBounded(response: Response): Promise<string> {

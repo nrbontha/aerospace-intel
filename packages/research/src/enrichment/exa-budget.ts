@@ -10,6 +10,8 @@ import {
 import {
   ExaApiKeyMissingError,
   ExaSearchError,
+  normalizeExaContentsRequest,
+  normalizeExaSearchRequest,
   type ExaContentsResult,
   type ExaProviderResult,
   type ExaSearchClient,
@@ -148,15 +150,15 @@ export function exaProviderRequestHash(
   operation: ExaProviderOperation,
   request: ExaProviderRequest,
 ): string {
-  const canonicalRequest =
+  const normalizedRequest =
     operation === "search"
       ? "query" in request
-        ? { query: request.query }
+        ? normalizeExaSearchRequest(request.query)
         : null
       : "urls" in request
-        ? { urls: [...request.urls] }
+        ? normalizeExaContentsRequest(request.urls)
         : null;
-  if (canonicalRequest === null) {
+  if (normalizedRequest === null) {
     throw new TypeError(`Invalid Exa ${operation} request shape`);
   }
   return createHash("sha256")
@@ -164,7 +166,7 @@ export function exaProviderRequestHash(
       JSON.stringify({
         provider: "exa",
         operation,
-        request: canonicalRequest,
+        request: normalizedRequest,
       }),
     )
     .digest("hex");

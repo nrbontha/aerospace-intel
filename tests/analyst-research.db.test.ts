@@ -34,6 +34,7 @@ import {
 import type { SourceSignalAnalystOverviewCursor } from "../packages/database/src/investor-ranking.js";
 import {
   createResearchProviderBudgetScope,
+  cutoverResearchProviderBudgetScope,
   importLegacyResearchProviderEstimate,
   readResearchProviderBudgetScope,
   reserveResearchProviderUsage,
@@ -953,13 +954,17 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       ).rejects.toThrow();
       expect(await getDatabase().select().from(researchProviderUsage)).toHaveLength(0);
 
+      const wireRequestHash = createHash("sha256")
+        .update("wire-provider-request")
+        .digest("hex");
       const reserved = await reserveResearchProviderUsage(getDatabase(), {
         provider: "exa",
         operation: "search",
         sourceSignalId: caseSignalId,
         analystStepId: first.value.step.id,
         budgetScopeId,
-        requestHash: REQUEST_HASH,
+        analystRequestHash: REQUEST_HASH,
+        requestHash: wireRequestHash,
         estimatedCostUsd: "0.1",
         dailyCapUsd: "10",
         now: new Date("2040-05-01T12:00:00.000Z"),
@@ -975,7 +980,8 @@ describe.skipIf(!DB_TESTS_ENABLED)(
         sourceSignalId: caseSignalId,
         analystStepId: first.value.step.id,
         budgetScopeId,
-        requestHash: REQUEST_HASH,
+        analystRequestHash: REQUEST_HASH,
+        requestHash: wireRequestHash,
         estimatedCostUsd: "0.1",
         dailyCapUsd: "10",
         now: new Date("2040-05-02T12:00:00.000Z"),
@@ -983,7 +989,11 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       expect(reused).toMatchObject({
         outcome: "reserved",
         reused: true,
-        reservation: { id: reserved.reservation.id, usageDay: "2040-05-01" },
+        reservation: {
+          id: reserved.reservation.id,
+          requestHash: wireRequestHash,
+          usageDay: "2040-05-01",
+        },
       });
       const replacement = await claimMuse();
       await ensureCase(replacement);
@@ -1223,6 +1233,196 @@ describe.skipIf(!DB_TESTS_ENABLED)(
           new Date("2042-02-02T12:02:00.000Z"),
         ),
       ).toMatchObject({ status: "closed" });
+    });
+
+    it("seals 1,001 source memberships atomically and keeps a matching retry idempotent", async () => {
+      const sourceSignalIds = Array.from({ length: 1_001 }, () => randomUUID());
+      for (let index = 0; index < sourceSignalIds.length; index += 250) {
+        const chunk = sourceSignalIds.slice(index, index + 250);
+        await getDatabase()
+          .insert(sourceSignals)
+          .values(
+            chunk.map((id) => ({
+              id,
+              sourceKey: "faa_pma_database",
+              sourceLocator: `membership-boundary:${id}`,
+              sourceFingerprint: `membership-boundary:${id}`,
+              rawName: "Membership Boundary",
+            })),
+          );
+      }
+      const scope = {
+        id: "analyst-test:membership-boundary",
+        provider: "exa",
+        startsAt: new Date("2042-03-01T00:00:00.000Z"),
+        totalCapUsd: "1",
+        permitStatus: "paused" as const,
+        allowlistedSourceSignalIds: sourceSignalIds,
+      };
+      await createResearchProviderBudgetScope(getDatabase(), scope);
+      await expect(
+        createResearchProviderBudgetScope(getDatabase(), scope),
+      ).resolves.toMatchObject({ id: scope.id });
+      expect(
+        await readResearchProviderBudgetScope(
+          getDatabase(),
+          scope.id,
+          new Date("2042-03-01T00:00:00.000Z"),
+        ),
+      ).toMatchObject({
+        allowlistedSourceSignalIds: [...sourceSignalIds].sort(),
+      });
+
+      const missingSourceScope = {
+        ...scope,
+        id: "analyst-test:membership-boundary-rollback",
+        allowlistedSourceSignalIds: [
+          ...sourceSignalIds.slice(0, 1_000),
+          randomUUID(),
+        ],
+      };
+      await expect(
+        createResearchProviderBudgetScope(getDatabase(), missingSourceScope),
+      ).rejects.toThrow(/does not exist/iu);
+      expect(
+        await readResearchProviderBudgetScope(
+          getDatabase(),
+          missingSourceScope.id,
+          new Date("2042-03-01T00:00:00.000Z"),
+        ),
+      ).toBeNull();
+    });
+
+    it("pauses a scope when an actual exceeds its reservation bound below the total cap", async () => {
+      const { budgetScopeId, sourceSignalId } = await createProviderScope(
+        "observed-overage",
+        { totalCapUsd: "2" },
+      );
+      const reserved = await reserveResearchProviderUsage(getDatabase(), {
+        provider: "exa",
+        operation: "search",
+        sourceSignalId,
+        budgetScopeId,
+        requestHash: createHash("sha256").update("observed-overage").digest("hex"),
+        estimatedCostUsd: "0.6",
+        dailyCapUsd: "10",
+        now: new Date("2042-03-02T00:00:00.000Z"),
+      });
+      if (reserved.outcome !== "reserved") throw new Error("expected reservation");
+      await settleResearchProviderUsage(getDatabase(), reserved.reservation.id, {
+        status: "succeeded",
+        actualCostUsd: "1.2",
+        observedAt: new Date("2042-03-02T00:01:00.000Z"),
+      });
+      expect(
+        await readResearchProviderBudgetScope(
+          getDatabase(),
+          budgetScopeId,
+          new Date("2042-03-02T00:02:00.000Z"),
+        ),
+      ).toMatchObject({
+        scope: { permitStatus: "paused" },
+        knownActualCostUsd: "1.2",
+        unknownEstimatedCostUsd: "0",
+        committedCostUsd: "1.2",
+        remainingBeforeFloorUsd: "0.8",
+        remainingCostUsd: "0.8",
+      });
+      expect(
+        await getDatabase()
+          .select()
+          .from(researchProviderUsage)
+          .where(eq(researchProviderUsage.id, reserved.reservation.id)),
+      ).toMatchObject([{ actualCostUsd: "1.2", estimatedCostUsd: "0.6" }]);
+    });
+
+    it("closes a scope and creates only its floored $5 remainder", async () => {
+      const oldSourceSignalId = randomUUID();
+      const newSourceSignalId = randomUUID();
+      await getDatabase().insert(sourceSignals).values([
+        {
+          id: oldSourceSignalId,
+          sourceKey: "faa_pma_database",
+          sourceLocator: `cutover-old:${oldSourceSignalId}`,
+          sourceFingerprint: `cutover-old:${oldSourceSignalId}`,
+          rawName: "Cutover Old",
+        },
+        {
+          id: newSourceSignalId,
+          sourceKey: "faa_pma_database",
+          sourceLocator: `cutover-new:${newSourceSignalId}`,
+          sourceFingerprint: `cutover-new:${newSourceSignalId}`,
+          rawName: "Cutover New",
+        },
+      ]);
+      await createResearchProviderBudgetScope(getDatabase(), {
+        id: "analyst-test:cutover-old",
+        provider: "exa",
+        startsAt: new Date("2042-03-03T00:00:00.000Z"),
+        totalCapUsd: "5",
+        permitStatus: "active",
+        allowlistedSourceSignalIds: [oldSourceSignalId],
+      });
+      const reservation = await reserveResearchProviderUsage(getDatabase(), {
+        provider: "exa",
+        operation: "search",
+        sourceSignalId: oldSourceSignalId,
+        budgetScopeId: "analyst-test:cutover-old",
+        requestHash: createHash("sha256").update("cutover-known").digest("hex"),
+        estimatedCostUsd: "1",
+        dailyCapUsd: "10",
+        now: new Date("2042-03-03T00:01:00.000Z"),
+      });
+      if (reservation.outcome !== "reserved") throw new Error("expected reservation");
+      await settleResearchProviderUsage(getDatabase(), reservation.reservation.id, {
+        status: "succeeded",
+        actualCostUsd: "1.25",
+        observedAt: new Date("2042-03-03T00:02:00.000Z"),
+      });
+      const cutover = await cutoverResearchProviderBudgetScope(getDatabase(), {
+        oldBudgetScopeId: "analyst-test:cutover-old",
+        authorizedCapUsd: "5",
+        observedAt: new Date("2042-03-03T00:03:00.000Z"),
+        newScope: {
+          id: "analyst-test:cutover-new",
+          provider: "exa",
+          startsAt: new Date("2042-03-03T00:04:00.000Z"),
+          allowlistedSourceSignalIds: [newSourceSignalId],
+        },
+      });
+      expect(cutover).toMatchObject({
+        closedScope: { permitStatus: "closed" },
+        newScope: { permitStatus: "paused", totalCapUsd: "3.75" },
+        knownActualCostUsd: "1.25",
+        unknownEstimatedCostUsd: "0",
+        remainingCapUsd: "3.75",
+      });
+      expect(
+        await getDatabase()
+          .select()
+          .from(researchProviderUsage)
+          .where(eq(researchProviderUsage.budgetScopeId, "analyst-test:cutover-new")),
+      ).toEqual([]);
+      await expect(
+        cutoverResearchProviderBudgetScope(getDatabase(), {
+          oldBudgetScopeId: "analyst-test:cutover-old",
+          authorizedCapUsd: "5",
+          observedAt: new Date("2042-03-03T00:05:00.000Z"),
+          newScope: {
+            id: "analyst-test:cutover-minted",
+            provider: "exa",
+            startsAt: new Date("2042-03-03T00:06:00.000Z"),
+            allowlistedSourceSignalIds: [newSourceSignalId],
+          },
+        }),
+      ).rejects.toThrow(/closed provider budget scope/iu);
+      expect(
+        await readResearchProviderBudgetScope(
+          getDatabase(),
+          "analyst-test:cutover-minted",
+          new Date("2042-03-03T00:06:00.000Z"),
+        ),
+      ).toBeNull();
     });
 
     it("persists provider-wide quota cooldown independently of app caps", async () => {

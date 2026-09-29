@@ -174,6 +174,47 @@ export interface ExaSearchClientOptions {
   readonly fetch?: typeof fetch | undefined;
 }
 
+export interface ExaNormalizedSearchRequest {
+  readonly query: string;
+  readonly type: "auto";
+  readonly numResults: typeof EXA_SEARCH_RESULT_LIMIT;
+  readonly contents: {
+    readonly text: { readonly maxCharacters: typeof EXA_SEARCH_TEXT_MAX_CHARACTERS };
+  };
+}
+
+export interface ExaNormalizedContentsRequest {
+  readonly urls: readonly string[];
+  readonly text: {
+    readonly maxCharacters: typeof EXA_CONTENTS_TEXT_MAX_CHARACTERS;
+  };
+}
+
+/** The complete, bounded text-only body used for every paid /search call. */
+export function normalizeExaSearchRequest(query: string): ExaNormalizedSearchRequest {
+  return {
+    query: normalizeQuery(query),
+    type: "auto",
+    numResults: EXA_SEARCH_RESULT_LIMIT,
+    contents: { text: { maxCharacters: EXA_SEARCH_TEXT_MAX_CHARACTERS } },
+  };
+}
+
+/** The complete, bounded text-only body used for every paid /contents call. */
+export function normalizeExaContentsRequest(
+  urls: readonly string[],
+): ExaNormalizedContentsRequest {
+  const targets = urls
+    .map((url) => url.trim())
+    .filter((url) => url.startsWith("http://") || url.startsWith("https://"))
+    .slice(0, EXA_CONTENTS_URL_LIMIT);
+  if (targets.length === 0) throw new ExaSearchError("invalid_request", false);
+  return {
+    urls: targets,
+    text: { maxCharacters: EXA_CONTENTS_TEXT_MAX_CHARACTERS },
+  };
+}
+
 export class ExaSearchClient {
   readonly #apiKey: string | undefined;
   readonly #fetch: typeof fetch;
@@ -197,20 +238,12 @@ export class ExaSearchClient {
     const apiKey = this.#apiKey;
     if (apiKey === undefined) throw new ExaApiKeyMissingError();
 
-    const normalizedQuery = normalizeQuery(query);
-    if (normalizedQuery.includes(apiKey)) {
+    const request = normalizeExaSearchRequest(query);
+    if (request.query.includes(apiKey)) {
       throw new ExaSearchError("invalid_request", false);
     }
 
-    const response = await this.#post(
-      EXA_SEARCH_ENDPOINT,
-      apiKey,
-      {
-        query: normalizedQuery,
-        numResults: EXA_SEARCH_RESULT_LIMIT,
-        contents: { text: { maxCharacters: EXA_SEARCH_TEXT_MAX_CHARACTERS } },
-      },
-    );
+    const response = await this.#post(EXA_SEARCH_ENDPOINT, apiKey, request);
     const providerCostUsd = extractProviderCostUsd(response.payload);
     const parsed = exaResponseSchema.safeParse(response.payload);
     if (!parsed.success) {
@@ -240,17 +273,8 @@ export class ExaSearchClient {
   ): Promise<ExaProviderResult<ExaContentsResult>> {
     const apiKey = this.#apiKey;
     if (apiKey === undefined) throw new ExaApiKeyMissingError();
-    const targets = urls
-      .map((url) => url.trim())
-      .filter((url) => url.startsWith("http://") || url.startsWith("https://"))
-      .slice(0, EXA_CONTENTS_URL_LIMIT);
-    if (targets.length === 0)
-      throw new ExaSearchError("invalid_request", false);
-
-    const response = await this.#post(EXA_CONTENTS_ENDPOINT, apiKey, {
-      urls: targets,
-      text: { maxCharacters: EXA_CONTENTS_TEXT_MAX_CHARACTERS },
-    });
+    const request = normalizeExaContentsRequest(urls);
+    const response = await this.#post(EXA_CONTENTS_ENDPOINT, apiKey, request);
     const providerCostUsd = extractProviderCostUsd(response.payload);
     const parsed = exaContentsResponseSchema.safeParse(response.payload);
     if (!parsed.success) {
@@ -267,7 +291,7 @@ export class ExaSearchClient {
   async #post(
     endpoint: string,
     apiKey: string,
-    body: Record<string, unknown>,
+    body: object,
   ): Promise<{ readonly payload: unknown; readonly status: number }> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), EXA_SEARCH_TIMEOUT_MS);

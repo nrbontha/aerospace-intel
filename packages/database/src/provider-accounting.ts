@@ -1,4 +1,4 @@
-import { and, eq, sql } from "drizzle-orm";
+import { and, eq, inArray, sql } from "drizzle-orm";
 
 import type { Database } from "./client.js";
 import {
@@ -7,6 +7,7 @@ import {
   researchProviderCooldowns,
   researchProviderLegacyEstimates,
   researchProviderUsage,
+  sourceSignals,
   type ResearchProviderBudgetPermitStatus,
   type ResearchProviderBudgetScope,
   type ResearchProviderLegacyEstimate,
@@ -24,7 +25,13 @@ export interface ReserveResearchProviderUsageInput {
   operation: string;
   sourceSignalId: string;
   analystStepId?: string | null;
+  /**
+   * Journal identity for an analyst step. When omitted, requestHash remains
+   * the journal identity for legacy provider calls.
+   */
+  analystRequestHash?: string | null;
   budgetScopeId: string;
+  /** Hash of the exact normalized provider request sent on the wire. */
   requestHash: string;
   estimatedCostUsd: ResearchProviderUsd;
   dailyCapUsd: ResearchProviderUsd;
@@ -109,6 +116,27 @@ export interface CreateResearchProviderBudgetScopeInput {
   allowlistedSourceSignalIds: readonly string[];
 }
 
+export interface CutoverResearchProviderBudgetScopeInput {
+  oldBudgetScopeId: string;
+  newScope: Omit<
+    CreateResearchProviderBudgetScopeInput,
+    "totalCapUsd" | "permitStatus"
+  >;
+  /** Operator-authorized total, never inferred from an old scope cap. */
+  authorizedCapUsd: ResearchProviderUsd;
+  observedAt: Date;
+}
+
+export interface CutoverResearchProviderBudgetScopeResult {
+  closedScope: ResearchProviderBudgetScope;
+  newScope: ResearchProviderBudgetScope;
+  knownActualCostUsd: ResearchProviderUsd;
+  unknownEstimatedCostUsd: ResearchProviderUsd;
+  committedCostUsd: ResearchProviderUsd;
+  remainingBeforeFloorUsd: string;
+  remainingCapUsd: ResearchProviderUsd;
+}
+
 export interface SetResearchProviderBudgetPermitInput {
   status: ResearchProviderBudgetPermitStatus;
   observedAt: Date;
@@ -127,15 +155,21 @@ export interface ResearchProviderBudgetScopeView {
   knownActualCostUsd: ResearchProviderUsd;
   unknownEstimatedCostUsd: ResearchProviderUsd;
   committedCostUsd: ResearchProviderUsd;
+  /** Unfloored total-cap subtraction; negative means observed overage. */
+  remainingBeforeFloorUsd: string;
+  /** Admission remainder, floored at zero because scopes cannot have negative caps. */
   remainingCostUsd: ResearchProviderUsd;
   receiptCount: number;
   providerCooldown: { retryAt: Date; reason: string } | null;
 }
 
 const SHA256_PATTERN = /^[0-9a-f]{64}$/u;
+const UUID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const DECIMAL_PATTERN = /^(?:0|[1-9]\d*)(?:\.\d+)?$/u;
 const UTC_DAY_PATTERN = /^\d{4}-\d{2}-\d{2}$/u;
-export const MAX_RESEARCH_PROVIDER_BUDGET_SIGNALS = 100;
+export const MAX_RESEARCH_PROVIDER_BUDGET_SIGNALS = 50_000;
+export const RESEARCH_PROVIDER_BUDGET_SIGNAL_INSERT_CHUNK_SIZE = 1_000;
 
 function nonempty(value: string, name: string): string {
   const normalized = value.trim();
@@ -153,6 +187,14 @@ function decimal(value: string, name: string): ResearchProviderUsd {
   return normalizedFraction === undefined || normalizedFraction.length === 0
     ? normalizedInteger
     : `${normalizedInteger}.${normalizedFraction}`;
+}
+
+function uuid(value: string, name: string): string {
+  const normalized = value.trim();
+  if (!UUID_PATTERN.test(normalized)) {
+    throw new TypeError(`${name} must be a UUID`);
+  }
+  return normalized.toLowerCase();
 }
 
 function utcDay(value: string): string {
@@ -198,6 +240,164 @@ async function lockProvider(
   `);
 }
 
+type ProviderAccountingTransaction = Parameters<
+  Parameters<Database["transaction"]>[0]
+>[0];
+
+interface NormalizedBudgetScopeInput {
+  id: string;
+  provider: string;
+  startsAt: Date;
+  totalCapUsd: ResearchProviderUsd;
+  permitStatus: Exclude<ResearchProviderBudgetPermitStatus, "closed">;
+  sourceSignalIds: string[];
+}
+
+function normalizedBudgetScopeInput(
+  input: CreateResearchProviderBudgetScopeInput,
+): NormalizedBudgetScopeInput {
+  const sourceSignalIds = input.allowlistedSourceSignalIds
+    .map((sourceSignalId, index) =>
+      uuid(sourceSignalId, `allowlistedSourceSignalIds[${index}]`),
+    )
+    .sort();
+  if (sourceSignalIds.length === 0) {
+    throw new TypeError("allowlistedSourceSignalIds must not be empty");
+  }
+  if (sourceSignalIds.length > MAX_RESEARCH_PROVIDER_BUDGET_SIGNALS) {
+    throw new TypeError(
+      `allowlistedSourceSignalIds cannot exceed ${MAX_RESEARCH_PROVIDER_BUDGET_SIGNALS}`,
+    );
+  }
+  if (new Set(sourceSignalIds).size !== sourceSignalIds.length) {
+    throw new TypeError("allowlistedSourceSignalIds must not contain duplicates");
+  }
+  if (input.permitStatus !== "paused" && input.permitStatus !== "active") {
+    throw new TypeError("permitStatus must be paused or active when creating a scope");
+  }
+  return {
+    id: nonempty(input.id, "id"),
+    provider: nonempty(input.provider, "provider"),
+    startsAt: validDate(input.startsAt, "startsAt"),
+    totalCapUsd: decimal(input.totalCapUsd, "totalCapUsd"),
+    permitStatus: input.permitStatus,
+    sourceSignalIds,
+  };
+}
+
+async function validateScopeSourceSignals(
+  tx: ProviderAccountingTransaction,
+  sourceSignalIds: readonly string[],
+): Promise<void> {
+  for (
+    let index = 0;
+    index < sourceSignalIds.length;
+    index += RESEARCH_PROVIDER_BUDGET_SIGNAL_INSERT_CHUNK_SIZE
+  ) {
+    const chunk = sourceSignalIds.slice(
+      index,
+      index + RESEARCH_PROVIDER_BUDGET_SIGNAL_INSERT_CHUNK_SIZE,
+    );
+    const existing = await tx
+      .select({ id: sourceSignals.id })
+      .from(sourceSignals)
+      .where(inArray(sourceSignals.id, chunk));
+    if (existing.length !== chunk.length) {
+      const existingIds = new Set(existing.map((row) => row.id));
+      const missing = chunk.find((sourceSignalId) => !existingIds.has(sourceSignalId));
+      throw new Error(`source signal ${missing ?? "membership"} does not exist`);
+    }
+  }
+}
+
+async function createResearchProviderBudgetScopeInTransaction(
+  tx: ProviderAccountingTransaction,
+  input: NormalizedBudgetScopeInput,
+): Promise<ResearchProviderBudgetScope> {
+  await validateScopeSourceSignals(tx, input.sourceSignalIds);
+  const inserted = await tx
+    .insert(researchProviderBudgetScopes)
+    .values({
+      id: input.id,
+      provider: input.provider,
+      startsAt: input.startsAt,
+      totalCapUsd: input.totalCapUsd,
+      permitStatus: input.permitStatus,
+      permitUpdatedAt: sql`clock_timestamp()`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .onConflictDoNothing({ target: researchProviderBudgetScopes.id })
+    .returning();
+  if (inserted[0] !== undefined) {
+    for (
+      let index = 0;
+      index < input.sourceSignalIds.length;
+      index += RESEARCH_PROVIDER_BUDGET_SIGNAL_INSERT_CHUNK_SIZE
+    ) {
+      await tx.insert(researchProviderBudgetScopeSignals).values(
+        input.sourceSignalIds
+          .slice(
+            index,
+            index + RESEARCH_PROVIDER_BUDGET_SIGNAL_INSERT_CHUNK_SIZE,
+          )
+          .map((sourceSignalId) => ({
+            budgetScopeId: input.id,
+            sourceSignalId,
+          })),
+      );
+    }
+    const sealed = await tx
+      .update(researchProviderBudgetScopes)
+      .set({
+        sealedAt: sql`clock_timestamp()`,
+        updatedAt: sql`clock_timestamp()`,
+      })
+      .where(
+        and(
+          eq(researchProviderBudgetScopes.id, input.id),
+          sql`${researchProviderBudgetScopes.sealedAt} IS NULL`,
+        ),
+      )
+      .returning();
+    if (sealed[0] === undefined) {
+      throw new Error(`provider budget scope ${input.id} was not sealed`);
+    }
+    return asBudgetScope(sealed[0]);
+  }
+
+  const existingRows = await tx
+    .select()
+    .from(researchProviderBudgetScopes)
+    .where(eq(researchProviderBudgetScopes.id, input.id))
+    .limit(1)
+    .for("update");
+  const existing = existingRows[0];
+  if (existing === undefined) {
+    throw new Error(`provider budget scope ${input.id} disappeared`);
+  }
+  if (existing.sealedAt === null) {
+    throw new Error(`provider budget scope ${input.id} is not sealed`);
+  }
+  const existingSignals = await tx
+    .select()
+    .from(researchProviderBudgetScopeSignals)
+    .where(eq(researchProviderBudgetScopeSignals.budgetScopeId, input.id));
+  const existingSignalIds = existingSignals
+    .map((row) => row.sourceSignalId)
+    .sort();
+  if (
+    existing.provider !== input.provider ||
+    existing.startsAt.getTime() !== input.startsAt.getTime() ||
+    decimal(existing.totalCapUsd, "stored totalCapUsd") !== input.totalCapUsd ||
+    JSON.stringify(existingSignalIds) !== JSON.stringify(input.sourceSignalIds)
+  ) {
+    throw new Error(
+      `provider budget scope ${input.id} conflicts with its immutable definition`,
+    );
+  }
+  return asBudgetScope(existing);
+}
+
 /**
  * Explicitly create one immutable funded scope and its exact source allowlist.
  * Reserve never calls this function, so run IDs and worker restarts cannot mint
@@ -207,98 +407,163 @@ export async function createResearchProviderBudgetScope(
   db: Database,
   input: CreateResearchProviderBudgetScopeInput,
 ): Promise<ResearchProviderBudgetScope> {
-  const id = nonempty(input.id, "id");
-  const provider = nonempty(input.provider, "provider");
-  const startsAt = validDate(input.startsAt, "startsAt");
-  const totalCapUsd = decimal(input.totalCapUsd, "totalCapUsd");
-  if (input.allowlistedSourceSignalIds.length === 0) {
-    throw new TypeError("allowlistedSourceSignalIds must not be empty");
-  }
-  if (
-    input.allowlistedSourceSignalIds.length >
-    MAX_RESEARCH_PROVIDER_BUDGET_SIGNALS
-  ) {
-    throw new TypeError(
-      `allowlistedSourceSignalIds cannot exceed ${MAX_RESEARCH_PROVIDER_BUDGET_SIGNALS}`,
-    );
-  }
-  const sourceSignalIds = [...new Set(input.allowlistedSourceSignalIds)].sort();
-  if (sourceSignalIds.length !== input.allowlistedSourceSignalIds.length) {
-    throw new TypeError("allowlistedSourceSignalIds must not contain duplicates");
-  }
-
+  const normalized = normalizedBudgetScopeInput(input);
   return db.transaction(async (tx) => {
-    await lockProvider(tx, provider);
-    const inserted = await tx
-      .insert(researchProviderBudgetScopes)
-      .values({
-        id,
-        provider,
-        startsAt,
-        totalCapUsd,
-        permitStatus: input.permitStatus,
-        permitUpdatedAt: sql`clock_timestamp()`,
-        updatedAt: sql`clock_timestamp()`,
-      })
-      .onConflictDoNothing({ target: researchProviderBudgetScopes.id })
-      .returning();
-    if (inserted[0] !== undefined) {
-      await tx.insert(researchProviderBudgetScopeSignals).values(
-        sourceSignalIds.map((sourceSignalId) => ({
-          budgetScopeId: id,
-          sourceSignalId,
-        })),
-      );
-      const sealed = await tx
-        .update(researchProviderBudgetScopes)
-        .set({
-          sealedAt: sql`clock_timestamp()`,
-          updatedAt: sql`clock_timestamp()`,
-        })
-        .where(
-          and(
-            eq(researchProviderBudgetScopes.id, id),
-            sql`${researchProviderBudgetScopes.sealedAt} IS NULL`,
-          ),
-        )
-        .returning();
-      if (sealed[0] === undefined) {
-        throw new Error(`provider budget scope ${id} was not sealed`);
-      }
-      return asBudgetScope(sealed[0]);
-    }
+    await lockProvider(tx, normalized.provider);
+    return createResearchProviderBudgetScopeInTransaction(tx, normalized);
+  });
+}
 
-    const existingRows = await tx
+interface ScopeCommitment {
+  knownActualCostUsd: ResearchProviderUsd;
+  unknownEstimatedCostUsd: ResearchProviderUsd;
+  committedCostUsd: ResearchProviderUsd;
+}
+
+async function scopeCommitment(
+  tx: ProviderAccountingTransaction,
+  budgetScopeId: string,
+): Promise<ScopeCommitment> {
+  const result = await tx.execute<{
+    known_actual_cost_usd: string;
+    unknown_estimated_cost_usd: string;
+    committed_cost_usd: string;
+  }>(sql`
+    SELECT
+      COALESCE(sum(actual_cost_usd)
+        FILTER (WHERE actual_cost_usd IS NOT NULL), 0::numeric)::text
+        AS known_actual_cost_usd,
+      COALESCE(sum(estimated_cost_usd)
+        FILTER (WHERE actual_cost_usd IS NULL), 0::numeric)::text
+        AS unknown_estimated_cost_usd,
+      COALESCE(sum(COALESCE(actual_cost_usd, estimated_cost_usd)),
+        0::numeric)::text AS committed_cost_usd
+    FROM research_provider_usage
+    WHERE budget_scope_id = ${budgetScopeId}
+  `);
+  const totals = result.rows[0];
+  if (totals === undefined) {
+    throw new Error(`provider budget scope ${budgetScopeId} accounting was unavailable`);
+  }
+  return {
+    knownActualCostUsd: decimal(totals.known_actual_cost_usd, "knownActualCostUsd"),
+    unknownEstimatedCostUsd: decimal(
+      totals.unknown_estimated_cost_usd,
+      "unknownEstimatedCostUsd",
+    ),
+    committedCostUsd: decimal(totals.committed_cost_usd, "committedCostUsd"),
+  };
+}
+
+/**
+ * Close a prior scope and create a fixed-ID paused remainder in one transaction.
+ * Receipts remain attached to the closed scope; the new scope has no carried rows.
+ */
+export async function cutoverResearchProviderBudgetScope(
+  db: Database,
+  input: CutoverResearchProviderBudgetScopeInput,
+): Promise<CutoverResearchProviderBudgetScopeResult> {
+  const oldBudgetScopeId = nonempty(input.oldBudgetScopeId, "oldBudgetScopeId");
+  const authorizedCapUsd = decimal(input.authorizedCapUsd, "authorizedCapUsd");
+  const observedAt = validDate(input.observedAt, "observedAt");
+  const newScopeBase = normalizedBudgetScopeInput({
+    ...input.newScope,
+    totalCapUsd: "0",
+    permitStatus: "paused",
+  });
+  if (newScopeBase.id === oldBudgetScopeId) {
+    throw new Error("new scope ID must differ from oldBudgetScopeId");
+  }
+  return db.transaction(async (tx) => {
+    const oldProviderRows = await tx
+      .select({ provider: researchProviderBudgetScopes.provider })
+      .from(researchProviderBudgetScopes)
+      .where(eq(researchProviderBudgetScopes.id, oldBudgetScopeId))
+      .limit(1);
+    const oldProvider = oldProviderRows[0]?.provider;
+    if (oldProvider === undefined) {
+      throw new Error(`provider budget scope ${oldBudgetScopeId} does not exist`);
+    }
+    if (oldProvider !== newScopeBase.provider) {
+      throw new Error("old and new provider budget scopes must use the same provider");
+    }
+    await lockProvider(tx, oldProvider);
+    const oldRows = await tx
       .select()
       .from(researchProviderBudgetScopes)
-      .where(eq(researchProviderBudgetScopes.id, id))
+      .where(eq(researchProviderBudgetScopes.id, oldBudgetScopeId))
       .limit(1)
       .for("update");
-    const existing = existingRows[0];
-    if (existing === undefined) {
-      throw new Error(`provider budget scope ${id} disappeared`);
+    const oldScope = oldRows[0];
+    if (oldScope === undefined || oldScope.sealedAt === null) {
+      throw new Error(`provider budget scope ${oldBudgetScopeId} is not sealed`);
     }
-    if (existing.sealedAt === null) {
-      throw new Error(`provider budget scope ${id} is not sealed`);
+    const commitment = await scopeCommitment(tx, oldBudgetScopeId);
+    const remaining = await tx.execute<{
+      remaining_before_floor_usd: string;
+      remaining_cap_usd: string;
+    }>(sql`
+      SELECT
+        (${authorizedCapUsd}::numeric - ${commitment.committedCostUsd}::numeric)::text
+          AS remaining_before_floor_usd,
+        GREATEST(
+          ${authorizedCapUsd}::numeric - ${commitment.committedCostUsd}::numeric,
+          0::numeric
+        )::text AS remaining_cap_usd
+    `);
+    const calculated = remaining.rows[0];
+    if (calculated === undefined) throw new Error("cutover allowance was unavailable");
+    const remainingCapUsd = decimal(
+      calculated.remaining_cap_usd,
+      "remainingCapUsd",
+    );
+    if (oldScope.permitStatus === "closed") {
+      const existingNewRows = await tx
+        .select({ id: researchProviderBudgetScopes.id })
+        .from(researchProviderBudgetScopes)
+        .where(eq(researchProviderBudgetScopes.id, newScopeBase.id))
+        .limit(1)
+        .for("update");
+      if (existingNewRows[0] === undefined) {
+        throw new Error(
+          `closed provider budget scope ${oldBudgetScopeId} can only replay its existing cutover scope`,
+        );
+      }
     }
-    const existingSignals = await tx
-      .select()
-      .from(researchProviderBudgetScopeSignals)
-      .where(eq(researchProviderBudgetScopeSignals.budgetScopeId, id));
-    const existingSignalIds = existingSignals
-      .map((row) => row.sourceSignalId)
-      .sort();
-    if (
-      existing.provider !== provider ||
-      existing.startsAt.getTime() !== startsAt.getTime() ||
-      decimal(existing.totalCapUsd, "stored totalCapUsd") !== totalCapUsd ||
-      JSON.stringify(existingSignalIds) !== JSON.stringify(sourceSignalIds)
-    ) {
-      throw new Error(
-        `provider budget scope ${id} conflicts with its immutable definition`,
-      );
+    const closedScope =
+      oldScope.permitStatus === "closed"
+        ? oldScope
+        : (
+            await tx
+              .update(researchProviderBudgetScopes)
+              .set({
+                permitStatus: "closed",
+                permitUpdatedAt: sql`GREATEST(
+                  ${researchProviderBudgetScopes.permitUpdatedAt},
+                  ${observedAt}
+                )`,
+                updatedAt: sql`clock_timestamp()`,
+              })
+              .where(eq(researchProviderBudgetScopes.id, oldBudgetScopeId))
+              .returning()
+          )[0];
+    if (closedScope === undefined) {
+      throw new Error(`provider budget scope ${oldBudgetScopeId} was not closed`);
     }
-    return asBudgetScope(existing);
+    const newScope = await createResearchProviderBudgetScopeInTransaction(tx, {
+      ...newScopeBase,
+      totalCapUsd: remainingCapUsd,
+    });
+    if (newScope.permitStatus !== "paused") {
+      throw new Error(`cutover scope ${newScope.id} must remain paused`);
+    }
+    return {
+      closedScope: asBudgetScope(closedScope),
+      newScope,
+      ...commitment,
+      remainingBeforeFloorUsd: calculated.remaining_before_floor_usd,
+      remainingCapUsd,
+    };
   });
 }
 
@@ -380,6 +645,7 @@ export async function readResearchProviderBudgetScope(
       known_actual_cost_usd: string;
       unknown_estimated_cost_usd: string;
       committed_cost_usd: string;
+      remaining_before_floor_usd: string;
       remaining_cost_usd: string;
       receipt_count: number;
       exhausted: boolean;
@@ -393,6 +659,9 @@ export async function readResearchProviderBudgetScope(
           AS unknown_estimated_cost_usd,
         COALESCE(sum(COALESCE(actual_cost_usd, estimated_cost_usd)),
           0::numeric)::text AS committed_cost_usd,
+        (${scope.totalCapUsd}::numeric
+          - COALESCE(sum(COALESCE(actual_cost_usd, estimated_cost_usd)),
+              0::numeric))::text AS remaining_before_floor_usd,
         GREATEST(
           ${scope.totalCapUsd}::numeric
             - COALESCE(sum(COALESCE(actual_cost_usd, estimated_cost_usd)),
@@ -443,6 +712,7 @@ export async function readResearchProviderBudgetScope(
       "unknownEstimatedCostUsd",
     ),
     committedCostUsd: decimal(totals.committed_cost_usd, "committedCostUsd"),
+    remainingBeforeFloorUsd: totals.remaining_before_floor_usd,
     remainingCostUsd: decimal(totals.remaining_cost_usd, "remainingCostUsd"),
     receiptCount: totals.receipt_count,
     providerCooldown:
@@ -503,9 +773,16 @@ export async function reserveResearchProviderUsage(
   const provider = nonempty(input.provider, "provider");
   const operation = nonempty(input.operation, "operation");
   const budgetScopeId = nonempty(input.budgetScopeId, "budgetScopeId");
-  const sourceSignalId = nonempty(input.sourceSignalId, "sourceSignalId");
+  const sourceSignalId = uuid(input.sourceSignalId, "sourceSignalId");
   if (!SHA256_PATTERN.test(input.requestHash)) {
     throw new TypeError("requestHash must be a lowercase SHA-256 digest");
+  }
+  const analystRequestHash = input.analystRequestHash ?? null;
+  if (
+    analystRequestHash !== null &&
+    !SHA256_PATTERN.test(analystRequestHash)
+  ) {
+    throw new TypeError("analystRequestHash must be a lowercase SHA-256 digest");
   }
   const estimatedCostUsd = decimal(
     input.estimatedCostUsd,
@@ -560,9 +837,9 @@ export async function reserveResearchProviderUsage(
           `analyst step ${analystStepId} belongs to a different source signal`,
         );
       }
-      if (step.request_hash !== input.requestHash) {
+      if (step.request_hash !== (analystRequestHash ?? input.requestHash)) {
         throw new Error(
-          `analyst step ${analystStepId} request hash does not match the provider request`,
+          `analyst step ${analystStepId} request hash does not match the analyst request`,
         );
       }
 
@@ -809,6 +1086,45 @@ async function persistProviderCooldown(
   }
 }
 
+async function pauseScopeWhenObservedCostExceedsBound(
+  tx: ProviderAccountingTransaction,
+  budgetScopeId: string,
+  actualCostUsd: ResearchProviderUsd,
+  estimatedCostUsd: ResearchProviderUsd,
+  observedAt: Date,
+): Promise<void> {
+  const scopeRows = await tx
+    .select()
+    .from(researchProviderBudgetScopes)
+    .where(eq(researchProviderBudgetScopes.id, budgetScopeId))
+    .limit(1)
+    .for("update");
+  const scope = scopeRows[0];
+  if (scope === undefined) {
+    throw new Error(`provider budget scope ${budgetScopeId} does not exist`);
+  }
+  if (scope.permitStatus === "closed") return;
+  const committedCostUsd = await committedScopeCost(tx, budgetScopeId);
+  const exceeds = await tx.execute<{ exceeds: boolean }>(sql`
+    SELECT (
+      ${actualCostUsd}::numeric > ${estimatedCostUsd}::numeric
+      OR ${committedCostUsd}::numeric > ${scope.totalCapUsd}::numeric
+    ) AS exceeds
+  `);
+  if (exceeds.rows[0]?.exceeds !== true) return;
+  await tx
+    .update(researchProviderBudgetScopes)
+    .set({
+      permitStatus: "paused",
+      permitUpdatedAt: sql`GREATEST(
+        ${researchProviderBudgetScopes.permitUpdatedAt},
+        ${observedAt}
+      )`,
+      updatedAt: sql`clock_timestamp()`,
+    })
+    .where(eq(researchProviderBudgetScopes.id, budgetScopeId));
+}
+
 /**
  * Settle a reservation exactly once. A nullable actual is deliberately not
  * converted to zero: future admission continues to count the estimate.
@@ -916,6 +1232,15 @@ export async function settleResearchProviderUsage(
     const receipt = updated[0];
     if (receipt === undefined) {
       throw new Error(`provider usage reservation ${reservationId} was not settled`);
+    }
+    if (actualCostUsd !== null) {
+      await pauseScopeWhenObservedCostExceedsBound(
+        tx,
+        receipt.budgetScopeId,
+        actualCostUsd,
+        decimal(receipt.estimatedCostUsd, "stored estimatedCostUsd"),
+        observedAt,
+      );
     }
     await persistProviderCooldown(
       tx,

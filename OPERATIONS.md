@@ -164,27 +164,64 @@ Ranking and filters execute over the whole matching dataset before page limits, 
 
 The queue loads 100 records at a time. Queue and detail views automatically refresh approximately every 30 seconds while visible, preserve loaded queue depth, and expose pause/resume and manual refresh controls. These are authenticated read requests: viewing, sorting, exporting or refreshing does not initiate paid research or promotion. Historical or input-mismatched results remain labeled separately from current evidence and research progress. Prior Booie, Golden or pipeline membership is provenance, not a score bonus or approval.
 
-Explicit backfill controls (set on the worker; use the same model/policy values for manual commands):
+Explicit backfill controls (use the same model/policy values for manual commands):
 
 | Variable                                                          | Purpose                                                                       |
 | ----------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `EXA_DAILY_BUDGET_USD`, `EXA_BUDGET_SCOPE_ID`                     | Additional daily constraint and explicit durable total-allowance identity    |
-| `OPENROUTER_MAX_COST_PER_DAY_USD`                                 | Recorded model-spend threshold across generic usage and FAA response receipts |
-| `FAA_ANALYST_MODE`                                              | `disabled` starts no Jev, Muse, refresh, or promotion scheduler stages and logs `ensemble.scheduler_disabled`; `free_only` or `bounded_paid` enables them, with paid mode also requiring an active allowance |
+| `OPENROUTER_BUDGET_SCOPE_ID`                                      | Explicit durable model allowance identity on **web and worker** before funded activation |
+| `EXA_BUDGET_SCOPE_ID`                                             | Explicit durable Exa allowance identity on the funded worker only |
+| `EXA_DAILY_BUDGET_USD`, `OPENROUTER_MAX_COST_PER_DAY_USD`         | Additional UTC-day constraints, never a replacement for either durable total |
+| `FAA_ANALYST_MODE`                                              | `disabled` starts no FAA scheduler stages—Jev, Muse, refresh, or promotion—and logs `ensemble.scheduler_disabled`; `free_only` or `bounded_paid` enables them, with paid mode also requiring active allowances |
 | `ENSEMBLE_BATCH_LIMIT`, `JEV_LADDER_CONCURRENCY`                  | Jev claim batch and parallelism                                               |
 | `FAA_JEV_SOURCE_SIGNAL_IDS`                                    | Optional cheap-screening UUID allowlist; an explicit empty list claims nothing |
 | `VERIFY_BATCH_LIMIT`, `ENSEMBLE_CONCURRENCY`                     | Muse claim batch and bounded parallelism                                      |
 | `JEV_FAST_INTERVAL_MS`, `ENSEMBLE_SCHEDULE_MINUTES`               | Independent fast and maintenance cadence                                      |
 
+The OpenRouter low-level guard applies only when `OPENROUTER_BUDGET_SCOPE_ID`
+is set: every scoped request needs its matching accounting context and
+unsupported routes fail closed. Legacy non-scoped consumers retain their
+existing contract. Set the scope ID on **both web and worker** before funded
+activation; a scoped worker alone is not sufficient.
+
+`OPENROUTER_MAX_COST_PER_DAY_USD` is one shared configured value with two
+separate meanings: it remains the observed UTC-day threshold for legacy model
+receipts, while the scoped OpenRouter path uses the same value as an atomic
+UTC-day reservation admission cap. Neither calculation substitutes a daily
+reset for a durable scope total.
+
 Model spending is accounted over explicit UTC calendar-day bounds from `model_usage` and `faa_review_model_usage`. Each returned Jev rung records an independent receipt before later processing or verdict publication. A logical Muse call records its known aggregate attempt charges even when its responses fail schema validation; that failure remains retryable and publishes no verdict. Unknown cost stays null, not a fabricated zero. A later rung failure or stale-input fence does not erase an observed charge.
 
 Migration `0014_review_model_usage.sql` backfills previously recorded evaluation costs once. Migration `0015_review_usage_precision.sql` preserves their exact PostgreSQL numeric values, including charges below eight decimal places, without changing source links or observation times. Evaluation cost columns remain diagnostic and are not counted again. Source deletion leaves the receipt with a null source link.
 
-Migration `0016_signal_analyst_research.sql` adds analyst journals, provider allowances, immutable source allowlists, reservations/receipts and provider cooldowns. It does not reset primary sources, human decisions or prior model receipts. Each allowance is sealed with a fixed start, total cap and source set; creating it again with the identical definition is idempotent, not a new allowance.
+Migration `0016_signal_analyst_research.sql` adds analyst journals, provider allowances, immutable source allowlists, reservations/receipts and provider cooldowns. It does not reset primary sources, human decisions or prior model receipts. Each allowance is sealed with a fixed start, total cap and source set; creating it again with the identical definition is idempotent, not a new allowance. `remainingCostUsd` is the floor at zero for admission; `remainingBeforeFloorUsd` exposes an observed overage without rewriting a receipt.
+
+Scoped model requests reserve before dispatch and make one HTTP attempt, with
+provider fallback disabled. The reviewed wire policy is:
+
+| Operation | Request restrictions | Reservation per attempt |
+| --- | --- | --- |
+| Jev | `typesafe/jev-1.13`; maximum prompt price `$0.042`/million tokens; completion and request price zero | `$0.0014` |
+| Muse | `meta/muse-spark-1.3-contributor`; 4,096 completion tokens; prompt/completion prices at most `$0.10`/`$0.20` per million tokens; request price zero | `$0.106` |
+| Exa search | Explicit `auto`, at most five results, text only; no generated summaries | `$0.007` |
+| Exa contents | At most three URLs, text only | `$0.01` |
+
+The model bounds cover the reviewed endpoint context windows, not an average
+request. Review [OpenRouter routing constraints](https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-request)
+and [Exa pricing](https://exa.ai/pricing) before changing models or request
+features. An observed charge above its reservation pauses that scope even when
+the total cap has not yet been reached; it never rewrites the charge to fit.
+This is atomic application admission accounting, not a provider invoice limit.
+
+The scoped Muse deadline includes response-body consumption after headers.
+A timeout or missing cost retains the full reservation across process restarts
+and UTC-day changes. Invalid structured output still preserves a returned
+charge. Scoped OpenRouter reservations and their FAA usage projections share
+receipt IDs: use the provider ledger for scope exposure and the existing model
+usage ledgers for observed model spending; do not add both copies together.
 
 ### Funded provider run staging
 
-Treat a funded run as an explicit paid cohort, not as “all available sources.” Build a private JSON file containing only the approved paid source-signal UUID array, retain the cohort name and selection rationale with the operating record, and keep private inputs out of this repository and image. `create` accepts either repeated `--source-signal-id` values or one `--source-signal-ids-file`, never both. The file form validates UUIDs and removes duplicate entries before the same immutable creation contract is applied. An omitted or empty paid list is an error; there is no implicit paid enrollment.
+Treat a funded run as an explicit paid cohort, not as “all available sources.” Build a private JSON file containing only the approved paid source-signal UUID array, retain the cohort name and selection rationale with the operating record, and keep private inputs out of this repository and image. `create` accepts either repeated `--source-signal-id` values or one `--source-signal-ids-file`, never both. The file form validates UUIDs and removes duplicate entries before the same immutable creation contract is applied. An omitted or empty paid list is an error; there is no implicit paid enrollment. A scope admits at most 50,000 explicit members and stores them in 1,000-row transactional chunks.
 
 Keep the worker stopped throughout staging. A stopped Railway service has no container to SSH into, and `railway run` executes on the operator's machine, where `postgres.railway.internal` is not reachable. Run database commands inside the running `web` container instead; its image contains the repository at `/app` and it shares Railway's private network. Selecting `web` for command transport does not move paid configuration onto web or start research.
 
@@ -215,15 +252,44 @@ railway ssh --service web --environment production -- \
         --id "$1" \
         --starts-at "$2" \
         --total-cap-usd "$3" \
-        --source-signal-ids-file "$cohort_file"
+        --source-signal-ids-file "$cohort_file" \
+        --provider exa
     ' sh "$SCOPE_ID" "$STARTS_AT" "$TOTAL_CAP_USD" <"$COHORT_UUID_FILE"
 ```
 
-Do not create a replacement scope, recreate a funded database, delete receipts, or import a lower estimate to recover allowance. Existing committed and reserved/unknown exposure, histories, memberships, and scope identities are durable. `import-legacy-estimate` is only for an evidenced carry-forward during a quiesced cutover; it is not a reset.
+Do not create a replacement scope, recreate a funded database, delete receipts, or import a lower estimate to recover allowance. Existing committed and reserved/unknown exposure, histories, memberships, and scope identities are durable. For the one authorized $5 cutover path only, keep the old scope, calculate the floor from its exact known plus unknown commitment, and use a new fixed ID:
 
-Configure the stopped worker—not the public web service—with the same scope ID in `EXA_BUDGET_SCOPE_ID`, an intentional positive `EXA_DAILY_BUDGET_USD`, `FAA_ANALYST_MODE=bounded_paid`, and the intended `OPENROUTER_MAX_COST_PER_DAY_USD`. `FAA_JEV_SOURCE_SIGNAL_IDS` is independent cheap-screening scope: leave it absent for the full cheap backlog, or set a runtime-valid UUID list that includes every sealed paid target. The explicit list may include additional cheap Jev targets, but that never adds them to the immutable paid scope; the Exa ledger still rejects every source outside the sealed membership. An explicit empty list or a list excluding any paid target is unsafe because admitted evidence cannot finish its Jev recheck. Keep `FAA_ANALYST_MODE=disabled` on web. `EXA_API_KEY` and `OPENROUTER_API_KEY` are independent credentials and are never substitutes for one another.
+```bash
+npx tsx scripts/research-provider-scope.mts cutover \
+  --old-id "$OLD_SCOPE_ID" --id "$REMAINING_SCOPE_ID" \
+  --starts-at "$STARTS_AT" --authorized-cap-usd 5 --provider exa \
+  --source-signal-ids-file "$COHORT_UUID_FILE" \
+  >"$PRIVATE_CUTOVER_MANIFEST"
+```
 
-Run the read-only preflight before activation. Both expected database guards are required. It checks the configured URL host before connecting, checks the connected database name, then reports sealed paid membership, total cap, known actual cost, reserved/unknown estimated exposure, committed cost, remaining exposure, permit, required-key **presence only**, selected worker analyst/Jev configuration, and daily guards. It prints neither keys nor credential-bearing URLs, makes no provider API call or funding probe, and performs no database mutation.
+The command atomically closes the old scope, creates the new one paused with `max(5 - known - unknown, 0)`, and writes no carried-exposure field or copied receipt. Keep the JSON manifest private with the cohort evidence. Daily caps and process restarts never reset this calculation. `import-legacy-estimate` is only for an evidenced carry-forward during a quiesced cutover; it is not a reset.
+
+Do not close the old scope separately before the first `cutover`: the command
+closes it atomically. Once closed, it can replay only an already-existing target
+with the same immutable definition; a different target cannot mint another
+remainder.
+
+Record the actual authorization timestamp and reconcile all charges within
+that authorization before creating an allowance. If model calls already ran
+without a provider scope, subtract their evidenced known and unresolved
+exposure from the new model cap and retain the opening reconciliation privately.
+Do not copy old receipts or silently classify older, separately authorized
+experiments as part of a new run. A restart is not a new authorization.
+
+Before a code rollback, stop the worker and pause both scopes. Older images
+without this transport guard must not receive the funded model credential.
+The read-only web service can remain disabled without that credential.
+Retain post-cutover receipts; restoring an older database without reconciling
+later charges would replenish allowance incorrectly.
+
+Keep the read-only web service at `FAA_ANALYST_MODE=disabled`, with `OPENROUTER_BUDGET_SCOPE_ID` installed for its scoped guard but without an Exa credential or paid scheduler configuration. Configure the funded worker with both `EXA_BUDGET_SCOPE_ID` and `OPENROUTER_BUDGET_SCOPE_ID`, intentional positive `EXA_DAILY_BUDGET_USD` and `OPENROUTER_MAX_COST_PER_DAY_USD`, `FAA_ANALYST_MODE=bounded_paid`, Exa and OpenRouter credentials, and the exact funded models. The OpenRouter scoped guard fails closed for unsupported configured-scope consumers; do not copy or substitute credentials between services. `FAA_JEV_SOURCE_SIGNAL_IDS` is independent cheap-screening scope: leave it absent for the full cheap backlog, or set a runtime-valid UUID list that includes every sealed paid target. The explicit list may include additional cheap Jev targets, but that never adds them to the immutable paid scope; the provider ledger still rejects every source outside the sealed membership. Keep the worker `FAA_ANALYST_MODE=disabled` until preflight passes.
+
+Run the read-only preflight for each provider before activation (`--provider exa` and `--provider openrouter`). Both expected database guards are required. It checks the configured URL host before connecting, checks the connected database name, then reports sealed membership, total cap, known actual cost, reserved/unknown estimated exposure, committed cost, floored and unfloored remaining exposure, permit, required-key **presence only**, exact funded model policy, provider controls, and daily guards. It prints neither keys nor credential-bearing URLs, makes no provider API call or funding probe, and performs no database mutation.
 
 Native/local smoke syntax (not production evidence) uses the current shell environment directly and does not source `.env.local`:
 
@@ -244,6 +310,7 @@ railway run --service worker --environment production -- \
       "FAA_ANALYST_MODE",
       "FAA_JEV_SOURCE_SIGNAL_IDS",
       "EXA_BUDGET_SCOPE_ID",
+      "OPENROUTER_BUDGET_SCOPE_ID",
       "EXA_DAILY_BUDGET_USD",
       "OPENROUTER_MAX_COST_PER_DAY_USD",
       "EXA_API_KEY",
@@ -313,29 +380,37 @@ railway run --service worker --environment production -- \
 
 The direct remote TypeScript invocation does not use the `ops:research-scope` npm launcher and therefore cannot source `.env.local`. A blocked preflight exits nonzero and identifies configuration/scope mismatches. It fails safe for a missing, wrong-provider, unsealed, closed, exhausted, already-active, Jev-excluded, or wrong-database scope. Missing `FAA_JEV_SOURCE_SIGNAL_IDS` is intentionally full cheap triage, not a paid-scope expansion. A blank or absent `OPENROUTER_MAX_COST_PER_DAY_USD` passes the startup parser, but the FAA model-spend gate reads the raw environment and therefore applies its effective $1 default; malformed, non-finite, zero, or negative values prevent the worker configuration from starting and block preflight rather than being reported as an effective fallback. Provider account funding is always reported **NOT VERIFIED**: an account owner must separately confirm provider funding and limits without making a probe call from this command.
 
-After a passing production read-only preflight and separate account-owner confirmation, run the mutation inside the same private-network web container. `activate` changes only the durable Exa permit; the worker deployment remains the run switch:
+After passing production read-only preflights and separate account-owner confirmation, activate both durable permits inside the private-network web container. `SCOPE_ID` identifies Exa and `MODEL_SCOPE_ID` identifies OpenRouter; neither activation starts the worker:
 
 ```bash
+: "${MODEL_SCOPE_ID:?set the approved OpenRouter scope ID}"
 railway ssh --service web --environment production -- \
   sh -lc 'cd /app && exec npx tsx /app/scripts/research-provider-scope.mts activate --id "$1"' \
   sh "$SCOPE_ID"
+railway ssh --service web --environment production -- \
+  sh -lc 'cd /app && exec npx tsx /app/scripts/research-provider-scope.mts activate --id "$1"' \
+  sh "$MODEL_SCOPE_ID"
 railway up --service worker --environment production --detach
 ```
 
 The worker deployment is the run switch. Railway variables and a successful preflight do not prove the deployed process loaded them. Verify the deployed worker revision, actual replica state, startup log fields (`analystMode`, Exa/key/scope presence, and Jev scope), scheduler activity, durable claims/receipts, and expected paid IDs after startup. `/health` or `/ready` alone is not proof that the funded scheduler is running with the intended scope. The public web service remains an independently deployed, read-only investor surface: sign-in, queue browsing, filtering, refresh, detail views and exports do not start research.
 
-For a planned pause, pause the scope through the web container first to deny new Exa reservations, then stop the worker to stop independent Muse/OpenRouter and provider-free loops:
+For a planned pause, pause both scopes through the web container first to deny new paid reservations, then stop the worker to stop provider-free loops as well:
 
 ```bash
+: "${MODEL_SCOPE_ID:?set the approved OpenRouter scope ID}"
 railway ssh --service web --environment production -- \
   sh -lc 'cd /app && exec npx tsx /app/scripts/research-provider-scope.mts pause --id "$1"' \
   sh "$SCOPE_ID"
+railway ssh --service web --environment production -- \
+  sh -lc 'cd /app && exec npx tsx /app/scripts/research-provider-scope.mts pause --id "$1"' \
+  sh "$MODEL_SCOPE_ID"
 railway down --service worker --yes
 ```
 
-Pausing does not cancel an already dispatched provider request and does not reset reservations, receipts, daily accounting, cases, or membership. It also does not by itself stop model-only work, which is why a full stop includes the independent worker. Run `close --id "$SCOPE_ID"` through the same `railway ssh --service web` contract when an irreversible stop is intended; a closed scope cannot resume. To resume a paused scope, keep the worker down, repeat the selected-worker read-only preflight and account-limit confirmation, run `activate` on the same scope through web, then deploy and repeat runtime verification. Funding added later never activates a scope or starts a worker automatically.
+Pausing does not cancel an already dispatched provider request and does not reset reservations, receipts, daily accounting, cases, or membership. It also does not stop provider-free work, which is why a full stop includes the independent worker. Run `close --id` for each scope through the same `railway ssh --service web` contract when an irreversible stop is intended; a closed scope cannot resume. To resume, keep the worker down, repeat both selected-worker read-only preflights and account-limit confirmation, activate the same two scopes through web, then deploy and repeat runtime verification. Funding added later never activates a scope or starts a worker automatically.
 
-Jev checks before each paid rung; Muse checks before each model call. An exhausted or unreadable model budget defers the claim without consuming a candidate retry or publishing a verdict. Deterministic zero-cost decisions can continue. `OPENROUTER_MAX_COST_PER_DAY_USD` is a threshold over application-observed receipts, **not** an atomic reservation, provider invoice, or hard account cap: concurrent/in-flight calls, failed responses without returned cost telemetry, and failed receipt persistence can exceed it. Exa instead reserves exposure durably before dispatch, requires an active total allowance and source membership, and retains unknown charges conservatively across restarts and UTC rollover. Preserve the former `EXA_SPEND_STATE_PATH` file for estimated baseline import; it is not a competing active spending authority.
+Jev checks before each paid rung; Muse checks before each model call. An exhausted or unreadable model budget defers the claim without consuming a candidate retry or publishing a verdict. Deterministic zero-cost decisions can continue. Scoped OpenRouter and Exa requests reserve exposure durably before dispatch, require an active total allowance and source membership, and retain unknown charges conservatively across restarts and UTC rollover. Without an OpenRouter scope, the legacy `OPENROUTER_MAX_COST_PER_DAY_USD` check is only a threshold over observed receipts, not an atomic reservation or provider account cap; it is not sufficient for this funded run. Preserve the former `EXA_SPEND_STATE_PATH` file for estimated baseline import; it is not a competing active spending authority.
 
 Provider key/account limits are independent of application guards. OpenRouter HTTP 402 and structured quota-exhaustion HTTP 403 responses defer reviews without incrementing candidate attempts or publishing judgments; known charges from earlier attempts remain recorded. A non-resetting exhausted key requires its account owner to raise the provider limit or intentionally replace that provider's Railway credential. Raising `OPENROUTER_MAX_COST_PER_DAY_USD` alone cannot restore provider capacity. Ordinary 403 refusals are not classified as quota exhaustion, and response-body digits cannot turn a terminal failure into a transient retry.
 

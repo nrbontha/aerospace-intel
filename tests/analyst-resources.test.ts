@@ -19,6 +19,7 @@ import {
   ExaSearchClient,
   ExaSearchError,
 } from "../packages/research/src/search/exa.js";
+import { exaProviderRequestHash } from "../packages/research/src/enrichment/exa-budget.js";
 import type { SafeFetchResult } from "../packages/research/src/safe-fetch.js";
 
 const context: AnalystResourceContext = {
@@ -436,6 +437,58 @@ describe("analyst resource executor", () => {
     expect(observation.records).toHaveLength(2);
   });
 
+  it("normalizes equivalent search requests without merging distinct queries", () => {
+    expect(
+      exaProviderRequestHash("search", {
+        query: "bounded aerospace search",
+      }),
+    ).toBe(
+      exaProviderRequestHash("search", {
+        query: "  bounded   aerospace search  ",
+      }),
+    );
+    expect(
+      exaProviderRequestHash("search", { query: "a different aerospace company" }),
+    ).not.toBe(
+      exaProviderRequestHash("search", { query: "bounded aerospace search" }),
+    );
+  });
+
+  it("bounds text-only contents to three normalized URLs before hashing or sending", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () =>
+      new Response(JSON.stringify({ results: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const client = new ExaSearchClient({ apiKey: "test-key", fetch: fetchMock });
+    const urls = [
+      " https://example.test/one ",
+      "not-a-url",
+      "https://example.test/two",
+      "https://example.test/three",
+      "https://example.test/four",
+    ];
+
+    await client.fetchContentsWithMetadata(urls);
+
+    expect(
+      JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body)).urls,
+    ).toEqual([
+      "https://example.test/one",
+      "https://example.test/two",
+      "https://example.test/three",
+    ]);
+    expect(exaProviderRequestHash("contents", { urls })).toBe(
+      exaProviderRequestHash("contents", {
+        urls: [
+          "https://example.test/one",
+          "https://example.test/two",
+          "https://example.test/three",
+        ],
+      }),
+    );
+  });
   it("settles malformed HTTP 200 payload cost metadata before reporting failure", async () => {
     const client = new ExaSearchClient({
       apiKey: "test-key",

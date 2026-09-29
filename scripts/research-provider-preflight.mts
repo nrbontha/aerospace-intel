@@ -9,16 +9,20 @@ import {
 import { sql } from "drizzle-orm";
 
 const DECIMAL_PATTERN = /^(?:0|[1-9]\d*)(?:\.\d+)?$/u;
-const EXPECTED_PROVIDER = "exa";
 const DEFAULT_FAA_MODEL_DAILY_USD = "1";
 const JEV_COHORT_COVERAGE_BLOCKER =
   "FAA_JEV_SOURCE_SIGNAL_IDS excludes one or more sealed paid targets; admitted evidence cannot finish its Jev recheck";
+const SUPPORTED_PROVIDERS = ["exa", "openrouter"] as const;
+export type SupportedProvider = (typeof SUPPORTED_PROVIDERS)[number];
+const FUNDED_JEV_MODEL = "typesafe/jev-1.13";
+const FUNDED_MUSE_MODEL = "meta/muse-spark-1.3-contributor";
 
 type EnvSource = Readonly<Record<string, string | undefined>>;
 
 export interface ResearchProviderPreflightInput {
   readonly database: () => Database;
   readonly scopeId: string;
+  readonly provider?: SupportedProvider;
   readonly expectedDatabaseHost: string;
   readonly expectedDatabaseName: string;
   readonly env?: EnvSource;
@@ -180,6 +184,7 @@ function scopeReport(view: ResearchProviderBudgetScopeView) {
     knownActualCostUsd: view.knownActualCostUsd,
     reservedOrUnknownEstimatedCostUsd: view.unknownEstimatedCostUsd,
     committedCostUsd: view.committedCostUsd,
+    remainingBeforeFloorUsd: view.remainingBeforeFloorUsd,
     remainingCostUsd: view.remainingCostUsd,
     permit: view.scope.permitStatus,
     operationalStatus: view.status,
@@ -247,6 +252,14 @@ export async function runResearchProviderPreflight(
   const now = input.now ?? new Date();
   const blockers: string[] = [];
   const warnings: string[] = [];
+  const provider = input.provider ?? "exa";
+  if (!SUPPORTED_PROVIDERS.includes(provider)) {
+    blockers.push("--provider must be exa or openrouter");
+  }
+  const scopeEnv =
+    provider === "openrouter"
+      ? "OPENROUTER_BUDGET_SCOPE_ID"
+      : "EXA_BUDGET_SCOPE_ID";
   const expectedHost = safeExpectedHost(input.expectedDatabaseHost);
   const expectedName = safeExpectedDatabaseName(input.expectedDatabaseName);
   const target = configuredDatabaseTarget(env.DATABASE_URL);
@@ -275,7 +288,7 @@ export async function runResearchProviderPreflight(
     rawAnalystMode === "bounded_paid"
       ? rawAnalystMode
       : "INVALID";
-  const configuredScopeId = env.EXA_BUDGET_SCOPE_ID?.trim() || null;
+  const configuredScopeId = env[scopeEnv]?.trim() || null;
   const cohort = configuredJevCohort(env.FAA_JEV_SOURCE_SIGNAL_IDS);
   const exaDaily = exaDailyBudgetState(env.EXA_DAILY_BUDGET_USD);
   const openRouterDaily = modelDailyBudgetState(
@@ -287,14 +300,20 @@ export async function runResearchProviderPreflight(
       ? "PRESENT"
       : "MISSING",
   } as const;
+  const modelPolicy = {
+    jev: env.FAA_JEV_MODEL?.trim() || FUNDED_JEV_MODEL,
+    muse: env.FAA_MODEL_A?.trim() || FUNDED_MUSE_MODEL,
+    requiredJev: FUNDED_JEV_MODEL,
+    requiredMuse: FUNDED_MUSE_MODEL,
+  } as const;
 
   if (analystMode !== "bounded_paid") {
-    blockers.push("FAA_ANALYST_MODE must be bounded_paid for a funded Exa run");
+    blockers.push("FAA_ANALYST_MODE must be bounded_paid for a funded provider run");
   }
   if (configuredScopeId === null) {
-    blockers.push("EXA_BUDGET_SCOPE_ID is not configured");
+    blockers.push(`${scopeEnv} is not configured`);
   } else if (configuredScopeId !== input.scopeId) {
-    blockers.push("EXA_BUDGET_SCOPE_ID does not match the requested scope");
+    blockers.push(`${scopeEnv} does not match the requested scope`);
   }
   if (!cohort.valid) {
     blockers.push(
@@ -314,18 +333,31 @@ export async function runResearchProviderPreflight(
   if (keyPresence.OPENROUTER_API_KEY === "MISSING") {
     blockers.push("OPENROUTER_API_KEY is missing");
   }
+  if (modelPolicy.jev !== FUNDED_JEV_MODEL) {
+    blockers.push(`FAA_JEV_MODEL must be ${FUNDED_JEV_MODEL}`);
+  }
+  if (modelPolicy.muse !== FUNDED_MUSE_MODEL) {
+    blockers.push(`FAA_MODEL_A must be ${FUNDED_MUSE_MODEL}`);
+  }
   if (
-    !exaDaily.configured ||
-    !exaDaily.valid ||
-    !isPositiveDecimal(exaDaily.effectiveUsd)
+    provider === "exa" &&
+    (!exaDaily.configured ||
+      !exaDaily.valid ||
+      !isPositiveDecimal(exaDaily.effectiveUsd))
   ) {
     blockers.push(
       "EXA_DAILY_BUDGET_USD must be explicitly set to a positive decimal",
     );
   }
-  if (!openRouterDaily.valid) {
+  if (
+    provider === "openrouter" &&
+    (!openRouterDaily.configured ||
+      !openRouterDaily.valid ||
+      openRouterDaily.effectiveUsd === null ||
+      !isPositiveDecimal(openRouterDaily.effectiveUsd))
+  ) {
     blockers.push(
-      "OPENROUTER_MAX_COST_PER_DAY_USD must be blank/unset for the runtime default or a runtime-valid positive finite number",
+      "OPENROUTER_MAX_COST_PER_DAY_USD must be explicitly set to a positive finite number",
     );
   }
 
@@ -364,8 +396,8 @@ export async function runResearchProviderPreflight(
     if (view === null) {
       blockers.push("requested provider budget scope does not exist");
     } else {
-      if (view.scope.provider !== EXPECTED_PROVIDER) {
-        blockers.push(`scope provider must be ${EXPECTED_PROVIDER}`);
+      if (view.scope.provider !== provider) {
+        blockers.push(`scope provider must be ${provider}`);
       }
       if (view.scope.sealedAt === null) {
         blockers.push("scope membership is not sealed");
@@ -419,6 +451,8 @@ export async function runResearchProviderPreflight(
     runtime: {
       analystMode,
       scope: {
+        provider,
+        environmentVariable: scopeEnv,
         configured: configuredScopeId !== null,
         matchesRequestedScope: configuredScopeId === input.scopeId,
       },
@@ -431,14 +465,49 @@ export async function runResearchProviderPreflight(
           view !== null &&
           cohortCoversPaidTargets(cohort, view.allowlistedSourceSignalIds),
       },
+      modelPolicy,
+      providerControls:
+        provider === "exa"
+          ? {
+              operation: "auto_search_and_text_contents",
+              maxSearchResults: 5,
+              maxContentsUrls: 3,
+              textOnly: true,
+            }
+          : {
+              jev: {
+                model: FUNDED_JEV_MODEL,
+                maxRetries: 0,
+                structuredMaxAttempts: 1,
+                reservePerAttemptUsd: "0.0014",
+                maxPrice: { prompt: "0.042", completion: "0", request: "0" },
+              },
+              muse: {
+                model: FUNDED_MUSE_MODEL,
+                maxRetries: 0,
+                structuredMaxAttempts: 1,
+                reservePerAttemptUsd: "0.106",
+                maxPrice: { prompt: "0.10", completion: "0.20", request: "0" },
+              },
+              scopedGuardRequiredOnWebAndWorker: true,
+            },
       dailyGuards: {
         exaProviderExposure: exaDaily,
-        openRouterObservedSpend: {
+        openRouterObservedLegacySpend: {
           ...openRouterDaily,
           enforcement:
-            "RECORDED SPEND THRESHOLD; NOT AN ATOMIC HARD CAP OR PROVIDER INVOICE",
+            "OBSERVED LEGACY SPEND THRESHOLD; scoped reservations are reported separately",
+        },
+        openRouterScopedReservation: {
+          ...openRouterDaily,
+          enforcement:
+            "ATOMIC UTC-DAY ADMISSION CAP FOR OPENROUTER_BUDGET_SCOPE_ID REQUESTS ONLY",
         },
       },
+      storage:
+        env.RESEARCH_SHARED_STORAGE?.trim().toLowerCase() === "true"
+          ? "shared_document_storage"
+          : "database_raw_source_pipeline_supported",
     },
     providerFunding: {
       status: "NOT VERIFIED",
