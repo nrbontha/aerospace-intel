@@ -380,29 +380,37 @@ railway run --service worker --environment production -- \
 
 The direct remote TypeScript invocation does not use the `ops:research-scope` npm launcher and therefore cannot source `.env.local`. A blocked preflight exits nonzero and identifies configuration/scope mismatches. It fails safe for a missing, wrong-provider, unsealed, closed, exhausted, already-active, Jev-excluded, or wrong-database scope. Missing `FAA_JEV_SOURCE_SIGNAL_IDS` is intentionally full cheap triage, not a paid-scope expansion. A blank or absent `OPENROUTER_MAX_COST_PER_DAY_USD` passes the startup parser, but the FAA model-spend gate reads the raw environment and therefore applies its effective $1 default; malformed, non-finite, zero, or negative values prevent the worker configuration from starting and block preflight rather than being reported as an effective fallback. Provider account funding is always reported **NOT VERIFIED**: an account owner must separately confirm provider funding and limits without making a probe call from this command.
 
-After a passing production read-only preflight and separate account-owner confirmation, run the mutation inside the same private-network web container. `activate` changes only the durable Exa permit; the worker deployment remains the run switch:
+After passing production read-only preflights and separate account-owner confirmation, activate both durable permits inside the private-network web container. `SCOPE_ID` identifies Exa and `MODEL_SCOPE_ID` identifies OpenRouter; neither activation starts the worker:
 
 ```bash
+: "${MODEL_SCOPE_ID:?set the approved OpenRouter scope ID}"
 railway ssh --service web --environment production -- \
   sh -lc 'cd /app && exec npx tsx /app/scripts/research-provider-scope.mts activate --id "$1"' \
   sh "$SCOPE_ID"
+railway ssh --service web --environment production -- \
+  sh -lc 'cd /app && exec npx tsx /app/scripts/research-provider-scope.mts activate --id "$1"' \
+  sh "$MODEL_SCOPE_ID"
 railway up --service worker --environment production --detach
 ```
 
 The worker deployment is the run switch. Railway variables and a successful preflight do not prove the deployed process loaded them. Verify the deployed worker revision, actual replica state, startup log fields (`analystMode`, Exa/key/scope presence, and Jev scope), scheduler activity, durable claims/receipts, and expected paid IDs after startup. `/health` or `/ready` alone is not proof that the funded scheduler is running with the intended scope. The public web service remains an independently deployed, read-only investor surface: sign-in, queue browsing, filtering, refresh, detail views and exports do not start research.
 
-For a planned pause, pause the scope through the web container first to deny new Exa reservations, then stop the worker to stop independent Muse/OpenRouter and provider-free loops:
+For a planned pause, pause both scopes through the web container first to deny new paid reservations, then stop the worker to stop provider-free loops as well:
 
 ```bash
+: "${MODEL_SCOPE_ID:?set the approved OpenRouter scope ID}"
 railway ssh --service web --environment production -- \
   sh -lc 'cd /app && exec npx tsx /app/scripts/research-provider-scope.mts pause --id "$1"' \
   sh "$SCOPE_ID"
+railway ssh --service web --environment production -- \
+  sh -lc 'cd /app && exec npx tsx /app/scripts/research-provider-scope.mts pause --id "$1"' \
+  sh "$MODEL_SCOPE_ID"
 railway down --service worker --yes
 ```
 
-Pausing does not cancel an already dispatched provider request and does not reset reservations, receipts, daily accounting, cases, or membership. It also does not by itself stop model-only work, which is why a full stop includes the independent worker. Run `close --id "$SCOPE_ID"` through the same `railway ssh --service web` contract when an irreversible stop is intended; a closed scope cannot resume. To resume a paused scope, keep the worker down, repeat the selected-worker read-only preflight and account-limit confirmation, run `activate` on the same scope through web, then deploy and repeat runtime verification. Funding added later never activates a scope or starts a worker automatically.
+Pausing does not cancel an already dispatched provider request and does not reset reservations, receipts, daily accounting, cases, or membership. It also does not stop provider-free work, which is why a full stop includes the independent worker. Run `close --id` for each scope through the same `railway ssh --service web` contract when an irreversible stop is intended; a closed scope cannot resume. To resume, keep the worker down, repeat both selected-worker read-only preflights and account-limit confirmation, activate the same two scopes through web, then deploy and repeat runtime verification. Funding added later never activates a scope or starts a worker automatically.
 
-Jev checks before each paid rung; Muse checks before each model call. An exhausted or unreadable model budget defers the claim without consuming a candidate retry or publishing a verdict. Deterministic zero-cost decisions can continue. `OPENROUTER_MAX_COST_PER_DAY_USD` is a threshold over application-observed receipts, **not** an atomic reservation, provider invoice, or hard account cap: concurrent/in-flight calls, failed responses without returned cost telemetry, and failed receipt persistence can exceed it. Exa instead reserves exposure durably before dispatch, requires an active total allowance and source membership, and retains unknown charges conservatively across restarts and UTC rollover. Preserve the former `EXA_SPEND_STATE_PATH` file for estimated baseline import; it is not a competing active spending authority.
+Jev checks before each paid rung; Muse checks before each model call. An exhausted or unreadable model budget defers the claim without consuming a candidate retry or publishing a verdict. Deterministic zero-cost decisions can continue. Scoped OpenRouter and Exa requests reserve exposure durably before dispatch, require an active total allowance and source membership, and retain unknown charges conservatively across restarts and UTC rollover. Without an OpenRouter scope, the legacy `OPENROUTER_MAX_COST_PER_DAY_USD` check is only a threshold over observed receipts, not an atomic reservation or provider account cap; it is not sufficient for this funded run. Preserve the former `EXA_SPEND_STATE_PATH` file for estimated baseline import; it is not a competing active spending authority.
 
 Provider key/account limits are independent of application guards. OpenRouter HTTP 402 and structured quota-exhaustion HTTP 403 responses defer reviews without incrementing candidate attempts or publishing judgments; known charges from earlier attempts remain recorded. A non-resetting exhausted key requires its account owner to raise the provider limit or intentionally replace that provider's Railway credential. Raising `OPENROUTER_MAX_COST_PER_DAY_USD` alone cannot restore provider capacity. Ordinary 403 refusals are not classified as quota exhaustion, and response-body digits cannot turn a terminal failure into a transient retry.
 
