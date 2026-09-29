@@ -15,10 +15,6 @@ import { z } from "zod";
 
 import { normalizeTargetDomain } from "../packages/database/src/unified-targets/records.js";
 import {
-  EXA_SEARCH_COST_USD,
-  recordExaSpendUsd,
-} from "../packages/research/src/enrichment/exa-budget.js";
-import {
   classifyWebsiteEvidence,
   fetchWebsiteEvidence,
   normalizeWebsiteOrigin,
@@ -32,7 +28,6 @@ import {
   type SafeFetchErrorCode,
   type SafeFetchResult,
 } from "../packages/research/src/safe-fetch.js";
-import { ExaSearchClient } from "../packages/research/src/search/exa.js";
 
 for (const line of existsSync(".env.local")
   ? readFileSync(".env.local", "utf8").split("\n")
@@ -155,11 +150,9 @@ function isSameDomain(url: string, domain: string): boolean {
   return expected !== null && normalizeTargetDomain(url) === expected;
 }
 
-const apiKey = process.env["EXA_API_KEY"];
-if (apiKey === undefined || apiKey.trim().length === 0) {
-  console.error("EXA_API_KEY is not configured; cannot freeze evidence.");
-  process.exit(1);
-}
+// This benchmark performs publisher-safe fetches only. Paid Exa fallback is
+// deliberately disabled because the script has no source-signal budget scope.
+const apiKey = "";
 
 const outputPath = argValue("--out") ?? "exports/jev-bakeoff-evidence-v3.json";
 mkdirSync(dirname(outputPath), { recursive: true });
@@ -183,31 +176,24 @@ const cases: FreezeCase[] = [
   })),
 ];
 
-const client = new ExaSearchClient({ apiKey });
 const frozen: FrozenWebsiteCase[] = [];
 let totalCostUsd = 0;
 
 for (const entry of cases) {
-  let domain = entry.sourceDomain;
-  let identityStatus: IdentityStatus =
+  const domain = entry.sourceDomain;
+  const identityStatus: IdentityStatus =
     domain === null ? "unresolved" : "source_domain";
-  let searchCostUsd = 0;
+  const searchCostUsd = 0;
   let publisherOutcome: PublisherOutcome = "not_attempted";
   let publisherErrorCode: PublisherErrorCode | null = null;
   let publisherSourcePages: readonly SafeFetchResult[] = [];
 
   try {
-    if (domain === null) {
-      const candidates = await client.searchOfficialDomainCandidates({
-        legalName: entry.name,
-      });
-      recordExaSpendUsd(EXA_SEARCH_COST_USD);
-      searchCostUsd = EXA_SEARCH_COST_USD;
-      domain = candidates[0]?.domain ?? null;
-      identityStatus = domain === null ? "unresolved" : "candidate";
-    }
+    // Paid discovery is intentionally excluded from this benchmark freezer.
+    // Cases without a source-supplied domain remain unresolved rather than
+    // minting an unscoped Exa allowance.
 
-    if (domain === null || identityStatus === "candidate") {
+    if (domain === null) {
       frozen.push({
         id: entry.id,
         name: entry.name,
@@ -265,7 +251,6 @@ for (const entry of cases) {
     }
 
     const website = await fetchWebsiteEvidence(apiKey, domain, entry.name, {
-      client,
       sourcePages: publisherSourcePages,
     });
     const exactWebsitePages = website.pages.filter((page) =>

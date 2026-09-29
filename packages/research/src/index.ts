@@ -1,6 +1,7 @@
 export * from "./company-workflow.js";
 export * from "./jobs.js";
 export * from "./openrouter.js";
+export * from "./analyst-resources.js";
 export * from "./safe-fetch.js";
 export * from "./untrusted-source.js";
 export * from "./source-access.js";
@@ -15,6 +16,7 @@ export * from "./campaigns/index.js";
 export * from "./search/index.js";
 export * from "./signals/index.js";
 export * from "./faa-ensemble/runner.js";
+export * from "./faa-ensemble/analyst-protocol.js";
 export * from "./enrichment/exa-budget.js";
 export * from "./enrichment/ownership.js";
 export * from "./enrichment/website.js";

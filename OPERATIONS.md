@@ -121,7 +121,7 @@ Use the matching `railway.worker.json` settings, including `npm run start:worker
 
 ## Investor signal review
 
-The automatic path is raw source → official-site identity and evidence research → Jev ladder → same-input Muse verification/audit → current projection → evidence-gated lead promotion. It does not create a canonical company merely to save source evidence. `signal_review_state` provides per-signal leases, source-revision fencing, input hashes, retry timing, and exact evaluation linkage.
+The automatic path is raw source → cheap Jev triage → mode/cohort-gated persistent Muse research → fresh Jev whenever admitted evidence changes → same-input Muse final verification → current projection → evidence-gated lead promotion. It does not create a canonical company merely to save source evidence. `signal_review_state` provides per-signal leases, source-revision fencing, input hashes, retry timing, and exact evaluation linkage. `signal_analyst_cases` and `signal_analyst_steps` retain the episode, gap catalog, model/resource actions, observations, limits, memo and retry history.
 
 - Provider/configuration failures are not company verdicts. Missing keys and budget deferrals remain distinguishable from candidate failures.
 - Evidence refresh with unchanged semantic input and current policy reuses settled work. Changed source facts or the review contract invalidate the old decision. Hashless historical evaluations remain history, never promotion proof.
@@ -131,24 +131,56 @@ The automatic path is raw source → official-site identity and evidence researc
 - The Targets UI is candidate-based. A research prospect in `unified_targets` is not automatically an approved Target.
 - Manual populate/promote/export callers must supply `currentFaaReviewInputContract()`. Exports are read-only and label missing/incompatible current policy rather than triggering paid review.
 - Live ensemble CLI work uses durable claims. Legacy status/source/sample/known-name/failed-only selectors are dry-run-only; they cannot bypass the claim lifecycle.
+- `/signals`, `/signals/[id]` and their authenticated `/api/v1/signals` read APIs expose raw/unpromoted signals, current Jev fit/readiness/priority/gaps, case history, citations, action attempts and access limits. CSV omits full raw payloads; explicit JSON and the detail view retain raw observations. Neither export initiates research or promotion.
+- Resource permission is separate from model spending: `free_only` permits bounded public-page and already-imported primary-record research but still incurs Muse model costs. It does not authorize Exa, private portals or paid/licensed sources. `disabled` leaves cheap Jev progress independent of Muse.
+- An exhausted analyst episode may settle with an unresolved memo and no Muse evaluation/result. Count these bounded unverified holds separately from current verified finals. A completed tool request, model turn or terminal Jev triage is not completed acquisition diligence.
+- The host enforces cumulative persisted limits and reserves the last model slot for finalization. Resuming the same case does not replenish limits or repeat recorded successful requests. Late recorded results remain reusable only under the appropriate input identity; uncertain interrupted calls remain explicitly uncertain.
+
+### Investor ranking and live queue
+
+Authenticated sign-in defaults to `/signals`, the read-only investor research queue. `/feed` retains the reviewed-target workflow. Existing viewer accounts can browse signal detail and download exports; research mutations still require a write-authorized role.
+
+`investor-research-priority-v1` is an explainable **research-ordering score**, not investment quality, a probability, an acquisition verdict or human approval:
+
+| Current evidence or review state | Points |
+| --- | ---: |
+| Own named-product support | 50 |
+| Plausible product hypothesis, only when own named-product support is absent | 15 |
+| Verified identity | 10 |
+| Source-backed US headquarters | 10 |
+| Affirmative independent ownership | 10 |
+| Annual revenue below $50m | 10 |
+| Matching current high-priority Jev and completed Muse final verification | 10 |
+
+Missing or stale current Jev triage is **unscored**, not zero. A source-backed current ownership, headquarters or revenue exclusion is **0 / excluded**; its factor breakdown remains visible. The final-verification bonus requires the current source revision, input hash, model contract, exact evaluation/result linkage and a completed durable final-verifier action with matching model usage and response. A completed research memo alone cannot earn it. Evidence changes can therefore remove a score or bonus while retaining prior reviews and memos as history.
+
+Ranking and filters execute over the whole matching dataset before page limits, not just loaded rows. Default ordering is ranked research prospects, then unscored records, then exclusions, with exact database timestamps and source IDs resolving ties. Search, readiness filters and newest-first ordering are URL-addressable. Opaque cursors bind the scoring policy, sort and filter selection; clients must restart pagination when those change rather than reuse an old cursor. CSV and JSON exports use the same ordering over **all** matching records, irrespective of how many rows the browser has loaded.
+
+The queue loads 100 records at a time. Queue and detail views automatically refresh approximately every 30 seconds while visible, preserve loaded queue depth, and expose pause/resume and manual refresh controls. These are authenticated read requests: viewing, sorting, exporting or refreshing does not initiate paid research or promotion. Historical or input-mismatched results remain labeled separately from current evidence and research progress. Prior Booie, Golden or pipeline membership is provenance, not a score bonus or approval.
 
 Explicit backfill controls (set on the worker; use the same model/policy values for manual commands):
 
 | Variable                                                          | Purpose                                                                       |
 | ----------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| `EXA_DAILY_BUDGET_USD`, `EXA_SPEND_STATE_PATH`                    | Research-provider recorded-spend threshold and persistent worker counter      |
+| `EXA_DAILY_BUDGET_USD`, `EXA_BUDGET_SCOPE_ID`                     | Additional daily constraint and explicit durable total-allowance identity    |
 | `OPENROUTER_MAX_COST_PER_DAY_USD`                                 | Recorded model-spend threshold across generic usage and FAA response receipts |
-| `SIGNAL_EVIDENCE_LIMIT`, `SIGNAL_EVIDENCE_CONCURRENCY`            | Bounded raw-evidence batch and parallelism                                    |
+| `FAA_ANALYST_MODE`                                              | `disabled`, `free_only`, or `bounded_paid`; paid mode also requires an active allowance |
 | `ENSEMBLE_BATCH_LIMIT`, `JEV_LADDER_CONCURRENCY`                  | Jev claim batch and parallelism                                               |
-| `VERIFY_BATCH_LIMIT`, `ENSEMBLE_CONCURRENCY`, `ENSEMBLE_DELAY_MS` | Muse batch, parallelism, and spacing                                          |
+| `FAA_JEV_SOURCE_SIGNAL_IDS`                                    | Optional cheap-screening UUID allowlist; an explicit empty list claims nothing |
+| `VERIFY_BATCH_LIMIT`, `ENSEMBLE_CONCURRENCY`                     | Muse claim batch and bounded parallelism                                      |
 | `JEV_FAST_INTERVAL_MS`, `ENSEMBLE_SCHEDULE_MINUTES`               | Independent fast and maintenance cadence                                      |
-| `JEV_AUDIT_SAMPLE_RATE`                                           | Deterministic additional Muse audit fraction, from 0 to 1                     |
 
 Model spending is accounted over explicit UTC calendar-day bounds from `model_usage` and `faa_review_model_usage`. Each returned Jev rung records an independent receipt before later processing or verdict publication. A logical Muse call records its known aggregate attempt charges even when its responses fail schema validation; that failure remains retryable and publishes no verdict. Unknown cost stays null, not a fabricated zero. A later rung failure or stale-input fence does not erase an observed charge.
 
 Migration `0014_review_model_usage.sql` backfills previously recorded evaluation costs once. Migration `0015_review_usage_precision.sql` preserves their exact PostgreSQL numeric values, including charges below eight decimal places, without changing source links or observation times. Evaluation cost columns remain diagnostic and are not counted again. Source deletion leaves the receipt with a null source link.
 
-Jev checks before each paid rung; Muse checks before its call. An exhausted or unreadable budget defers the claim without consuming a candidate retry or publishing a verdict. Deterministic zero-cost decisions can continue. This is a recorded-spend gate, not an atomic reservation or a complete provider invoice: concurrent/in-flight calls, failed responses without returned cost telemetry, and failed receipt persistence can exceed it. Exa's counter is worker-file-backed; put `EXA_SPEND_STATE_PATH` on the persistent worker volume and do not claim a shared multi-replica reservation.
+Migration `0016_signal_analyst_research.sql` adds analyst journals, provider allowances, immutable source allowlists, reservations/receipts and provider cooldowns. It does not reset primary sources, human decisions or prior model receipts. Each allowance is sealed with a fixed start, total cap and source set; creating it again with the identical definition is idempotent, not a new allowance.
+
+Use `npx tsx scripts/research-provider-scope.mts --help` for the operator CLI. `create` requires an explicit ID, start, total cap and one or more source IDs, and always creates a **paused** allowance. `activate`, `pause`, `close` and `status` address that same ID. Never recreate a funded database or mint a new scope to bypass spent/reserved exposure. The `import-legacy-estimate` command records an explicitly estimated UTC-day carry-forward using a stable idempotency key; do not fabricate exact charges from the old file counter.
+
+The repository's `npm run ops:research-scope` convenience wrapper sources `.env.local`. If a database/environment is already explicitly selected by a validation or deployment launcher, invoke the TypeScript CLI directly instead so that the convenience wrapper cannot replace that selection. Keep credentials out of command output.
+
+Jev checks before each paid rung; Muse checks before each model call. An exhausted or unreadable model budget defers the claim without consuming a candidate retry or publishing a verdict. Deterministic zero-cost decisions can continue. Model spending remains a recorded-spend gate, not an atomic reservation or complete provider invoice: concurrent/in-flight calls, failed responses without returned cost telemetry, and failed receipt persistence can exceed it. Exa instead reserves exposure durably before dispatch, requires an active total allowance and source membership, and retains unknown charges conservatively across restarts and UTC rollover. Preserve the former `EXA_SPEND_STATE_PATH` file for estimated baseline import; it is not a competing active spending ledger.
 
 The provider's key/account limit is separate from the application budget. OpenRouter HTTP 402 and structured quota-exhaustion HTTP 403 responses defer reviews without incrementing candidate attempts or publishing judgments; known charges from earlier attempts remain recorded. A non-resetting exhausted key requires an account owner to raise its limit or replace the Railway credential. Raising `OPENROUTER_MAX_COST_PER_DAY_USD` alone cannot restore provider capacity. Ordinary 403 refusals are not classified as quota exhaustion, and response-body digits cannot turn a terminal failure into a transient retry.
 
@@ -158,7 +190,7 @@ Validation separates sourced historical golden references, synthetic controls, a
 
 Prior-list membership is provenance, not approval. Sources include the original golden workbook, preliminary pipeline workbook, sampled priorities, and investor feedback. A read-only production audit on 2026-09-28 also found the existing `ma-pipeline-20260926` snapshot: 303 recorded members, created before this repair. Its original input file is not present locally, but its persisted membership rows are available. The separate 36-name fixture remains a sample, not a substitute for that snapshot. Exports name the matching snapshot and row/hash provenance; “no match” means no match in available snapshots, not proven novelty.
 
-For a coordinated policy cutover, stop the old worker before applying the review-state migrations and replacing stale machine projections. Run `npx tsx scripts/reconcile-stale-reviews.mts` with the deployment's database and model/policy environment to drain observable source-revision and input-contract changes without provider calls. It does not bootstrap unrelated sources, and fails rather than claiming a complete drain if it cannot make progress or reaches its pass limit. Preserve primary source documents, historical evaluations, and human decisions.
+For a coordinated policy cutover, quiesce old worker and web policy writers and verify a fresh backup before migrations and deployment. Run `npx tsx scripts/reconcile-stale-reviews.mts` with the deployment's database and model/policy environment to drain observable source-revision and input-contract changes without provider calls. Cheap intake may bootstrap eligible raw signals without doing paid discovery; an explicitly scoped run must retain its source allowlist. Reconciliation fails rather than claiming a complete drain if it cannot make progress or reaches its pass limit. Preserve primary source documents, historical evaluations, analyst action/cost history, human decisions and existing budget-scope identities.
 
 ## Campaign discovery pipeline
 
@@ -183,7 +215,7 @@ For a coordinated policy cutover, stop the old worker before applying the review
 
 Enabling/disabling:
 
-- On by default. Set `AGENT_SUPERVISOR_ENABLED=false` in the worker environment to skip starting it (`apps/worker/src/index.ts`); a restart is required for the change to apply.
+- The agent supervisor is disabled unless `AGENT_SUPERVISOR_ENABLED=true` is explicitly set. A worker restart is required for a change to apply. This flag does not stop the separate campaign sweep or investor scheduler; pause their provider-capable work with the corresponding research mode, cohort and storage controls.
 - The supervisor uses `OPENROUTER_MAX_COST_PER_DAY_USD` (default $1 when unset at this gate) over recorded generic and FAA review spending for the UTC day, plus each agent's `budget_share_pct` / `daily_budget_usd` floor. An agent that crosses its cap is parked with outcome `budget_exhausted` until just past UTC midnight; it resumes automatically. If daily spend cannot be read, the supervisor fails safe and parks agents rather than spending blind. The separate investor scheduler defers only the affected paid review claims; provider-free maintenance is not stopped.
 
 Pause/kill (audited control plane, `apps/web/src/app/api/v1/agents/`):

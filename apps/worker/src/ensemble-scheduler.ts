@@ -8,36 +8,25 @@ import type { QueueLogger } from "./queue.js";
 /**
  * Autonomous, independently retryable review loops.
  *
- * The fast loop performs bounded raw-signal evidence research followed by
- * current-input JEv screening. Muse review and independent Exa/database
- * maintenance run on separate slow-cadence locks. Durable phase claims are
- * the same-signal concurrency boundary.
- *
- * There is intentionally no scheduler-wide model probe or spend gate. Each
- * network stage checks the health and budget of its actual dependency and
- * records retry/defer state under its lease. A Muse outage therefore cannot
- * stop Exa evidence work, JEv, or database-only reconciliation.
+ * Cheap Jev screening, persistent Muse research, and database-only
+ * reconciliation run on separate locks. There is intentionally no
+ * scheduler-wide provider probe: each stage owns its durable defer policy, so
+ * source or quota waits cannot stop cheap screening.
  */
 
 export const ENSEMBLE_SCHEDULE_ENV = "ENSEMBLE_SCHEDULE_MINUTES";
 export const ENSEMBLE_BATCH_LIMIT_ENV = "ENSEMBLE_BATCH_LIMIT";
 export const ENSEMBLE_CONCURRENCY_ENV = "ENSEMBLE_CONCURRENCY";
-export const ENSEMBLE_DELAY_MS_ENV = "ENSEMBLE_DELAY_MS";
 export const JEV_LADDER_CONCURRENCY_ENV = "JEV_LADDER_CONCURRENCY";
 export const JEV_FAST_INTERVAL_MS_ENV = "JEV_FAST_INTERVAL_MS";
 export const VERIFY_BATCH_LIMIT_ENV = "VERIFY_BATCH_LIMIT";
-export const SIGNAL_EVIDENCE_LIMIT_ENV = "SIGNAL_EVIDENCE_LIMIT";
-export const SIGNAL_EVIDENCE_CONCURRENCY_ENV = "SIGNAL_EVIDENCE_CONCURRENCY";
 
 const DEFAULT_SCHEDULE_MINUTES = 30;
 const DEFAULT_BATCH_LIMIT = 120;
 const DEFAULT_CONCURRENCY = 2;
-const DEFAULT_DELAY_MS = 1_000;
 const DEFAULT_JEV_LADDER_CONCURRENCY = 32;
 const DEFAULT_JEV_FAST_INTERVAL_MS = 60_000;
 const DEFAULT_VERIFY_BATCH_LIMIT = 120;
-const DEFAULT_EVIDENCE_LIMIT = 10;
-const DEFAULT_EVIDENCE_CONCURRENCY = 2;
 
 export interface EnsembleSchedulerOptions {
   logger: QueueLogger;
@@ -45,11 +34,11 @@ export interface EnsembleSchedulerOptions {
   fastIntervalMs?: number;
   batchLimit?: number;
   concurrency?: number;
-  delayMs?: number;
   ladderConcurrency?: number;
   verifyLimit?: number;
-  evidenceLimit?: number;
-  evidenceConcurrency?: number;
+  analystMode?: "disabled" | "free_only" | "bounded_paid";
+  exaBudgetScopeId?: string;
+  jevSourceSignalIds?: readonly string[];
 }
 
 export interface EnsembleSchedulerHandle {
@@ -73,11 +62,6 @@ function readPositiveInt(raw: string | undefined, fallback: number): number {
   return Number.isFinite(parsed) && parsed >= 1 ? Math.floor(parsed) : fallback;
 }
 
-function readNonNegativeInt(raw: string | undefined, fallback: number): number {
-  if (raw === undefined || raw.trim().length === 0) return fallback;
-  const parsed = Number(raw);
-  return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : fallback;
-}
 
 export function resolveSchedulerConfig(
   options: EnsembleSchedulerOptions,
@@ -100,10 +84,6 @@ export function resolveSchedulerConfig(
       options.concurrency?.toString() ?? process.env[ENSEMBLE_CONCURRENCY_ENV],
       DEFAULT_CONCURRENCY,
     ),
-    delayMs: readNonNegativeInt(
-      options.delayMs?.toString() ?? process.env[ENSEMBLE_DELAY_MS_ENV],
-      DEFAULT_DELAY_MS,
-    ),
     ladderConcurrency: readPositiveInt(
       options.ladderConcurrency?.toString() ??
         process.env[JEV_LADDER_CONCURRENCY_ENV],
@@ -113,16 +93,13 @@ export function resolveSchedulerConfig(
       options.verifyLimit?.toString() ?? process.env[VERIFY_BATCH_LIMIT_ENV],
       DEFAULT_VERIFY_BATCH_LIMIT,
     ),
-    evidenceLimit: readPositiveInt(
-      options.evidenceLimit?.toString() ??
-        process.env[SIGNAL_EVIDENCE_LIMIT_ENV],
-      DEFAULT_EVIDENCE_LIMIT,
-    ),
-    evidenceConcurrency: readPositiveInt(
-      options.evidenceConcurrency?.toString() ??
-        process.env[SIGNAL_EVIDENCE_CONCURRENCY_ENV],
-      DEFAULT_EVIDENCE_CONCURRENCY,
-    ),
+    analystMode: options.analystMode ?? "disabled",
+    ...(options.exaBudgetScopeId === undefined
+      ? {}
+      : { exaBudgetScopeId: options.exaBudgetScopeId }),
+    ...(options.jevSourceSignalIds === undefined
+      ? {}
+      : { jevSourceSignalIds: options.jevSourceSignalIds }),
   };
 }
 

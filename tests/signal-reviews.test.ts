@@ -208,6 +208,156 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       );
     });
 
+    it("bounds bootstrap, revision reconciliation, and claims to explicit source IDs", async () => {
+      const selectedSignalId = await createSignal("scope-selected");
+      const excludedSignalId = await createSignal("scope-excluded");
+      const unbootstrappedSignalId = await createSignal("scope-empty");
+
+      expect(
+        await bootstrapSignalReviewStates(getDatabase(), {
+          limit: 10,
+          sourceSignalIds: [selectedSignalId],
+        }),
+      ).toBe(1);
+      expect(
+        await bootstrapSignalReviewStates(getDatabase(), {
+          limit: 10,
+          sourceSignalIds: [],
+        }),
+      ).toBe(0);
+      await ensureSignalReviewState(getDatabase(), excludedSignalId);
+
+      const bootstrapped = await getDatabase()
+        .select({ signalId: signalReviewState.signalId })
+        .from(signalReviewState)
+        .where(
+          inArray(signalReviewState.signalId, [
+            selectedSignalId,
+            excludedSignalId,
+            unbootstrappedSignalId,
+          ]),
+        );
+      expect(bootstrapped.map(({ signalId }) => signalId).sort()).toEqual(
+        [selectedSignalId, excludedSignalId].sort(),
+      );
+
+      await getDatabase()
+        .update(sourceSignals)
+        .set({ rawName: "Changed scoped source" })
+        .where(inArray(sourceSignals.id, [selectedSignalId, excludedSignalId]));
+      expect(
+        await reconcileChangedSignalReviews(getDatabase(), {
+          limit: 10,
+          sourceSignalIds: [selectedSignalId],
+        }),
+      ).toBe(1);
+      expect(
+        await reconcileChangedSignalReviews(getDatabase(), {
+          limit: 10,
+          sourceSignalIds: [],
+        }),
+      ).toBe(0);
+
+      const revisions = await getDatabase()
+        .select({
+          signalId: signalReviewState.signalId,
+          sourceRevision: signalReviewState.sourceRevision,
+        })
+        .from(signalReviewState)
+        .where(
+          inArray(signalReviewState.signalId, [
+            selectedSignalId,
+            excludedSignalId,
+          ]),
+        );
+      expect(
+        Object.fromEntries(
+          revisions.map(({ signalId, sourceRevision }) => [
+            signalId,
+            sourceRevision,
+          ]),
+        ),
+      ).toEqual({
+        [selectedSignalId]: 1,
+        [excludedSignalId]: 0,
+      });
+
+      const claims = await claimSignalReviews(getDatabase(), {
+        phase: "research",
+        limit: 10,
+        sourceSignalIds: [selectedSignalId],
+      });
+      expect(claims.map(({ signalId }) => signalId)).toEqual([selectedSignalId]);
+      await expect(
+        claimSignalReviews(getDatabase(), {
+          phase: "research",
+          limit: 10,
+          sourceSignalIds: [],
+        }),
+      ).resolves.toEqual([]);
+    });
+
+    it("orders due Muse claims by current terminal triage priority only", async () => {
+      const labels = ["low", "high", "stale", "future"] as const;
+      const ids = Object.fromEntries(
+        await Promise.all(
+          labels.map(async (label) => [label, await createSignal(`priority-${label}`)]),
+        ),
+      ) as Record<(typeof labels)[number], string>;
+      const now = Date.now();
+      for (const [label, priority] of [
+        ["low", 3],
+        ["high", 1],
+        ["stale", 1],
+        ["future", 1],
+      ] as const) {
+        await ensureSignalReviewState(getDatabase(), ids[label], "muse");
+        const inputHash = hashSignalReviewInput({ label, current: true });
+        const evaluationInputHash =
+          label === "stale"
+            ? hashSignalReviewInput({ label, current: false })
+            : inputHash;
+        const evaluationId = randomUUID();
+        await getDatabase().insert(faaEnsembleEvaluations).values({
+          id: evaluationId,
+          signalId: ids[label],
+          modelId: "jev-priority-test",
+          promptVersion: "jev-priority-test-v1",
+          inputHash: evaluationInputHash,
+          parsed: {
+            version: "jev-triage-v1",
+            decision: "research",
+            confidence: 70,
+            researchPriority: priority,
+          },
+          decision: "research",
+          confidence: 70,
+        });
+        await getDatabase()
+          .update(signalReviewState)
+          .set({
+            phase: "muse",
+            inputHash,
+            jevEvaluationId: evaluationId,
+            nextAttemptAt:
+              label === "future"
+                ? new Date(now + 60_000)
+                : new Date(now - (label === "high" ? 1_000 : 5_000)),
+          })
+          .where(eq(signalReviewState.signalId, ids[label]));
+      }
+
+      const claims = await claimSignalReviews(getDatabase(), {
+        phase: "muse",
+        limit: 4,
+      });
+      expect(claims.map((claim) => claim.signalId)).toEqual([
+        ids.high,
+        ids.low,
+        ids.stale,
+      ]);
+    });
+
     it("claims a signal once and rejects a reclaimed worker's publication", async () => {
       const signalId = await createSignal("fence");
       await ensureSignalReviewState(getDatabase(), signalId);
@@ -480,9 +630,8 @@ describe.skipIf(!DB_TESTS_ENABLED)(
         sourceLimit: 2,
         config: resolveEnsembleConfig({}),
       });
-      expect(result).toEqual({
+      expect(result).toMatchObject({
         sourceRevisionChanges: 5,
-        inputContractChanges: 0,
         reconciliationPasses: 3,
       });
 
@@ -501,7 +650,7 @@ describe.skipIf(!DB_TESTS_ENABLED)(
             expect.objectContaining({
               signalId,
               sourceRevision: 1,
-              phase: "research",
+              phase: "jev",
             }),
           ),
         ),
@@ -536,7 +685,6 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       expect(failure).toMatchObject({
         partialResult: {
           sourceRevisionChanges: 1,
-          inputContractChanges: 0,
           reconciliationPasses: 1,
         },
         remainingSourceRevisionChanges: 2,

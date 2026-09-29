@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
+import type * as DatabaseModule from "@asi/database";
 
 import {
   closeDatabase,
@@ -11,16 +12,70 @@ import { runMigrations } from "../packages/database/src/migrate.js";
 import { sourceSignals } from "../packages/database/src/schema.js";
 
 import {
+  admitSignalResourceEvidence,
   assessSignalSiteIdentity,
   buildSignalIdentityQuote,
   classifyExplicitRevenueSize,
   extractFirstPartyNamedProductQuotes,
   extractWebsiteFacts,
   isFirstPartyNamedProductEvidence,
-  researchSignalEvidence,
+  researchSignalEvidence as researchSignalEvidenceAccounted,
 } from "../packages/research/src/enrichment/signal-evidence.js";
 import type { WebsiteFetchResult } from "../packages/research/src/enrichment/website.js";
 import { SafeFetchError } from "../packages/research/src/safe-fetch.js";
+import type { ResearchSignalEvidenceOptions } from "../packages/research/src/enrichment/signal-evidence.js";
+import type { SourcedSignalResearchEvidence } from "../packages/research/src/enrichment/signal-evidence.js";
+import type { AnalystResourceObservation } from "../packages/research/src/analyst-resources.js";
+import type {
+  ExaContentsResult,
+  ExaSearchResult,
+} from "../packages/research/src/search/exa.js";
+
+const providerAccounting = vi.hoisted(() => {
+  const receipt = {
+    id: "00000000-0000-4000-8000-000000000094",
+    actualCostUsd: null,
+  };
+  return {
+    reserve: vi.fn(async () => ({
+      outcome: "reserved" as const,
+      reused: false,
+      reservation: receipt,
+    })),
+    settle: vi.fn(async () => receipt),
+  };
+});
+
+vi.mock("@asi/database", async (importOriginal) => {
+  const actual = await importOriginal<typeof DatabaseModule>();
+  return {
+    ...actual,
+    reserveResearchProviderUsage: providerAccounting.reserve,
+    settleResearchProviderUsage: providerAccounting.settle,
+  };
+});
+
+function researchSignalEvidence(options: ResearchSignalEvidenceOptions) {
+  return researchSignalEvidenceAccounted({
+    exaBudgetScopeId: "signal-evidence-test-scope",
+    ...options,
+  });
+}
+
+function metadataSearchClient(
+  results: readonly ExaSearchResult[] = [],
+) {
+  return {
+    searchWithMetadata: vi.fn(async () => ({
+      results,
+      providerCostUsd: null,
+    })),
+    fetchContentsWithMetadata: vi.fn(async () => ({
+      results: [] as readonly ExaContentsResult[],
+      providerCostUsd: null,
+    })),
+  };
+}
 
 const identity = {
   rawName: "Electronics International, Inc.",
@@ -164,6 +219,26 @@ describe("raw signal official-site identity", () => {
     expect(result.nameMatched).toBe(false);
   });
 
+  it("does not treat a parent portfolio relationship as publisher identity", () => {
+    const result = assessSignalSiteIdentity(
+      {
+        rawName: "Beacon Aerospace LLC",
+        uei: null,
+        cage: null,
+        city: "Denver",
+        state: "CO",
+      },
+      [
+        "Atlas Group portfolio companies. Beacon Aerospace LLC is a subsidiary of Atlas Group. Beacon Aerospace LLC operates in Denver, CO.",
+      ],
+    );
+
+    expect(result).toMatchObject({
+      status: "ambiguous",
+      nameMatched: false,
+    });
+  });
+
   it("does not let a target heading turn publisher voice into self-identification", () => {
     const result = assessSignalSiteIdentity(
       {
@@ -252,7 +327,7 @@ describe("raw signal official-site identity", () => {
 
   it("accepts the exact legal identity with source-page location corroboration", () => {
     const result = assessSignalSiteIdentity(identity, [
-      "Electronics International, Inc. designs and manufactures aircraft instruments. Our office and manufacturing team is located at 123 Aviation Way, Anaheim, CA 92801. Contact our team for product support and sales.",
+      "Electronics International, Inc. designs and manufactures aircraft instruments. Our office and manufacturing team is located at 123 Aviation Way, Anaheim, CA 92801. Contact our team for product support and sales. Electronics International, Inc. is a subsidiary of Atlas Group.",
     ]);
 
     expect(result).toMatchObject({
@@ -669,6 +744,151 @@ describe("raw signal official-site identity", () => {
     });
   });
 
+  it("uses typed identifiers only from the matching structured publisher", () => {
+    const pageUrl = "https://beacon.test/";
+    const signal = {
+      rawName: "Beacon Aerospace LLC",
+      uei: null,
+      cage: "1ABC2",
+      city: "Denver",
+      state: "CO",
+    } as const;
+    const publisher = {
+      "@type": "Organization",
+      name: signal.rawName,
+      url: pageUrl,
+      identifier: {
+        "@type": "PropertyValue",
+        propertyID: "CAGE",
+        value: signal.cage,
+      },
+    };
+    const content =
+      `<script type="application/ld+json">${JSON.stringify(publisher)}</script>` +
+      "<address>100 Flight Way, Denver, CO 80202</address>";
+    const matching = assessSignalSiteIdentity(signal, [content], [pageUrl]);
+
+    expect(matching).toMatchObject({
+      status: "verified",
+      nameMatched: true,
+      corroboratedBy: "identifier",
+    });
+    const quote = buildSignalIdentityQuote(
+      content,
+      pageUrl,
+      signal,
+      matching,
+    );
+    expect(quote.length).toBeLessThanOrEqual(500);
+    expect(quote).toContain(
+      '"identifier":{"@type":"PropertyValue","propertyID":"CAGE","value":"1ABC2"}',
+    );
+    expect(assessSignalSiteIdentity(signal, [quote], [pageUrl])).toMatchObject({
+      status: "verified",
+      corroboratedBy: "identifier",
+    });
+
+    expect(
+      assessSignalSiteIdentity(
+        { ...signal, cage: "9ZZZ9" },
+        [content],
+        [pageUrl],
+      ),
+    ).toMatchObject({
+      status: "ambiguous",
+      nameMatched: true,
+      corroboratedBy: "location",
+    });
+
+    const publisherDescription =
+      "Beacon Aerospace LLC designs and manufactures actuators. Our office is located at 100 Flight Way, Denver, CO 80202. Copyright 2026 Beacon Aerospace LLC. All Rights Reserved.";
+    expect(
+      assessSignalSiteIdentity(signal, [
+        `${publisherDescription} CAGE: 1ABC2 for federal contracts.`,
+      ]),
+    ).toMatchObject({
+      status: "verified",
+      nameMatched: true,
+      corroboratedBy: "identifier",
+    });
+    expect(
+      assessSignalSiteIdentity(signal, [
+        `${publisherDescription} CAGE: 9ZZZ9 for federal contracts.`,
+      ]),
+    ).toMatchObject({
+      status: "ambiguous",
+      nameMatched: true,
+      corroboratedBy: "location",
+    });
+    expect(
+      assessSignalSiteIdentity(
+        { ...signal, uei: "ABC123DEF456", cage: null },
+        [
+          `${publisherDescription} UEI: XYZ987XYZ987 for federal contracts.`,
+        ],
+      ),
+    ).toMatchObject({
+      status: "ambiguous",
+      nameMatched: true,
+      corroboratedBy: "location",
+    });
+    for (const overlong of ["1ABC2X", "1ABC2-X", "1 A B C 2 X"]) {
+      expect(
+        assessSignalSiteIdentity(signal, [
+          `${publisherDescription} CAGE: ${overlong} for federal contracts.`,
+        ]),
+        overlong,
+      ).toMatchObject({
+        status: "verified",
+        nameMatched: true,
+        corroboratedBy: "location",
+      });
+    }
+
+    const parentIdentifierContent =
+      `<script type="application/ld+json">${JSON.stringify({
+        "@graph": [
+          {
+            "@type": "Organization",
+            name: signal.rawName,
+            url: pageUrl,
+          },
+          {
+            "@type": "Organization",
+            "@id": `${pageUrl}#parent`,
+            name: "Atlas Group",
+            identifier: {
+              "@type": "PropertyValue",
+              propertyID: "CAGE",
+              value: "9ZZZ9",
+            },
+          },
+        ],
+      })}</script>` +
+      `<p>${publisherDescription}</p>`;
+    expect(
+      assessSignalSiteIdentity(
+        signal,
+        [parentIdentifierContent],
+        [pageUrl],
+      ),
+    ).toMatchObject({
+      status: "verified",
+      nameMatched: true,
+      corroboratedBy: "location",
+    });
+
+    expect(
+      assessSignalSiteIdentity(signal, [
+        `${publisherDescription} CAGE audit teams review quality-system controls and supplier records.`,
+      ]),
+    ).toMatchObject({
+      status: "verified",
+      nameMatched: true,
+      corroboratedBy: "location",
+    });
+  });
+
   it("retains the matched structured publisher role instead of an earlier name mention", () => {
     const pageUrl = "https://www.romco.net/";
     const signal = {
@@ -913,6 +1133,540 @@ describe.skipIf(!DB_TESTS_ENABLED)("official site retry semantics (DB)", () => {
     await closeDatabase();
   });
 
+  it("jointly verifies name-only intake from exact primary and publisher identifiers", async () => {
+    const db = getDatabase();
+    const signalId = randomUUID();
+    const observedAt = "2026-09-28T12:00:00.000Z";
+    const signal = {
+      id: signalId,
+      sourceKey: "test",
+      sourceLocator: `test:${signalId}`,
+      sourceFingerprint: `signal-evidence-test:${signalId}`,
+      rawName: "Beacon Aerospace LLC",
+      rawDomain: null,
+      uei: null,
+      cage: null,
+      city: null,
+      state: null,
+      country: null,
+      awardCount: null,
+      sourcePayload: {},
+      createdAt: new Date(observedAt),
+    };
+    const currentEvidence: SourcedSignalResearchEvidence = {
+      version: "signal_research_v1",
+      signalId,
+      sourceContext: {
+        sourceKey: signal.sourceKey,
+        sourceLocator: signal.sourceLocator,
+        sourceFingerprint: signal.sourceFingerprint,
+        rawName: signal.rawName,
+        rawDomain: signal.rawDomain,
+        uei: signal.uei,
+        cage: signal.cage,
+        city: signal.city,
+        state: signal.state,
+        country: signal.country,
+        awardCount: signal.awardCount,
+      },
+      identity: {
+        status: "not_found",
+        verifiedDomain: null,
+        legalName: signal.rawName,
+        proofEvidenceIds: [],
+      },
+      website: {
+        status: "not_checked",
+        offering: "unknown",
+        excerpts: "",
+        productHints: [],
+        namedProductEvidenceIds: [],
+      },
+      ownership: {
+        status: "unknown",
+        owner: null,
+        year: null,
+        conflicting: false,
+        currentness: "unknown",
+        supportEvidenceIds: [],
+      },
+      size: {
+        status: "unknown",
+        assessment: "unknown",
+        conflicting: false,
+        indicators: [],
+      },
+      headquarters: {
+        status: "unknown",
+        city: null,
+        state: null,
+        country: null,
+        supportEvidenceIds: [],
+      },
+      missingFacts: ["verified_official_identity"],
+      checkedSources: [],
+      evidenceRefs: [],
+    };
+    const publisherText = [
+      "Beacon Aerospace LLC designs and manufactures aerospace actuators and controls for aircraft operators.",
+      "UEI: ABC123DEF456.",
+      "Headquartered at 100 Flight Way, Denver, CO 80202.",
+      "Copyright © 2026 Beacon Aerospace LLC. All Rights Reserved.",
+      "Beacon Aerospace LLC is a subsidiary of Atlas Group.",
+    ].join(" ");
+    const observations: readonly AnalystResourceObservation[] = [
+      {
+        tool: "primary_records",
+        requestHash: "1".repeat(64),
+        observedAt,
+        outcome: "success",
+        supportRole: "candidate_evidence",
+        matchBasis: "uei",
+        ambiguous: false,
+        records: [
+          {
+            signalId: randomUUID(),
+            sourceKey: "sam_entity",
+            sourceLocator: "sam://entity/ABC123DEF456",
+            sourceFingerprint: "sam-beacon-abc123",
+            legalName: signal.rawName,
+            domain: null,
+            uei: "ABC123DEF456",
+            cage: "1ABC2",
+            city: "Denver",
+            state: "CO",
+            country: "US",
+            awardCount: 0,
+            payloadJson: JSON.stringify({
+              legalName: signal.rawName,
+              uei: "ABC123DEF456",
+              city: "Denver",
+              state: "CO",
+            }),
+            payloadTruncated: false,
+            issuer: "U.S. General Services Administration",
+            recordAccess: "reused_imported_record",
+            observedAt,
+          },
+        ],
+        sourceReferences: [
+          {
+            locator: "sam://entity/ABC123DEF456",
+            finalUrl: null,
+            contentSha256: "a".repeat(64),
+            retrievedAt: null,
+            representation: "structured_primary_record",
+            replayCaveat: "Structured imported record.",
+          },
+        ],
+        failure: null,
+        accessLimit: null,
+        providerReceiptId: null,
+        providerCostUsd: null,
+        providerCostKnown: false,
+      },
+      {
+        tool: "public_page",
+        requestHash: "2".repeat(64),
+        observedAt,
+        outcome: "success",
+        supportRole: "candidate_evidence",
+        body: publisherText,
+        contentType: "text/html",
+        originalByteLength: publisherText.length,
+        retainedCharacters: publisherText.length,
+        truncated: false,
+        redirects: [],
+        linkedUrls: [],
+        sourceReferences: [
+          {
+            locator: "https://beacon.test/",
+            finalUrl: "https://beacon.test/",
+            contentSha256: "b".repeat(64),
+            retrievedAt: observedAt,
+            representation: "normalized_publisher_text",
+            replayCaveat: "Hash covers the fetched publisher response.",
+          },
+        ],
+        failure: null,
+        accessLimit: null,
+        providerReceiptId: null,
+        providerCostUsd: null,
+        providerCostKnown: false,
+      },
+    ];
+    const primaryObservation = observations[0];
+    const publisherObservation = observations[1];
+    if (
+      primaryObservation?.tool !== "primary_records" ||
+      publisherObservation?.tool !== "public_page"
+    ) {
+      throw new Error("invalid controlled observations");
+    }
+    expect(
+      assessSignalSiteIdentity(
+        {
+          rawName: signal.rawName,
+          uei: "KNOWN999ABCD",
+          cage: null,
+          city: "Denver",
+          state: "CO",
+        },
+        [
+          [
+            "Beacon Aerospace LLC designs and manufactures aerospace controls.",
+            "Headquartered at 100 Flight Way, Denver, CO 80202.",
+            "Our customer uses UEI: CUSTOMER1234.",
+            "Copyright © 2026 Beacon Aerospace LLC. All Rights Reserved.",
+          ].join(" "),
+        ],
+        ["https://beacon.test/"],
+      ),
+    ).toMatchObject({
+      status: "verified",
+      corroboratedBy: "location",
+    });
+    expect(
+      assessSignalSiteIdentity(
+        {
+          rawName: signal.rawName,
+          uei: "KNOWN999ABCD",
+          cage: null,
+          city: "Denver",
+          state: "CO",
+        },
+        [
+          [
+            "Atlas Group portfolio companies.",
+            "Beacon Aerospace LLC is a subsidiary of Atlas Group.",
+            "Parent company UEI: PARENT123456.",
+            "Beacon Aerospace LLC operates in Denver, CO.",
+          ].join(" "),
+        ],
+        ["https://atlas.test/portfolio/beacon"],
+      ),
+    ).toMatchObject({
+      status: "ambiguous",
+      nameMatched: false,
+    });
+    const rollback = new Error("Rollback isolated evidence fixture");
+    try {
+      await db.transaction(async (tx) => {
+        await tx.insert(sourceSignals).values(signal);
+        const result = await admitSignalResourceEvidence({
+          db: tx as unknown as Database,
+          signal,
+          currentEvidence,
+          observations,
+        });
+
+        expect(result.researchEvidence.identity).toMatchObject({
+          status: "verified",
+          verifiedDomain: "beacon.test",
+        });
+        expect(result.researchEvidence.ownership).toMatchObject({
+          status: "acquired",
+          owner: "Atlas Group",
+          conflicting: false,
+          currentness: "explicit_current_relation",
+        });
+        expect(
+          result.researchEvidence.ownership.supportEvidenceIds.length,
+        ).toBeGreaterThan(0);
+        expect(result.researchEvidence.identity.proofEvidenceIds.length).toBe(2);
+        expect(result.researchEvidence.evidenceRefs).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              sourceKind: "registry",
+              url: "sam://entity/ABC123DEF456",
+              quote: expect.stringContaining("UEI: ABC123DEF456"),
+            }),
+            expect.objectContaining({
+              sourceKind: "official_site",
+              url: "https://beacon.test/",
+              quote: expect.stringContaining("ABC123DEF456"),
+            }),
+          ]),
+        );
+        const conflicts = [
+          {
+            label: "UEI hidden by matching location",
+            identity: {
+              uei: "KNOWN999ABCD",
+              cage: null,
+              city: "Denver",
+              state: "CO",
+            },
+          },
+          {
+            label: "CAGE hidden by matching UEI",
+            identity: {
+              uei: "ABC123DEF456",
+              cage: "9ZZZ9",
+              city: null,
+              state: null,
+            },
+          },
+          {
+            label: "complete location",
+            identity: {
+              uei: null,
+              cage: null,
+              city: "Phoenix",
+              state: "AZ",
+            },
+          },
+          {
+            label: "known city with missing state",
+            identity: {
+              uei: null,
+              cage: null,
+              city: "Phoenix",
+              state: null,
+            },
+          },
+          {
+            label: "known state with missing city",
+            identity: {
+              uei: null,
+              cage: null,
+              city: null,
+              state: "AZ",
+            },
+          },
+        ] as const;
+        for (const conflict of conflicts) {
+          const conflictingId = randomUUID();
+          const conflictingSignal = {
+            ...signal,
+            id: conflictingId,
+            sourceLocator: `test:${conflictingId}`,
+            sourceFingerprint: `signal-evidence-test:${conflictingId}`,
+            ...conflict.identity,
+          };
+          const conflictingEvidence: SourcedSignalResearchEvidence = {
+            ...currentEvidence,
+            signalId: conflictingId,
+            sourceContext: {
+              ...currentEvidence.sourceContext,
+              sourceLocator: conflictingSignal.sourceLocator,
+              sourceFingerprint: conflictingSignal.sourceFingerprint,
+              ...conflict.identity,
+            },
+          };
+          await tx.insert(sourceSignals).values(conflictingSignal);
+          const rejected = await admitSignalResourceEvidence({
+            db: tx as unknown as Database,
+            signal: conflictingSignal,
+            currentEvidence: conflictingEvidence,
+            observations,
+          });
+
+          expect(
+            rejected.researchEvidence.identity,
+            `${conflict.label} conflict`,
+          ).toMatchObject({
+            status: "ambiguous",
+            verifiedDomain: null,
+            proofEvidenceIds: [],
+          });
+          expect(rejected.researchEvidence.sourceContext).toMatchObject(
+            conflict.identity,
+          );
+          expect(rejected.researchEvidence.ownership).toMatchObject({
+            status: "unknown",
+            conflicting: false,
+            supportEvidenceIds: [],
+          });
+        }
+        const publisherOnlyId = randomUUID();
+        const publisherOnlySignal = {
+          ...signal,
+          id: publisherOnlyId,
+          sourceLocator: `test:${publisherOnlyId}`,
+          sourceFingerprint: `signal-evidence-test:${publisherOnlyId}`,
+          uei: "KNOWN999ABCD",
+          city: "Denver",
+          state: "CO",
+        };
+        const publisherOnlyEvidence: SourcedSignalResearchEvidence = {
+          ...currentEvidence,
+          signalId: publisherOnlyId,
+          sourceContext: {
+            ...currentEvidence.sourceContext,
+            sourceLocator: publisherOnlySignal.sourceLocator,
+            sourceFingerprint: publisherOnlySignal.sourceFingerprint,
+            uei: publisherOnlySignal.uei,
+            city: publisherOnlySignal.city,
+            state: publisherOnlySignal.state,
+          },
+        };
+        await tx.insert(sourceSignals).values(publisherOnlySignal);
+        const publisherOnlyRejected = await admitSignalResourceEvidence({
+          db: tx as unknown as Database,
+          signal: publisherOnlySignal,
+          currentEvidence: publisherOnlyEvidence,
+          observations: [publisherObservation],
+        });
+        expect(publisherOnlyRejected.researchEvidence.identity).toMatchObject({
+          status: "ambiguous",
+          verifiedDomain: null,
+          proofEvidenceIds: [],
+        });
+        expect(publisherOnlyRejected.researchEvidence.ownership).toMatchObject({
+          status: "unknown",
+          supportEvidenceIds: [],
+        });
+
+        const transitionId = randomUUID();
+        const transitionSignal = {
+          ...signal,
+          id: transitionId,
+          sourceLocator: `test:${transitionId}`,
+          sourceFingerprint: `signal-evidence-test:${transitionId}`,
+          uei: "KNOWN999ABCD",
+          city: "Denver",
+          state: "CO",
+        };
+        const transitionEvidence: SourcedSignalResearchEvidence = {
+          ...currentEvidence,
+          signalId: transitionId,
+          sourceContext: {
+            ...currentEvidence.sourceContext,
+            sourceLocator: transitionSignal.sourceLocator,
+            sourceFingerprint: transitionSignal.sourceFingerprint,
+            uei: transitionSignal.uei,
+            city: transitionSignal.city,
+            state: transitionSignal.state,
+          },
+        };
+        const transitionText = [
+          "Beacon Aerospace LLC designs and manufactures aerospace actuators and controls for aircraft operators.",
+          "Headquartered at 100 Flight Way, Denver, CO 80202.",
+          "Copyright © 2026 Beacon Aerospace LLC. All Rights Reserved.",
+          "Beacon Aerospace LLC is a subsidiary of Atlas Group.",
+        ].join(" ");
+        const transitionPage: typeof publisherObservation = {
+          ...publisherObservation,
+          requestHash: "3".repeat(64),
+          body: transitionText,
+          originalByteLength: transitionText.length,
+          retainedCharacters: transitionText.length,
+          sourceReferences: publisherObservation.sourceReferences.map(
+            (reference) => ({
+              ...reference,
+              contentSha256: "c".repeat(64),
+            }),
+          ),
+        };
+        await tx.insert(sourceSignals).values(transitionSignal);
+        const initiallyVerified = await admitSignalResourceEvidence({
+          db: tx as unknown as Database,
+          signal: transitionSignal,
+          currentEvidence: transitionEvidence,
+          observations: [transitionPage],
+        });
+        expect(initiallyVerified.researchEvidence.identity).toMatchObject({
+          status: "verified",
+          verifiedDomain: "beacon.test",
+        });
+        expect(initiallyVerified.researchEvidence.ownership).toMatchObject({
+          status: "acquired",
+          owner: "Atlas Group",
+        });
+
+        const invalidated = await admitSignalResourceEvidence({
+          db: tx as unknown as Database,
+          signal: transitionSignal,
+          currentEvidence: initiallyVerified.researchEvidence,
+          observations: [primaryObservation],
+        });
+        expect(invalidated.researchEvidence.identity).toMatchObject({
+          status: "ambiguous",
+          verifiedDomain: null,
+          proofEvidenceIds: [],
+        });
+        expect(invalidated.researchEvidence.website).toMatchObject({
+          status: "not_checked",
+          offering: "unknown",
+          excerpts: "",
+          productHints: [],
+          namedProductEvidenceIds: [],
+        });
+        expect(invalidated.researchEvidence.ownership).toMatchObject({
+          status: "unknown",
+          owner: null,
+          conflicting: false,
+          currentness: "unknown",
+          supportEvidenceIds: [],
+        });
+        expect(
+          invalidated.researchEvidence.evidenceRefs.some(
+            (reference) =>
+              reference.stage === "ownership" &&
+              reference.url === "https://beacon.test/",
+          ),
+        ).toBe(true);
+        const externalParentText =
+          "Beacon Aerospace LLC is a subsidiary of Atlas Group.";
+        const externalParentPage: typeof publisherObservation = {
+          ...publisherObservation,
+          requestHash: "4".repeat(64),
+          body: externalParentText,
+          originalByteLength: externalParentText.length,
+          retainedCharacters: externalParentText.length,
+          sourceReferences: [
+            {
+              ...publisherObservation.sourceReferences[0]!,
+              locator: "https://atlas.test/portfolio/beacon",
+              finalUrl: "https://atlas.test/portfolio/beacon",
+              contentSha256: "d".repeat(64),
+            },
+          ],
+        };
+        const mixedSupport = await admitSignalResourceEvidence({
+          db: tx as unknown as Database,
+          signal: transitionSignal,
+          currentEvidence: initiallyVerified.researchEvidence,
+          observations: [externalParentPage],
+        });
+        expect(
+          mixedSupport.researchEvidence.ownership.supportEvidenceIds,
+        ).toHaveLength(2);
+        const externallySupported = await admitSignalResourceEvidence({
+          db: tx as unknown as Database,
+          signal: transitionSignal,
+          currentEvidence: mixedSupport.researchEvidence,
+          observations: [primaryObservation],
+        });
+        expect(externallySupported.researchEvidence.ownership).toMatchObject({
+          status: "acquired",
+          owner: "Atlas Group",
+          conflicting: false,
+          currentness: "explicit_current_relation",
+        });
+        expect(
+          externallySupported.researchEvidence.ownership.supportEvidenceIds,
+        ).toHaveLength(1);
+        const parentFactRetained = await admitSignalResourceEvidence({
+          db: tx as unknown as Database,
+          signal: transitionSignal,
+          currentEvidence: externallySupported.researchEvidence,
+          observations: [primaryObservation],
+        });
+        expect(parentFactRetained.researchEvidence.ownership).toMatchObject({
+          status: "acquired",
+          owner: "Atlas Group",
+          conflicting: false,
+          currentness: "explicit_current_relation",
+        });
+        throw rollback;
+      });
+    } catch (error) {
+      if (error !== rollback) throw error;
+    }
+  });
+
   it("keeps a failed official candidate retryable despite another candidate mismatch", async () => {
     vi.stubEnv("EXA_DAILY_BUDGET_USD", "99999");
     const db = getDatabase();
@@ -944,17 +1698,14 @@ describe.skipIf(!DB_TESTS_ENABLED)("official site retry semantics (DB)", () => {
           db: tx as unknown as Database,
           apiKey: "test-key",
           signal,
-          searchClient: {
-            search: vi.fn(async () => [
-              {
-                title: "Infinite Electronics International",
-                url: `${homonymOrigin}/`,
-                text: "Search candidate",
-                score: 1,
-              },
-            ]),
-            fetchContents: vi.fn(async () => []),
-          },
+          searchClient: metadataSearchClient([
+            {
+              title: "Infinite Electronics International",
+              url: `${homonymOrigin}/`,
+              text: "Search candidate",
+              score: 1,
+            },
+          ]),
           fetchUrl: vi.fn(async (url: string) => {
             if (new URL(url).hostname === officialDomain) {
               throw new SafeFetchError("timeout");
@@ -1023,10 +1774,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("official site retry semantics (DB)", () => {
           db: tx as unknown as Database,
           apiKey: "test-key",
           signal,
-          searchClient: {
-            search: vi.fn(async () => []),
-            fetchContents: vi.fn(async () => []),
-          },
+          searchClient: metadataSearchClient(),
           fetchUrl: vi.fn(async (url: string) => ({
             requestedUrl: url,
             finalUrl: url,
@@ -1126,10 +1874,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("official site retry semantics (DB)", () => {
           db: tx as unknown as Database,
           apiKey: "test-key",
           signal,
-          searchClient: {
-            search: vi.fn(async () => []),
-            fetchContents: vi.fn(async () => []),
-          },
+          searchClient: metadataSearchClient(),
           fetchUrl,
         });
 
@@ -1218,10 +1963,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("official site retry semantics (DB)", () => {
           db: tx as unknown as Database,
           apiKey: "test-key",
           signal,
-          searchClient: {
-            search: vi.fn(async () => []),
-            fetchContents: vi.fn(async () => []),
-          },
+          searchClient: metadataSearchClient(),
           fetchUrl: vi.fn(async (url: string) => {
             if (new URL(url).pathname !== "/") {
               throw new SafeFetchError("http_error", 404);
@@ -1301,10 +2043,7 @@ describe.skipIf(!DB_TESTS_ENABLED)("official site retry semantics (DB)", () => {
           db: tx as unknown as Database,
           apiKey: "test-key",
           signal,
-          searchClient: {
-            search: vi.fn(async () => []),
-            fetchContents: vi.fn(async () => []),
-          },
+          searchClient: metadataSearchClient(),
           fetchUrl,
         });
 
@@ -1607,7 +2346,22 @@ describe("sourced product and size semantics", () => {
       classifyExplicitRevenueSize(
         `Annual revenue was $45 million in ${recentYear}.`,
       ),
+    ).toBe("unknown");
+    expect(
+      classifyExplicitRevenueSize(
+        `In its latest completed fiscal year ${recentYear}, annual revenue was $45 million.`,
+      ),
     ).toBe("under_50m");
+    expect(
+      classifyExplicitRevenueSize(
+        `Projected annual revenue for the latest fiscal year ${recentYear} is $45 million.`,
+      ),
+    ).toBe("unknown");
+    expect(
+      classifyExplicitRevenueSize(
+        "In its latest completed fiscal year 1990, annual revenue was $12 million.",
+      ),
+    ).toBe("unknown");
     expect(
       classifyExplicitRevenueSize(
         "The company reported revenue of $50 million.",
@@ -1691,6 +2445,40 @@ describe("sourced product and size semantics", () => {
         "Our annual revenue will reach $40 million next year.",
       ),
     ).toBe("unknown");
+  });
+
+  it("admits only attributable current revenue into consumer size facts", () => {
+    const recentYear = new Date().getUTCFullYear() - 1;
+    const latest = extractWebsiteFacts(
+      fetchedWebsite(
+        `Our annual revenue for our latest completed fiscal year ${recentYear} was $45 million.`,
+      ),
+      "Beacon Aerospace LLC",
+    );
+    const datedWithoutLatest = extractWebsiteFacts(
+      fetchedWebsite(`Our annual revenue was $45 million in ${recentYear}.`),
+      "Beacon Aerospace LLC",
+    );
+    const forecast = extractWebsiteFacts(
+      fetchedWebsite(
+        `Our projected annual revenue for fiscal year ${recentYear} is $45 million.`,
+      ),
+      "Beacon Aerospace LLC",
+    );
+
+    expect(latest.sizeAssessment).toBe("under_50m");
+    expect(latest.sizeDocuments).toEqual([
+      expect.objectContaining({
+        metadata: expect.objectContaining({
+          periodYear: recentYear,
+          currentness: "latest_completed_period",
+        }),
+      }),
+    ]);
+    expect(datedWithoutLatest.sizeAssessment).toBe("unknown");
+    expect(datedWithoutLatest.sizeDocuments).toEqual([]);
+    expect(forecast.sizeAssessment).toBe("unknown");
+    expect(forecast.sizeDocuments).toEqual([]);
   });
 
   it("attributes current ownership, revenue, and headquarters to the target", () => {
@@ -1878,15 +2666,12 @@ describe("sourced product and size semantics", () => {
       "Haltec has over 125,000 square feet of office/manufacturing space and is headquartered in Leetonia, Ohio.",
     ]);
     expect(adpma).toMatchObject({
-      ownershipStatus: "acquired",
+      ownershipStatus: "unknown",
       owner: null,
     });
-    expect(adpma.ownershipDocuments.map((document) => document.quote)).toEqual([
-      "ADPma has recently been acquired by “buy and grow” private investors committed to supporting our long term expansion and success.",
-    ]);
   });
 
-  it("prefers attributable owned-by evidence over conflicting independence", () => {
+  it("marks attributable owner and independence evidence conflicting", () => {
     const facts = extractWebsiteFacts(
       fetchedWebsitePages(
         "We remain family-owned.",
@@ -1897,8 +2682,9 @@ describe("sourced product and size semantics", () => {
     );
 
     expect(facts).toMatchObject({
-      ownershipStatus: "acquired",
-      owner: "ParentCo",
+      ownershipStatus: "unknown",
+      owner: null,
+      ownershipConflicting: true,
     });
     expect(facts.ownershipDocuments.map((document) => document.quote)).toEqual([
       "We remain family-owned.",
@@ -2024,7 +2810,11 @@ describe("sourced product and size semantics", () => {
     expect(facts.sizeDocuments).toContainEqual(
       expect.objectContaining({
         url: "https://mcneilindustries.com/about-us/",
-        metadata: { sizeKind: "employee_count" },
+        metadata: expect.objectContaining({
+          sizeKind: "employee_count",
+          periodYear: null,
+          currentness: "undated_current",
+        }),
         quote: expect.stringContaining(
           "McNeil Industries currently employs 30 people",
         ),

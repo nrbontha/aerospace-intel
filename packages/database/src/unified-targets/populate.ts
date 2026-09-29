@@ -156,7 +156,7 @@ export async function reconcileUnifiedTargetMachineProjections(
            AND st.input_manifest->'policy'->>'jevModel' = $4
            AND st.input_manifest->'policy'->>'museModel' = $5
            AND st.input_manifest->'policy'->>'evaluatorPrompt' = $6
-           AND st.input_manifest->'policy'->>'jevAuditSampleRate' = $7
+           AND st.input_manifest->'policy'->>'analyst' = $7
        )
      RETURNING ut.id`,
     [
@@ -166,7 +166,7 @@ export async function reconcileUnifiedTargetMachineProjections(
       expectedReviewInputContract.policy.jevModel,
       expectedReviewInputContract.policy.museModel,
       expectedReviewInputContract.policy.evaluatorPrompt,
-      String(expectedReviewInputContract.policy.jevAuditSampleRate),
+      expectedReviewInputContract.policy.analyst,
     ],
   );
   const correctedIdentity = await query(
@@ -1344,7 +1344,7 @@ async function loadEnsemble(
        AND st.input_manifest->'policy'->>'jevModel' = $3
        AND st.input_manifest->'policy'->>'museModel' = $4
        AND st.input_manifest->'policy'->>'evaluatorPrompt' = $5
-       AND st.input_manifest->'policy'->>'jevAuditSampleRate' = $6
+       AND st.input_manifest->'policy'->>'analyst' = $6
        AND jev.decision IN ('research', 'high_priority')`,
     [
       expectedReviewInputContract.version,
@@ -1352,7 +1352,7 @@ async function loadEnsemble(
       expectedReviewInputContract.policy.jevModel,
       expectedReviewInputContract.policy.museModel,
       expectedReviewInputContract.policy.evaluatorPrompt,
-      String(expectedReviewInputContract.policy.jevAuditSampleRate),
+      expectedReviewInputContract.policy.analyst,
     ],
   );
   return rows.flatMap((r) => {

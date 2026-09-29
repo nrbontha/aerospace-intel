@@ -272,7 +272,7 @@ export async function startWorker(): Promise<WorkerRuntime> {
     await queue.start();
 
     if (
-      process.env.AGENT_SUPERVISOR_ENABLED !== "false" &&
+      process.env.AGENT_SUPERVISOR_ENABLED === "true" &&
       env.DATABASE_URL !== undefined
     ) {
       const seeded = await ensureDefaultAgents(getDatabase());
@@ -288,6 +288,10 @@ export async function startWorker(): Promise<WorkerRuntime> {
         tickWallTimeMs: 120_000,
       });
       log("info", "supervisor.started", { instanceId: supervisor.instanceId });
+    } else {
+      log("info", "supervisor.disabled", {
+        reason: "explicit_enable_required",
+      });
     }
 
     // Self-healing: revive running campaigns whose heartbeat job died
@@ -299,13 +303,27 @@ export async function startWorker(): Promise<WorkerRuntime> {
     });
     log("info", "campaign.sweep_started", {});
 
-    // Autonomous, lease-fenced review loops start even when one optional
-    // provider is unavailable. Each stage owns its actual dependency and
-    // durable defer/retry policy; database-only reconciliation must never be
-    // held behind OpenRouter or Muse health.
-    ensembleScheduler = startEnsembleScheduler({ logger: log });
+    // Cheap Jev, persistent Muse, and database-only reconciliation use
+    // independent locks. Startup passes the typed mode and immutable scope;
+    // the scheduler never creates or activates provider allowance.
+    ensembleScheduler = startEnsembleScheduler({
+      logger: log,
+      analystMode: env.FAA_ANALYST_MODE,
+      ...(env.EXA_BUDGET_SCOPE_ID === undefined
+        ? {}
+        : { exaBudgetScopeId: env.EXA_BUDGET_SCOPE_ID }),
+      ...(env.FAA_JEV_SOURCE_SIGNAL_IDS === undefined
+        ? {}
+        : { jevSourceSignalIds: env.FAA_JEV_SOURCE_SIGNAL_IDS }),
+    });
     log("info", "ensemble.scheduler_started", {
-      exaConfigured: process.env.EXA_API_KEY !== undefined,
+      analystMode: env.FAA_ANALYST_MODE,
+      exaConfigured: env.EXA_API_KEY !== undefined,
+      exaScopeConfigured: env.EXA_BUDGET_SCOPE_ID !== undefined,
+      jevSourceScope:
+        env.FAA_JEV_SOURCE_SIGNAL_IDS === undefined
+          ? "full"
+          : env.FAA_JEV_SOURCE_SIGNAL_IDS.length,
       openRouterConfigured: env.OPENROUTER_API_KEY !== undefined,
     });
   } catch (error) {

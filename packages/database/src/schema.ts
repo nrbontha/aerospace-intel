@@ -2644,6 +2644,426 @@ export type NewSourceSignalEvidenceLink = InsertRow<
   typeof sourceSignalEvidenceLinks
 >;
 
+/**
+ * Durable source-signal analyst cases. Case identity follows the immutable
+ * source revision and analyst policy; superseded rows remain readable.
+ */
+export const signalAnalystCases = pgTable(
+  "signal_analyst_cases",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    signalId: uuid("signal_id")
+      .notNull()
+      .references(() => sourceSignals.id, { onDelete: "cascade" }),
+    sourceRevision: integer("source_revision").notNull(),
+    policyVersion: text("policy_version").notNull(),
+    inputHash: char("input_hash", { length: 64 }).notNull(),
+    status: text("status").notNull().default("active"),
+    limits: jsonb("limits")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    checkpoint: jsonb("checkpoint")
+      .$type<Record<string, unknown>>()
+      .notNull()
+      .default({}),
+    memo: jsonb("memo").$type<Record<string, unknown>>(),
+    nextAttemptAt: timestamp("next_attempt_at", { withTimezone: true }),
+    stopReason: text("stop_reason"),
+    nextStepSequence: integer("next_step_sequence").notNull().default(1),
+    completedAt: timestamp("completed_at", { withTimezone: true }),
+    createdAt: ct(),
+    updatedAt: ut(),
+  },
+  (t) => [
+    unique("signal_analyst_cases_identity_uidx").on(
+      t.signalId,
+      t.sourceRevision,
+      t.policyVersion,
+    ),
+    index("signal_analyst_cases_signal_created_idx").on(
+      t.signalId,
+      t.createdAt,
+    ),
+    index("signal_analyst_cases_due_idx")
+      .on(t.status, t.nextAttemptAt)
+      .where(sql`${t.nextAttemptAt} IS NOT NULL`),
+    check(
+      "signal_analyst_cases_status_chk",
+      sql`${t.status} IN ('active', 'awaiting_review', 'deferred', 'completed', 'exhausted', 'superseded')`,
+    ),
+    check(
+      "signal_analyst_cases_policy_version_chk",
+      sql`length(btrim(${t.policyVersion})) > 0`,
+    ),
+    check(
+      "signal_analyst_cases_input_hash_chk",
+      sql`${t.inputHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "signal_analyst_cases_next_sequence_chk",
+      sql`${t.nextStepSequence} >= 1`,
+    ),
+  ],
+);
+
+export const signalAnalystSteps = pgTable(
+  "signal_analyst_steps",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    caseId: uuid("case_id")
+      .notNull()
+      .references(() => signalAnalystCases.id, { onDelete: "cascade" }),
+    sequence: integer("sequence").notNull(),
+    kind: text("kind").notNull(),
+    request: jsonb("request").$type<Record<string, unknown>>().notNull(),
+    requestHash: char("request_hash", { length: 64 }).notNull(),
+    status: text("status").notNull().default("in_progress"),
+    response: jsonb("response").$type<Record<string, unknown>>(),
+    observedStatus: text("observed_status"),
+    error: text("error"),
+    claimPhase: text("claim_phase").notNull(),
+    claimLeaseToken: uuid("claim_lease_token").notNull(),
+    claimInputHash: char("claim_input_hash", { length: 64 }),
+    modelUsageReceiptId: uuid("model_usage_receipt_id").references(
+      () => faaReviewModelUsage.id,
+      { onDelete: "restrict" },
+    ),
+    costKnown: boolean("cost_known").notNull().default(false),
+    costUsd: numeric("cost_usd"),
+    startedAt: timestamp("started_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    finishedAt: timestamp("finished_at", { withTimezone: true }),
+    lateObservedAt: timestamp("late_observed_at", { withTimezone: true }),
+    createdAt: ct(),
+    updatedAt: ut(),
+  },
+  (t) => [
+    unique("signal_analyst_steps_case_sequence_uidx").on(t.caseId, t.sequence),
+    index("signal_analyst_steps_case_request_idx").on(
+      t.caseId,
+      t.requestHash,
+      t.sequence,
+    ),
+    uniqueIndex("signal_analyst_steps_completed_request_uidx")
+      .on(t.caseId, t.requestHash)
+      .where(sql`${t.status} = 'completed'`),
+    check(
+      "signal_analyst_steps_status_chk",
+      sql`${t.status} IN ('in_progress', 'completed', 'interrupted', 'late_result', 'retryable_failure', 'quota_deferred', 'exhausted')`,
+    ),
+    check(
+      "signal_analyst_steps_observed_status_chk",
+      sql`${t.observedStatus} IS NULL OR ${t.observedStatus} IN ('completed', 'interrupted', 'retryable_failure', 'quota_deferred', 'exhausted')`,
+    ),
+    check("signal_analyst_steps_sequence_chk", sql`${t.sequence} >= 1`),
+    check("signal_analyst_steps_kind_chk", sql`length(btrim(${t.kind})) > 0`),
+    check(
+      "signal_analyst_steps_request_hash_chk",
+      sql`${t.requestHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "signal_analyst_steps_claim_phase_chk",
+      sql`${t.claimPhase} IN ('research', 'jev', 'muse', 'settled')`,
+    ),
+    check(
+      "signal_analyst_steps_claim_hash_chk",
+      sql`${t.claimInputHash} IS NULL OR ${t.claimInputHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "signal_analyst_steps_cost_chk",
+      sql`(${t.costKnown} AND ${t.costUsd} IS NOT NULL AND ${t.costUsd} >= 0) OR (NOT ${t.costKnown} AND ${t.costUsd} IS NULL)`,
+    ),
+    check(
+      "signal_analyst_steps_finish_chk",
+      sql`(${t.status} = 'in_progress') = (${t.finishedAt} IS NULL)`,
+    ),
+    check(
+      "signal_analyst_steps_late_result_chk",
+      sql`(${t.status} = 'late_result' AND ${t.observedStatus} IS NOT NULL AND ${t.lateObservedAt} IS NOT NULL) OR (${t.status} <> 'late_result' AND ${t.observedStatus} IS NULL AND ${t.lateObservedAt} IS NULL)`,
+    ),
+  ],
+);
+
+export const researchProviderBudgetScopes = pgTable(
+  "research_provider_budget_scopes",
+  {
+    id: text("id").primaryKey(),
+    provider: text("provider").notNull(),
+    startsAt: timestamp("starts_at", { withTimezone: true }).notNull(),
+    totalCapUsd: numeric("total_cap_usd").notNull(),
+    permitStatus: text("permit_status").notNull(),
+    permitUpdatedAt: timestamp("permit_updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+    sealedAt: timestamp("sealed_at", { withTimezone: true }),
+    createdAt: ct(),
+    updatedAt: ut(),
+  },
+  (t) => [
+    index("research_provider_budget_provider_status_idx").on(
+      t.provider,
+      t.permitStatus,
+      t.startsAt,
+    ),
+    check(
+      "research_provider_budget_id_chk",
+      sql`length(btrim(${t.id})) > 0`,
+    ),
+    check(
+      "research_provider_budget_provider_chk",
+      sql`length(btrim(${t.provider})) > 0`,
+    ),
+    check(
+      "research_provider_budget_cap_chk",
+      sql`${t.totalCapUsd} >= 0`,
+    ),
+    check(
+      "research_provider_budget_permit_chk",
+      sql`${t.permitStatus} IN ('paused', 'active', 'closed')`,
+    ),
+  ],
+);
+
+export const researchProviderBudgetScopeSignals = pgTable(
+  "research_provider_budget_scope_signals",
+  {
+    budgetScopeId: text("budget_scope_id")
+      .notNull()
+      .references(() => researchProviderBudgetScopes.id, {
+        onDelete: "restrict",
+      }),
+    sourceSignalId: uuid("source_signal_id")
+      .notNull()
+      .references(() => sourceSignals.id, { onDelete: "restrict" }),
+    createdAt: ct(),
+  },
+  (t) => [
+    primaryKey({
+      columns: [t.budgetScopeId, t.sourceSignalId],
+      name: "research_provider_budget_scope_signals_pk",
+    }),
+    index("research_provider_budget_scope_signals_signal_idx").on(
+      t.sourceSignalId,
+    ),
+  ],
+);
+
+/**
+ * Before-call paid-provider reservations and after-call receipts. This ledger
+ * excludes model usage, which remains in faa_review_model_usage/model_usage.
+ */
+export const researchProviderUsage = pgTable(
+  "research_provider_usage",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    provider: text("provider").notNull(),
+    operation: text("operation").notNull(),
+    sourceSignalId: uuid("source_signal_id")
+      .notNull()
+      .references(() => sourceSignals.id, { onDelete: "restrict" }),
+    analystStepId: uuid("analyst_step_id").references(
+      () => signalAnalystSteps.id,
+      { onDelete: "set null" },
+    ),
+    budgetScopeId: text("budget_scope_id")
+      .notNull()
+      .references(() => researchProviderBudgetScopes.id, {
+        onDelete: "restrict",
+      }),
+    requestHash: char("request_hash", { length: 64 }).notNull(),
+    usageDay: date("usage_day").notNull(),
+    estimatedCostUsd: numeric("estimated_cost_usd").notNull(),
+    status: text("status").notNull().default("reserved"),
+    actualCostUsd: numeric("actual_cost_usd"),
+    observedAt: timestamp("observed_at", { withTimezone: true }),
+    error: text("error"),
+    providerCooldownRetryAt: timestamp("provider_cooldown_retry_at", {
+      withTimezone: true,
+    }),
+    providerCooldownReason: text("provider_cooldown_reason"),
+    createdAt: ct(),
+    updatedAt: ut(),
+  },
+  (t) => [
+    index("research_provider_usage_provider_day_idx").on(
+      t.provider,
+      t.usageDay,
+      t.createdAt,
+    ),
+    index("research_provider_usage_signal_idx").on(t.sourceSignalId),
+    index("research_provider_usage_budget_scope_idx").on(t.budgetScopeId),
+    uniqueIndex("research_provider_usage_step_uidx")
+      .on(t.analystStepId)
+      .where(sql`${t.analystStepId} IS NOT NULL`),
+    check(
+      "research_provider_usage_provider_chk",
+      sql`length(btrim(${t.provider})) > 0`,
+    ),
+    check(
+      "research_provider_usage_operation_chk",
+      sql`length(btrim(${t.operation})) > 0`,
+    ),
+    check(
+      "research_provider_usage_request_hash_chk",
+      sql`${t.requestHash} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "research_provider_usage_status_chk",
+      sql`${t.status} IN ('reserved', 'succeeded', 'failed', 'ambiguous')`,
+    ),
+    check(
+      "research_provider_usage_estimate_chk",
+      sql`${t.estimatedCostUsd} >= 0`,
+    ),
+    check(
+      "research_provider_usage_actual_chk",
+      sql`${t.actualCostUsd} IS NULL OR ${t.actualCostUsd} >= 0`,
+    ),
+    check(
+      "research_provider_usage_settlement_chk",
+      sql`(${t.status} = 'reserved' AND ${t.observedAt} IS NULL) OR (${t.status} <> 'reserved' AND ${t.observedAt} IS NOT NULL)`,
+    ),
+    check(
+      "research_provider_usage_cooldown_pair_chk",
+      sql`(${t.providerCooldownRetryAt} IS NULL) = (${t.providerCooldownReason} IS NULL)`,
+    ),
+    check(
+      "research_provider_usage_cooldown_retry_chk",
+      sql`${t.providerCooldownRetryAt} IS NULL OR (${t.observedAt} IS NOT NULL AND ${t.providerCooldownRetryAt} > ${t.observedAt})`,
+    ),
+  ],
+);
+
+export const researchProviderCooldowns = pgTable(
+  "research_provider_cooldowns",
+  {
+    provider: text("provider").primaryKey(),
+    retryAt: timestamp("retry_at", { withTimezone: true }).notNull(),
+    reason: text("reason").notNull(),
+    sourceReservationId: uuid("source_reservation_id").references(
+      () => researchProviderUsage.id,
+      { onDelete: "set null" },
+    ),
+    observedAt: timestamp("observed_at", { withTimezone: true }).notNull(),
+    createdAt: ct(),
+    updatedAt: ut(),
+  },
+  (t) => [
+    index("research_provider_cooldowns_retry_idx").on(t.retryAt),
+    check(
+      "research_provider_cooldowns_provider_chk",
+      sql`length(btrim(${t.provider})) > 0`,
+    ),
+    check(
+      "research_provider_cooldowns_reason_chk",
+      sql`length(btrim(${t.reason})) > 0`,
+    ),
+    check(
+      "research_provider_cooldowns_retry_chk",
+      sql`${t.retryAt} > ${t.observedAt}`,
+    ),
+  ],
+);
+
+export const researchProviderLegacyEstimates = pgTable(
+  "research_provider_legacy_estimates",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    provider: text("provider").notNull(),
+    usageDay: date("usage_day").notNull(),
+    estimatedCostUsd: numeric("estimated_cost_usd").notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    importedAt: timestamp("imported_at", { withTimezone: true })
+      .notNull()
+      .defaultNow(),
+  },
+  (t) => [
+    unique("research_provider_legacy_import_uidx").on(
+      t.provider,
+      t.idempotencyKey,
+    ),
+    index("research_provider_legacy_provider_day_idx").on(
+      t.provider,
+      t.usageDay,
+    ),
+    check(
+      "research_provider_legacy_provider_chk",
+      sql`length(btrim(${t.provider})) > 0`,
+    ),
+    check(
+      "research_provider_legacy_estimate_chk",
+      sql`${t.estimatedCostUsd} >= 0`,
+    ),
+    check(
+      "research_provider_legacy_key_chk",
+      sql`length(btrim(${t.idempotencyKey})) > 0`,
+    ),
+  ],
+);
+
+export type SignalAnalystCaseStatus =
+  | "active"
+  | "awaiting_review"
+  | "deferred"
+  | "completed"
+  | "exhausted"
+  | "superseded";
+export type SignalAnalystObservedStatus =
+  | "completed"
+  | "interrupted"
+  | "retryable_failure"
+  | "quota_deferred"
+  | "exhausted";
+export type SignalAnalystStepStatus =
+  | "in_progress"
+  | SignalAnalystObservedStatus
+  | "late_result";
+export type ResearchProviderUsageStatus =
+  | "reserved"
+  | "succeeded"
+  | "failed"
+  | "ambiguous";
+export type SignalAnalystCase = Omit<
+  SelectRow<typeof signalAnalystCases>,
+  "status"
+> & { status: SignalAnalystCaseStatus };
+export type NewSignalAnalystCase = InsertRow<typeof signalAnalystCases>;
+export type SignalAnalystStep = Omit<
+  SelectRow<typeof signalAnalystSteps>,
+  "status" | "observedStatus" | "claimPhase"
+> & {
+  status: SignalAnalystStepStatus;
+  observedStatus: SignalAnalystObservedStatus | null;
+  claimPhase: SignalReviewPhase;
+};
+export type NewSignalAnalystStep = InsertRow<typeof signalAnalystSteps>;
+export type ResearchProviderUsageReceipt = Omit<
+  SelectRow<typeof researchProviderUsage>,
+  "status"
+> & { status: ResearchProviderUsageStatus };
+export type NewResearchProviderUsageReceipt = InsertRow<
+  typeof researchProviderUsage
+>;
+export type ResearchProviderLegacyEstimate = SelectRow<
+  typeof researchProviderLegacyEstimates
+>;
+export type ResearchProviderCooldown = SelectRow<
+  typeof researchProviderCooldowns
+>;
+export type ResearchProviderBudgetPermitStatus =
+  | "paused"
+  | "active"
+  | "closed";
+export type ResearchProviderBudgetScope = Omit<
+  SelectRow<typeof researchProviderBudgetScopes>,
+  "permitStatus"
+> & { permitStatus: ResearchProviderBudgetPermitStatus };
+export type ResearchProviderBudgetScopeSignal = SelectRow<
+  typeof researchProviderBudgetScopeSignals
+>;
+
 export const unifiedTargets = pgTable(
   "unified_targets",
   {

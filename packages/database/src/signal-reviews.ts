@@ -4,6 +4,7 @@ import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import type { Database } from "./client.js";
 import {
+  faaEnsembleEvaluations,
   signalReviewState,
   sourceSignalEvidenceLinks,
   sourceSignals,
@@ -36,14 +37,17 @@ export interface ClaimSignalReviewsOptions {
   phase: SignalReviewPhase;
   limit: number;
   leaseSeconds?: number;
+  sourceSignalIds?: readonly string[];
 }
 
 export interface BootstrapSignalReviewStatesOptions {
   limit?: number;
+  sourceSignalIds?: readonly string[];
 }
 
 export interface ReconcileChangedSignalReviewsOptions {
   limit?: number;
+  sourceSignalIds?: readonly string[];
 }
 
 export interface FailSignalReviewOptions {
@@ -78,6 +82,10 @@ export interface SignalReviewTransition {
 
 export type SignalReviewCommitResult<T> =
   { accepted: true; value: T; state: SignalReviewState } | { accepted: false };
+
+export type SignalReviewFenceResult<T> =
+  | { accepted: true; value: T }
+  | { accepted: false };
 
 export type SourceSignalEvidenceStage =
   "domain" | "website" | "ownership" | "size";
@@ -126,7 +134,7 @@ const VOLATILE_HASH_KEYS: Readonly<Record<string, true>> = {
   supportEvidenceIds: true,
 };
 
-class SignalReviewFenceRejected extends Error {
+export class SignalReviewFenceRejected extends Error {
   constructor() {
     super("signal review claim is stale or expired");
     this.name = "SignalReviewFenceRejected";
@@ -241,7 +249,17 @@ export async function bootstrapSignalReviewStates(
     Math.max(1, Math.trunc(options.limit ?? DEFAULT_BOOTSTRAP_LIMIT)),
     MAX_BOOTSTRAP_LIMIT,
   );
-  await reconcileChangedSignalReviews(db, { limit });
+  if (options.sourceSignalIds?.length === 0) return 0;
+  const sourceFilter =
+    options.sourceSignalIds === undefined
+      ? sql`TRUE`
+      : inArray(sql`ss.id`, options.sourceSignalIds);
+  await reconcileChangedSignalReviews(db, {
+    limit,
+    ...(options.sourceSignalIds === undefined
+      ? {}
+      : { sourceSignalIds: options.sourceSignalIds }),
+  });
   const inserted = await db.execute<{ signal_id: string }>(sql`
     INSERT INTO signal_review_state (
       signal_id,
@@ -281,6 +299,7 @@ export async function bootstrapSignalReviewStates(
       FROM source_signals ss
       LEFT JOIN signal_review_state srs ON srs.signal_id = ss.id
       WHERE srs.signal_id IS NULL
+        AND ${sourceFilter}
         AND (
           ss.status IN ('queued_qualification', 'qualifying', 'qualified')
           OR (
@@ -376,12 +395,18 @@ export async function reconcileChangedSignalReviews(
     Math.max(1, Math.trunc(options.limit ?? DEFAULT_RECONCILE_LIMIT)),
     MAX_RECONCILE_LIMIT,
   );
+  if (options.sourceSignalIds?.length === 0) return 0;
+  const sourceFilter =
+    options.sourceSignalIds === undefined
+      ? sql`TRUE`
+      : inArray(sql`state.signal_id`, options.sourceSignalIds);
   const reconciled = await db.execute<{ signal_id: string }>(sql`
     WITH changed AS (
       SELECT state.signal_id, source.review_revision
       FROM signal_review_state state
       JOIN source_signals source ON source.id = state.signal_id
       WHERE state.source_revision <> source.review_revision
+        AND ${sourceFilter}
       ORDER BY state.updated_at ASC, state.signal_id ASC
       LIMIT ${limit}
       FOR UPDATE OF state SKIP LOCKED
@@ -404,6 +429,7 @@ export async function reconcileChangedSignalReviews(
         updated_at = clock_timestamp()
     FROM changed
     WHERE state.signal_id = changed.signal_id
+      AND ${sourceFilter}
     RETURNING state.signal_id
   `);
   return reconciled.rows.length;
@@ -450,8 +476,12 @@ export async function claimSignalReviews(
     Math.max(1, Math.trunc(options.leaseSeconds ?? DEFAULT_LEASE_SECONDS)),
     MAX_LEASE_SECONDS,
   );
+  if (options.sourceSignalIds?.length === 0) return [];
   await reconcileChangedSignalReviews(db, {
     limit: Math.max(DEFAULT_RECONCILE_LIMIT, limit),
+    ...(options.sourceSignalIds === undefined
+      ? {}
+      : { sourceSignalIds: options.sourceSignalIds }),
   });
   const leaseDuration = sql`${leaseSeconds} * interval '1 second'`;
   const eligiblePhase =
@@ -465,14 +495,51 @@ export async function claimSignalReviews(
           ),
         )
       : eq(signalReviewState.phase, options.phase);
+  const sourceFilter =
+    options.sourceSignalIds === undefined
+      ? undefined
+      : inArray(signalReviewState.signalId, options.sourceSignalIds);
 
   return db.transaction(async (tx) => {
+    const priorityOrder = sql<number>`
+      CASE
+        WHEN ${options.phase} = 'muse'
+          AND ${faaEnsembleEvaluations.parsed}->>'version' = 'jev-triage-v1'
+          AND ${faaEnsembleEvaluations.parsed}->>'researchPriority' = '1'
+          THEN 1
+        WHEN ${options.phase} = 'muse'
+          AND ${faaEnsembleEvaluations.parsed}->>'version' = 'jev-triage-v1'
+          AND ${faaEnsembleEvaluations.parsed}->>'researchPriority' = '2'
+          THEN 2
+        WHEN ${options.phase} = 'muse'
+          AND ${faaEnsembleEvaluations.parsed}->>'version' = 'jev-triage-v1'
+          AND ${faaEnsembleEvaluations.parsed}->>'researchPriority' = '3'
+          THEN 3
+        ELSE 4
+      END
+    `;
     const due = await tx
       .select({ signalId: signalReviewState.signalId })
       .from(signalReviewState)
+      .innerJoin(
+        sourceSignals,
+        and(
+          eq(sourceSignals.id, signalReviewState.signalId),
+          eq(sourceSignals.reviewRevision, signalReviewState.sourceRevision),
+        ),
+      )
+      .leftJoin(
+        faaEnsembleEvaluations,
+        and(
+          eq(faaEnsembleEvaluations.id, signalReviewState.jevEvaluationId),
+          eq(faaEnsembleEvaluations.signalId, signalReviewState.signalId),
+          sql`${faaEnsembleEvaluations.inputHash} IS NOT DISTINCT FROM ${signalReviewState.inputHash}`,
+        ),
+      )
       .where(
         and(
           eligiblePhase,
+          sourceFilter,
           sql`${signalReviewState.nextAttemptAt} <= clock_timestamp()`,
           or(
             isNull(signalReviewState.leaseExpiresAt),
@@ -481,12 +548,13 @@ export async function claimSignalReviews(
         ),
       )
       .orderBy(
+        priorityOrder,
         asc(signalReviewState.nextAttemptAt),
         asc(signalReviewState.createdAt),
         asc(signalReviewState.signalId),
       )
       .limit(limit)
-      .for("update", { skipLocked: true });
+      .for("update", { of: signalReviewState, skipLocked: true });
     if (due.length === 0) return [];
 
     const rows = await tx
@@ -498,9 +566,12 @@ export async function claimSignalReviews(
         updatedAt: sql`clock_timestamp()`,
       })
       .where(
-        inArray(
-          signalReviewState.signalId,
-          due.map((row) => row.signalId),
+        and(
+          inArray(
+            signalReviewState.signalId,
+            due.map((row) => row.signalId),
+          ),
+          sourceFilter,
         ),
       )
       .returning();
@@ -561,6 +632,69 @@ async function requeueChangedClaim(
         eq(signalReviewState.leaseToken, claim.leaseToken),
       ),
     );
+}
+
+/**
+ * Run durable preparation and publication behind the exact signal-review
+ * revision/phase/hash/lease fence. Preparation may write journal/receipt rows;
+ * it is rolled back when the lease expires before publication. Callers whose
+ * final callback intentionally transitions the claim must opt out of the final
+ * post-publication check and enforce the same live predicate in that update.
+ */
+export async function withSignalReviewClaimTransaction<TPrepared, TPublished>(
+  db: Database,
+  claim: SignalReviewClaim,
+  prepare: (tx: SignalReviewTransaction) => Promise<TPrepared>,
+  publish: (
+    tx: SignalReviewTransaction,
+    prepared: TPrepared,
+  ) => Promise<TPublished>,
+  options: { claimTransitionedByPublish?: boolean } = {},
+): Promise<SignalReviewFenceResult<TPublished>> {
+  try {
+    return await db.transaction(async (tx) => {
+      const locked = await tx
+        .select({ signalId: signalReviewState.signalId })
+        .from(signalReviewState)
+        .where(liveClaimWhere(claim))
+        .limit(1)
+        .for("update");
+      if (locked[0] === undefined) throw new SignalReviewFenceRejected();
+      if (
+        !(await lockCurrentSignalReviewSource(
+          tx,
+          claim.signalId,
+          claim.sourceRevision,
+        ))
+      ) {
+        await requeueChangedClaim(tx, claim);
+        return { accepted: false } as const;
+      }
+
+      const prepared = await prepare(tx);
+      const stillLive = await tx
+        .select({ signalId: signalReviewState.signalId })
+        .from(signalReviewState)
+        .where(liveClaimWhere(claim))
+        .limit(1);
+      if (stillLive[0] === undefined) throw new SignalReviewFenceRejected();
+      const value = await publish(tx, prepared);
+      if (options.claimTransitionedByPublish !== true) {
+        const liveAfterPublication = await tx
+          .select({ signalId: signalReviewState.signalId })
+          .from(signalReviewState)
+          .where(liveClaimWhere(claim))
+          .limit(1);
+        if (liveAfterPublication[0] === undefined) {
+          throw new SignalReviewFenceRejected();
+        }
+      }
+      return { accepted: true, value } as const;
+    });
+  } catch (error) {
+    if (error instanceof SignalReviewFenceRejected) return { accepted: false };
+    throw error;
+  }
 }
 
 /**
@@ -658,53 +792,40 @@ export async function commitSignalReview<T>(
   transition: SignalReviewTransition,
   persistCallback: (tx: SignalReviewTransaction) => Promise<T>,
 ): Promise<SignalReviewCommitResult<T>> {
-  try {
-    return await db.transaction(async (tx) => {
-      const locked = await tx
-        .select({ signalId: signalReviewState.signalId })
-        .from(signalReviewState)
-        .where(liveClaimWhere(claim))
-        .limit(1)
-        .for("update");
-      if (locked[0] === undefined) throw new SignalReviewFenceRejected();
-      if (
-        !(await lockCurrentSignalReviewSource(
-          tx,
-          claim.signalId,
-          claim.sourceRevision,
-        ))
-      ) {
-        await requeueChangedClaim(tx, claim);
-        return { accepted: false } as const;
-      }
-      const effectiveTransition: SignalReviewTransition = hasOwn(
-        transition,
-        "nextAttemptAt",
-      )
-        ? transition
-        : {
-            ...transition,
-            nextAttemptAt:
-              transition.phase === "settled"
-                ? (transition.researchDueAt ??
-                  claim.researchDueAt ??
-                  MAX_TIMESTAMP)
-                : new Date(),
-          };
-
-      const value = await persistCallback(tx);
+  const effectiveTransition: SignalReviewTransition = hasOwn(
+    transition,
+    "nextAttemptAt",
+  )
+    ? transition
+    : {
+        ...transition,
+        nextAttemptAt:
+          transition.phase === "settled"
+            ? (transition.researchDueAt ?? claim.researchDueAt ?? MAX_TIMESTAMP)
+            : new Date(),
+      };
+  const committed = await withSignalReviewClaimTransaction(
+    db,
+    claim,
+    persistCallback,
+    async (tx, value) => {
       const rows = await tx
         .update(signalReviewState)
         .set(transitionSet(effectiveTransition))
         .where(liveClaimWhere(claim))
         .returning();
       if (rows[0] === undefined) throw new SignalReviewFenceRejected();
-      return { accepted: true, value, state: asState(rows[0]) } as const;
-    });
-  } catch (error) {
-    if (error instanceof SignalReviewFenceRejected) return { accepted: false };
-    throw error;
-  }
+      return { value, state: asState(rows[0]) };
+    },
+    { claimTransitionedByPublish: true },
+  );
+  return committed.accepted
+    ? {
+        accepted: true,
+        value: committed.value.value,
+        state: committed.value.state,
+      }
+    : { accepted: false };
 }
 
 /**

@@ -1,14 +1,12 @@
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
 
 import { describe, expect, it, vi } from "vitest";
+import type * as DatabaseModule from "@asi/database";
 
-import { EXA_CONTENTS_COST_USD } from "../packages/research/src/enrichment/exa-budget.js";
 import {
   classifyWebsiteEvidence,
-  fetchWebsiteEvidence,
+  fetchWebsiteEvidence as fetchWebsiteEvidenceAccounted,
+  type FetchWebsiteEvidenceOptions,
   normalizeEvidencePageText,
   splitScopedEvidenceStatements,
   type WebsiteFetchOutcome,
@@ -21,6 +19,49 @@ import {
   SafeFetchError,
   type SafeFetchResult,
 } from "../packages/research/src/safe-fetch.js";
+
+const providerAccounting = vi.hoisted(() => {
+  const receipt = {
+    id: "00000000-0000-4000-8000-000000000092",
+    actualCostUsd: null,
+  };
+  return {
+    reserve: vi.fn(async () => ({
+      outcome: "reserved" as const,
+      reused: false,
+      reservation: receipt,
+    })),
+    settle: vi.fn(async () => receipt),
+  };
+});
+
+vi.mock("@asi/database", async (importOriginal) => {
+  const actual = await importOriginal<typeof DatabaseModule>();
+  return {
+    ...actual,
+    reserveResearchProviderUsage: providerAccounting.reserve,
+    settleResearchProviderUsage: providerAccounting.settle,
+  };
+});
+
+const testAccounting = {
+  db: {} as never,
+  budgetScopeId: "website-test-scope",
+  sourceSignalId: "00000000-0000-4000-8000-000000000093",
+  dailyCapUsd: "1",
+} as const;
+
+function fetchWebsiteEvidence(
+  apiKey: string,
+  domainOrUrl: string,
+  companyName: string,
+  options: FetchWebsiteEvidenceOptions = {},
+) {
+  return fetchWebsiteEvidenceAccounted(apiKey, domainOrUrl, companyName, {
+    accounting: testAccounting,
+    ...options,
+  });
+}
 
 function safeHtmlPage(
   url: string,
@@ -133,7 +174,12 @@ describe("website evidence collection", () => {
       {
         sourcePages: [homepage],
         fetchUrl,
-        client: { fetchContents: vi.fn(async () => []) },
+        client: {
+          fetchContentsWithMetadata: vi.fn(async () => ({
+            results: [],
+            providerCostUsd: null,
+          })),
+        },
       },
     );
 
@@ -574,7 +620,12 @@ describe("website evidence collection", () => {
       {
         sourcePages: [homepage],
         fetchUrl,
-        client: { fetchContents: vi.fn(async () => []) },
+        client: {
+          fetchContentsWithMetadata: vi.fn(async () => ({
+            results: [],
+            providerCostUsd: null,
+          })),
+        },
       },
     );
 
@@ -591,15 +642,12 @@ describe("website evidence collection", () => {
     });
   });
 
-  it("accounts for every paid Exa result while excluding off-domain content", async () => {
-    const stateDirectory = mkdtempSync(join(tmpdir(), "asi-website-evidence-"));
-    vi.stubEnv("EXA_DAILY_BUDGET_USD", "99999");
-    vi.stubEnv("EXA_SPEND_STATE_PATH", join(stateDirectory, "spend.json"));
-    try {
-      const fetchUrl = vi.fn(async (url: string) =>
-        safeHtmlPage(url, "<html><script>renderClientSide()</script></html>"),
-      );
-      const fetchContents = vi.fn(async () => [
+  it("accounts injected Exa results while excluding off-domain content", async () => {
+    const fetchUrl = vi.fn(async (url: string) =>
+      safeHtmlPage(url, "<html><script>renderClientSide()</script></html>"),
+    );
+    const fetchContentsWithMetadata = vi.fn(async () => ({
+      results: [
         {
           url: "https://example.test/catalog.html",
           title: "Catalog",
@@ -610,31 +658,25 @@ describe("website evidence collection", () => {
           title: "Wrong site",
           text: "Off-domain text must not be accepted.",
         },
-      ]);
+      ],
+      providerCostUsd: null,
+    }));
 
-      const result = await fetchWebsiteEvidence(
-        "test-key",
-        "example.test",
-        "Example Aerospace, Inc.",
-        { fetchUrl, client: { fetchContents } },
-      );
+    const result = await fetchWebsiteEvidence(
+      "test-key",
+      "example.test",
+      "Example Aerospace, Inc.",
+      { fetchUrl, client: { fetchContentsWithMetadata } },
+    );
 
-      expect(result).toMatchObject({
-        outcome: "success",
-        costUsd: 2 * EXA_CONTENTS_COST_USD,
-        fetchesAttempted: 6,
-        fetchesSucceeded: 1,
-      });
-      expect(result.pages.map((page) => page.url)).toEqual([
-        "https://example.test/catalog.html",
-      ]);
-      expect(fetchContents).toHaveBeenCalledWith([
-        "https://example.test/",
-        "https://example.test/products",
-        "https://example.test/about",
-      ]);
-    } finally {
-      rmSync(stateDirectory, { force: true, recursive: true });
-    }
+    expect(result).toMatchObject({
+      outcome: "success",
+      costUsd: 0,
+      fetchesAttempted: 6,
+      fetchesSucceeded: 1,
+    });
+    expect(result.pages.map((page) => page.url)).toEqual([
+      "https://example.test/catalog.html",
+    ]);
   });
 });

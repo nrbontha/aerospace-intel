@@ -1,11 +1,66 @@
 import { describe, expect, it, vi } from "vitest";
+import type * as DatabaseModule from "@asi/database";
 
 import {
   type AcquisitionResearchOutcome,
   classifySentence,
-  researchAcquisitionHistory,
+  researchAcquisitionHistory as researchAcquisitionHistoryAccounted,
+  type ResearchAcquisitionHistoryOptions,
 } from "../packages/research/src/enrichment/ownership.js";
 import { SafeFetchError } from "../packages/research/src/safe-fetch.js";
+import type { ExaSearchResult } from "../packages/research/src/search/exa.js";
+
+const providerAccounting = vi.hoisted(() => {
+  const receipt = {
+    id: "00000000-0000-4000-8000-000000000090",
+    actualCostUsd: null,
+  };
+  return {
+    reserve: vi.fn(async () => ({
+      outcome: "reserved" as const,
+      reused: false,
+      reservation: receipt,
+    })),
+    settle: vi.fn(async () => receipt),
+  };
+});
+
+vi.mock("@asi/database", async (importOriginal) => {
+  const actual = await importOriginal<typeof DatabaseModule>();
+  return {
+    ...actual,
+    reserveResearchProviderUsage: providerAccounting.reserve,
+    settleResearchProviderUsage: providerAccounting.settle,
+  };
+});
+
+const testAccounting = {
+  db: {} as never,
+  budgetScopeId: "ownership-test-scope",
+  sourceSignalId: "00000000-0000-4000-8000-000000000091",
+  dailyCapUsd: "1",
+} as const;
+
+function metadataSearch(
+  search: () => Promise<readonly ExaSearchResult[]>,
+) {
+  return vi.fn(async () => ({
+    results: await search(),
+    providerCostUsd: null,
+  }));
+}
+
+function researchAcquisitionHistory(
+  apiKey: string,
+  companyName: string,
+  domain?: string,
+  options: ResearchAcquisitionHistoryOptions = {},
+): Promise<AcquisitionResearchOutcome> {
+  return researchAcquisitionHistoryAccounted(apiKey, companyName, domain, {
+    accounting: testAccounting,
+    ...options,
+  });
+}
 
 interface OwnershipSourceFixture {
   readonly url: string;
@@ -23,7 +78,7 @@ function researchBeaconSources(
     "beaconaerospace.example",
     {
       client: {
-        search: vi.fn(async () =>
+        searchWithMetadata: metadataSearch(async () =>
           sources.map((source, index) => ({
             title: `Ownership source ${index + 1}`,
             url: source.url,
@@ -52,7 +107,7 @@ function researchBeaconSources(
 }
 
 function overlengthAtlasClaim(): string {
-  return `Following an extensive strategic review ${"and extensive financing review ".repeat(60)}, Atlas Group acquired Beacon Aerospace LLC in 2024.`;
+  return `Following an extensive strategic review ${"and extensive financing review ".repeat(60)}, Beacon Aerospace LLC is currently a subsidiary of Atlas Group.`;
 }
 
 describe("classifySentence acquisition verbs", () => {
@@ -247,7 +302,7 @@ describe("researchAcquisitionHistory source confirmation", () => {
       "dartaerospace.com",
       {
         client: {
-          search: vi.fn(async () => [
+          searchWithMetadata: metadataSearch(async () => [
             {
               title: "TransDigm completes acquisition of DART Aerospace",
               url: "https://news.example/acquisition",
@@ -279,7 +334,7 @@ describe("researchAcquisitionHistory source confirmation", () => {
     vi.unstubAllEnvs();
   });
 
-  it("preserves punctuated legal-name attribution in retrieved acquisition evidence", async () => {
+  it("retains a dated acquisition as checked history without claiming the current owner", async () => {
     vi.stubEnv("EXA_DAILY_BUDGET_USD", "99999");
     const result = await researchAcquisitionHistory(
       "test-key",
@@ -287,7 +342,7 @@ describe("researchAcquisitionHistory source confirmation", () => {
       "dartaerospace.com",
       {
         client: {
-          search: vi.fn(async () => [
+          searchWithMetadata: metadataSearch(async () => [
             {
               title: "Transaction announcement",
               url: "https://news.example/transaction",
@@ -311,18 +366,18 @@ describe("researchAcquisitionHistory source confirmation", () => {
       },
     );
 
-    expect(result.outcome).toBe("affirmative");
-    expect(result.finding).toMatchObject({
-      status: "acquired",
-      owner: "TransDigm",
-      year: 2022,
-      excerpt: "Dart Aerospace, Inc. was acquired by TransDigm in 2022.",
-      sourceContentSha256: "b".repeat(64),
-    });
+    expect(result.outcome).toBe("no_evidence");
+    expect(result.finding.status).toBe("unknown");
+    expect(result.checkedSources).toEqual([
+      expect.objectContaining({
+        outcome: "retrieved",
+        contentSha256: "b".repeat(64),
+      }),
+    ]);
     vi.unstubAllEnvs();
   });
 
-  it("preserves an acquisition headline as a separate retrieved-source statement", async () => {
+  it("keeps an acquisition headline as history rather than current ownership", async () => {
     vi.stubEnv("EXA_DAILY_BUDGET_USD", "99999");
     const result = await researchAcquisitionHistory(
       "test-key",
@@ -330,7 +385,7 @@ describe("researchAcquisitionHistory source confirmation", () => {
       "adpma.com",
       {
         client: {
-          search: vi.fn(async () => [
+          searchWithMetadata: metadataSearch(async () => [
             {
               title: "ADPma Acquired by Mollenhour Gross",
               url: "https://news.example/adpma-transaction",
@@ -360,16 +415,14 @@ describe("researchAcquisitionHistory source confirmation", () => {
       },
     );
 
-    expect(result.outcome).toBe("affirmative");
-    expect(result.finding).toMatchObject({
-      status: "acquired",
-      owner: "Mollenhour Gross",
-      year: null,
-      excerpt: "ADPma Acquired by Mollenhour Gross",
-      sourceUrl: "https://news.example/adpma-transaction",
-      sourceContentSha256: "e".repeat(64),
-      sourceRetrievedAt: "2026-09-28T10:03:27.000Z",
-    });
+    expect(result.outcome).toBe("no_evidence");
+    expect(result.finding.status).toBe("unknown");
+    expect(result.checkedSources).toEqual([
+      expect.objectContaining({
+        url: "https://news.example/adpma-transaction",
+        outcome: "retrieved",
+      }),
+    ]);
     vi.unstubAllEnvs();
   });
 
@@ -397,7 +450,7 @@ describe("researchAcquisitionHistory source confirmation", () => {
     vi.unstubAllEnvs();
   });
 
-  it("selects one bounded source that supports the returned owner and year", async () => {
+  it("does not convert a named past buyer into the current owner", async () => {
     vi.stubEnv("EXA_DAILY_BUDGET_USD", "99999");
     const result = await researchBeaconSources([
       {
@@ -416,28 +469,44 @@ describe("researchAcquisitionHistory source confirmation", () => {
     ]);
 
     expect(result).toMatchObject({
+      outcome: "no_evidence",
+      finding: {
+        status: "unknown",
+        owner: null,
+        year: null,
+        excerpt: null,
+        sourceUrl: null,
+      },
+    });
+    expect(result.checkedSources).toHaveLength(2);
+    vi.unstubAllEnvs();
+  });
+
+  it("accepts an explicit present-tense ownership relationship", async () => {
+    const result = await researchBeaconSources([
+      {
+        url: "https://atlas.example/portfolio/beacon",
+        content: "Beacon Aerospace LLC is a subsidiary of Atlas Group.",
+        contentSha256: "3".repeat(64),
+        retrievedAt: "2026-09-28T12:03:00.000Z",
+      },
+    ]);
+
+    expect(result).toMatchObject({
       outcome: "affirmative",
       finding: {
         status: "acquired",
         owner: "Atlas Group",
-        year: 2024,
-        excerpt: "Atlas Group acquired Beacon Aerospace LLC in 2024.",
-        sourceUrl: "https://news.example/named-buyer",
-        sourceContentSha256: "2".repeat(64),
-        sourceRetrievedAt: "2026-09-28T12:02:00.000Z",
+        excerpt: "Beacon Aerospace LLC is a subsidiary of Atlas Group.",
       },
     });
-    vi.unstubAllEnvs();
   });
 
   it.each([
     {
       conflictKind: "owner",
-      statement: "Orion Holdings acquired Beacon Aerospace LLC in 2023.",
-    },
-    {
-      conflictKind: "status",
-      statement: "Beacon Aerospace LLC ceased all operations in 2025.",
+      statement:
+        "Beacon Aerospace LLC is currently a subsidiary of Orion Holdings.",
     },
   ])(
     "keeps a conflicting $conflictKind vote even when another claim is overlength",
@@ -480,7 +549,7 @@ describe("researchAcquisitionHistory source confirmation", () => {
       "dartaerospace.com",
       {
         client: {
-          search: vi.fn(async () => {
+          searchWithMetadata: metadataSearch(async () => {
             throw new Error("temporary provider transport failure");
           }),
         },
@@ -500,7 +569,7 @@ describe("researchAcquisitionHistory source confirmation", () => {
       "dartaerospace.com",
       {
         client: {
-          search: vi.fn(async () => [
+          searchWithMetadata: metadataSearch(async () => [
             {
               title: "Industry roundup",
               url: "https://news.example/roundup",
@@ -537,7 +606,7 @@ describe("researchAcquisitionHistory source confirmation", () => {
       "dartaerospace.com",
       {
         client: {
-          search: vi.fn(async () => [
+          searchWithMetadata: metadataSearch(async () => [
             {
               title: "Transaction report",
               url: "https://news.example/unreachable",
@@ -591,7 +660,7 @@ describe("researchAcquisitionHistory source confirmation", () => {
         "dartaerospace.com",
         {
           client: {
-            search: vi.fn(async () => [
+            searchWithMetadata: metadataSearch(async () => [
               {
                 title: "Company profile",
                 url: "https://news.example/company-profile",

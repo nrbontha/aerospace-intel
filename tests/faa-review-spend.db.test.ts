@@ -22,12 +22,13 @@ import {
   signalReviewState,
   sourceSignals,
 } from "../packages/database/src/schema.js";
+import { claimSignalReviews } from "../packages/database/src/signal-reviews.js";
 import { getDailySpendUsd } from "../packages/research/src/campaigns/budget.js";
 import {
-  runJevReviews,
-  runMuseReviews,
+  reconcileCurrentReviewInputs,
   resolveEnsembleConfig,
-  type JevLadderCallRequest,
+  runJevReviews,
+  type JevLadderCaller,
 } from "../packages/research/src/faa-ensemble/runner.js";
 
 const execFileAsync = promisify(execFile);
@@ -196,11 +197,18 @@ function reviewEvidence() {
     },
     ownership: {
       status: "unknown",
+      conflicting: false,
+      currentness: "unknown",
       owner: null,
       year: null,
       supportEvidenceIds: [],
     },
-    size: { status: "unknown", assessment: "unknown", indicators: [] },
+    size: {
+      status: "unknown",
+      assessment: "unknown",
+      conflicting: false,
+      indicators: [],
+    },
     headquarters: {
       status: "unknown",
       city: null,
@@ -261,12 +269,44 @@ async function createReviewSignal(label: string): Promise<string> {
   return id;
 }
 
-function passR1(costUsd: number) {
-  return async (request: JevLadderCallRequest) => {
-    if (request.rung !== "r1") throw new Error("unexpected later rung");
+function completeResearchLadder(costUsd: number): JevLadderCaller {
+  return async (request) => {
+    if (request.rung === "r1") {
+      return {
+        answers: { manufacturer: { type: "noul", noul: 0.9 } },
+        costUsd,
+        model: "typesafe/jev-returned",
+      };
+    }
+    if (request.rung === "r2") {
+      return {
+        answers: {
+          product_vs_process: {
+            type: "choice",
+            choice: "product",
+            confidence: 0.8,
+          },
+        },
+        costUsd: null,
+        model: "typesafe/jev-returned",
+      };
+    }
+    if (request.rung === "r3") {
+      return {
+        answers: { oversize: { type: "noul", noul: 0.1 } },
+        costUsd: null,
+        model: "typesafe/jev-returned",
+      };
+    }
     return {
-      answers: { manufacturer: { type: "noul", noul: 0.1 } },
-      costUsd,
+      answers: {
+        disposition: {
+          type: "choice",
+          choice: "research",
+          confidence: 0.8,
+        },
+      },
+      costUsd: null,
       model: "typesafe/jev-returned",
     };
   };
@@ -424,6 +464,13 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       await db
         .delete(sourceSignals)
         .where(sql`${sourceSignals.id} <> ${legacySignalId}`);
+      await db
+        .update(sourceSignals)
+        .set({
+          status: "quarantined",
+          qualification: { reason: "legacy_spend_fixture" },
+        })
+        .where(eq(sourceSignals.id, legacySignalId));
     });
 
     afterAll(async () => {
@@ -577,6 +624,21 @@ describe.skipIf(!DB_TESTS_ENABLED)(
         costUsd: 0.1234,
       });
 
+      const [failedState] = await getDatabase()
+        .select()
+        .from(signalReviewState)
+        .where(eq(signalReviewState.signalId, signalId));
+      expect(failedState).toMatchObject({
+        phase: "jev",
+        lastError: "controlled later-rung failure",
+        inputManifest: {
+          evidence: { sourceResearchStatus: "complete" },
+        },
+      });
+      if (failedState?.inputHash == null) {
+        throw new Error("Failed JEv attempt did not retain current input");
+      }
+
       await getDatabase()
         .update(signalReviewState)
         .set({ nextAttemptAt: new Date(0) })
@@ -607,6 +669,18 @@ describe.skipIf(!DB_TESTS_ENABLED)(
         },
       );
       expect(retry.costUsd).toBeCloseTo(0.05, 8);
+      const [retriedState] = await getDatabase()
+        .select()
+        .from(signalReviewState)
+        .where(eq(signalReviewState.signalId, signalId));
+      expect(retriedState).toMatchObject({
+        phase: "jev",
+        lastError: "controlled retry failure",
+        inputHash: failedState.inputHash,
+        inputManifest: {
+          evidence: { sourceResearchStatus: "complete" },
+        },
+      });
 
       const receipts = await getDatabase()
         .select({ costUsd: faaReviewModelUsage.costUsd })
@@ -715,6 +789,278 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       ).toEqual([]);
     });
 
+    it("does not preempt live source research before provisional JEv", async () => {
+      const db = getDatabase();
+      const signalId = randomUUID();
+      await db.insert(sourceSignals).values({
+        id: signalId,
+        sourceKey: "faa_pma_database",
+        sourceLocator: `faa-review-spend:leased-research:${signalId}`,
+        sourceFingerprint: `faa-review-spend:leased-research:${signalId}`,
+        rawName: "Leased Primary Record",
+        country: "US",
+      });
+      await db.insert(signalReviewState).values({
+        signalId,
+        sourceRevision: 0,
+        phase: "research",
+        researchEvidence: {},
+        nextAttemptAt: new Date(0),
+        lastError: "domain_provider_error: credits limit reached",
+      });
+      const [claim] = await claimSignalReviews(db, {
+        phase: "research",
+        limit: 1,
+        leaseSeconds: 600,
+      });
+      if (claim === undefined) {
+        throw new Error("Research claim was not leased");
+      }
+
+      const whileLive = await reconcileCurrentReviewInputs(db, {
+        sourceLimit: 10,
+      });
+      expect(whileLive.inputContractChanges).toBe(0);
+      const [liveState] = await db
+        .select()
+        .from(signalReviewState)
+        .where(eq(signalReviewState.signalId, signalId));
+      expect(liveState).toMatchObject({
+        phase: "research",
+        leaseToken: claim.leaseToken,
+      });
+
+      await db
+        .update(signalReviewState)
+        .set({ leaseExpiresAt: new Date(0) })
+        .where(eq(signalReviewState.signalId, signalId));
+      const afterExpiry = await reconcileCurrentReviewInputs(db, {
+        sourceLimit: 10,
+      });
+      expect(afterExpiry.inputContractChanges).toBe(1);
+      const [expiredState] = await db
+        .select()
+        .from(signalReviewState)
+        .where(eq(signalReviewState.signalId, signalId));
+      expect(expiredState).toMatchObject({
+        phase: "jev",
+        leaseToken: null,
+        leaseExpiresAt: null,
+        lastResearchOutcome: {
+          status: "unavailable",
+          reason: "domain_provider_error: credits limit reached",
+        },
+      });
+    });
+
+    it("screens a provider-blocked primary record while preserving its research retry", async () => {
+      const db = getDatabase();
+      const signalId = randomUUID();
+      const retryAt = new Date(Date.now() + 60 * 60_000);
+      await db.insert(sourceSignals).values({
+        id: signalId,
+        sourceKey: "faa_pma_database",
+        sourceLocator: `faa-review-spend:provider-blocked:${signalId}`,
+        sourceFingerprint: `faa-review-spend:provider-blocked:${signalId}`,
+        rawName: "Precision Devices Laboratory Inc",
+        country: "US",
+      });
+      await db.insert(signalReviewState).values({
+        signalId,
+        sourceRevision: 0,
+        phase: "research",
+        researchEvidence: {},
+        nextAttemptAt: retryAt,
+        lastError: "domain_provider_error: credits limit reached",
+      });
+
+      const summary = await runJevReviews(
+        db,
+        { limit: 1, concurrency: 1 },
+        {
+          config: {
+            ...resolveEnsembleConfig({}),
+            concurrency: 1,
+            requestDelayMs: 0,
+          },
+          callJev: completeResearchLadder(0.01),
+          getDailySpendUsd: async () => 0,
+          dailyBudgetCapUsd: () => 1,
+        },
+      );
+
+      expect(summary).toMatchObject({
+        screened: 1,
+        research: 1,
+        errors: 0,
+      });
+      const [state] = await db
+        .select()
+        .from(signalReviewState)
+        .where(eq(signalReviewState.signalId, signalId));
+      expect(state).toMatchObject({
+        phase: "muse",
+        researchDueAt: retryAt,
+        lastResearchOutcome: {
+          status: "unavailable",
+          reason: "domain_provider_error: credits limit reached",
+        },
+        inputManifest: {
+          evidence: {
+            sourceResearchStatus: "unavailable",
+          },
+        },
+      });
+      if (state?.jevEvaluationId == null) {
+        throw new Error("Provisional review did not publish terminal triage");
+      }
+      const [terminal] = await db
+        .select({ parsed: faaEnsembleEvaluations.parsed })
+        .from(faaEnsembleEvaluations)
+        .where(eq(faaEnsembleEvaluations.id, state.jevEvaluationId));
+      expect(terminal?.parsed).toMatchObject({
+        decision: "research",
+        researchPriority: 2,
+        reasonCodes: expect.arrayContaining([
+          "name_heuristic_unsubstantiated",
+          "source_research_unavailable",
+        ]),
+        gaps: expect.arrayContaining([
+          expect.objectContaining({ id: "source_access.resume" }),
+        ]),
+      });
+    });
+    it("provisionally screens unverified intake context without bypassing review guards", async () => {
+      const db = getDatabase();
+      const intakeId = randomUUID();
+      const humanId = randomUUID();
+      const restrictedId = randomUUID();
+      await db.insert(sourceSignals).values([
+        {
+          id: intakeId,
+          sourceKey: "investor_reference_intake",
+          sourceLocator: `investor-intake://${intakeId}`,
+          sourceFingerprint: `faa-review-spend:intake:${intakeId}`,
+          rawName: "Unverified Intake Components",
+          rawDomain: "unverified-intake.example",
+          country: "US",
+        },
+        {
+          id: humanId,
+          sourceKey: "investor_reference_intake",
+          sourceLocator: `investor-intake://${humanId}`,
+          sourceFingerprint: `faa-review-spend:human-intake:${humanId}`,
+          rawName: "Human Reviewed Intake",
+          qualification: { humanDecision: "reject" },
+        },
+        {
+          id: restrictedId,
+          sourceKey: "investor_reference_intake",
+          sourceLocator: `investor-intake://${restrictedId}`,
+          sourceFingerprint: `faa-review-spend:restricted-intake:${restrictedId}`,
+          rawName: "Restricted Intake",
+          status: "quarantined",
+          qualification: { reason: "restricted_access" },
+        },
+      ]);
+
+      const baseLadder = completeResearchLadder(0.01);
+      const processOnlyLadder: JevLadderCaller = async (request) =>
+        request.rung === "r2"
+          ? {
+              answers: {
+                product_vs_process: {
+                  type: "choice",
+                  choice: "process",
+                  confidence: 0.8,
+                },
+              },
+              costUsd: null,
+              model: "typesafe/jev-test",
+            }
+          : baseLadder(request);
+
+      const summary = await runJevReviews(
+        db,
+        { limit: 1, concurrency: 1 },
+        {
+          config: {
+            ...resolveEnsembleConfig({}),
+            concurrency: 1,
+            requestDelayMs: 0,
+          },
+          callJev: processOnlyLadder,
+          getDailySpendUsd: async () => 0,
+          dailyBudgetCapUsd: () => 1,
+        },
+      );
+      expect(summary).toMatchObject({ screened: 1, research: 1, errors: 0 });
+
+      const [intakeState] = await db
+        .select()
+        .from(signalReviewState)
+        .where(eq(signalReviewState.signalId, intakeId));
+      expect(intakeState).toMatchObject({
+        phase: "muse",
+        inputManifest: {
+          evidence: {
+            sourceKey: "investor_reference_intake",
+            sourceRecordKind: "source_records",
+            sourceResearchStatus: "incomplete",
+            sourcedSupport: {
+              identity: false,
+              product: false,
+              ownership: false,
+              size: false,
+              headquarters: false,
+            },
+          },
+        },
+      });
+      if (intakeState?.jevEvaluationId == null) {
+        throw new Error("Intake screening did not publish terminal triage");
+      }
+      const [terminal] = await db
+        .select({ parsed: faaEnsembleEvaluations.parsed })
+        .from(faaEnsembleEvaluations)
+        .where(eq(faaEnsembleEvaluations.id, intakeState.jevEvaluationId));
+      expect(terminal?.parsed).toMatchObject({
+        decision: "research",
+        acquisitionReadiness: "needs_research",
+        productFit: "unknown",
+        researchPriority: 3,
+        observations: expect.arrayContaining([
+          expect.objectContaining({
+            kind: "source_context",
+            reasonCode: "unverified_source_context_not_proof",
+          }),
+        ]),
+        gaps: expect.arrayContaining([
+          expect.objectContaining({ id: "identity.verification" }),
+          expect.objectContaining({ id: "product_fit.named_products" }),
+          expect.objectContaining({ id: "ownership.current_control" }),
+        ]),
+      });
+      expect(terminal?.parsed).not.toMatchObject({
+        observations: expect.arrayContaining([
+          expect.objectContaining({ kind: "source_supported_fact" }),
+        ]),
+      });
+
+      expect(
+        await db
+          .select({ signalId: signalReviewState.signalId })
+          .from(signalReviewState)
+          .where(eq(signalReviewState.signalId, humanId)),
+      ).toEqual([]);
+      expect(
+        await db
+          .select({ signalId: signalReviewState.signalId })
+          .from(signalReviewState)
+          .where(eq(signalReviewState.signalId, restrictedId)),
+      ).toEqual([]);
+    });
+
     it("keeps a fenced charge without publishing an evaluation", async () => {
       const signalId = await createReviewSignal("fenced");
       const db = getDatabase();
@@ -735,7 +1081,7 @@ describe.skipIf(!DB_TESTS_ENABLED)(
                 leaseExpiresAt: new Date(Date.now() + 60_000),
               })
               .where(eq(signalReviewState.signalId, signalId));
-            return passR1(0.2)(request);
+            return completeResearchLadder(0.2)(request);
           },
           getDailySpendUsd: async () => 0,
           dailyBudgetCapUsd: () => 1,
@@ -753,7 +1099,7 @@ describe.skipIf(!DB_TESTS_ENABLED)(
           .select({ id: faaReviewModelUsage.id })
           .from(faaReviewModelUsage)
           .where(eq(faaReviewModelUsage.sourceSignalId, signalId)),
-      ).toHaveLength(1);
+      ).toHaveLength(4);
       expect(
         await db
           .select({ id: faaEnsembleEvaluations.id })
@@ -762,282 +1108,6 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       ).toEqual([]);
     });
 
-    it("records billed invalid Muse responses without publishing a judgment", async () => {
-      const db = getDatabase();
-      const config = {
-        ...resolveEnsembleConfig({ JEV_AUDIT_SAMPLE_RATE: "1" }),
-        concurrency: 1,
-        requestDelayMs: 0,
-      };
-      const signalId = await createReviewSignal("failed-muse");
-      const jevSummary = await runJevReviews(
-        db,
-        { limit: 1, concurrency: 1 },
-        {
-          config,
-          callJev: passR1(0.01),
-          getDailySpendUsd: async () => 0,
-          dailyBudgetCapUsd: () => 1,
-        },
-      );
-      expect(jevSummary).toMatchObject({
-        screened: 1,
-        errors: 0,
-        costUsd: 0.01,
-      });
-      const [afterJev] = await db
-        .select()
-        .from(signalReviewState)
-        .where(eq(signalReviewState.signalId, signalId));
-      expect(afterJev).toMatchObject({ phase: "muse", attemptCount: 0 });
-      if (afterJev?.jevEvaluationId == null) {
-        throw new Error("JEv review did not retain its linked evaluation");
-      }
-      const linkedJevEvaluationId = afterJev.jevEvaluationId;
-      const spendBeforeMuse = await getDailySpendUsd(new Date(), db);
-
-      let providerResponses = 0;
-      const originalFetch = globalThis.fetch;
-      globalThis.fetch = async (input) => {
-        expect(String(input)).toBe(
-          "https://openrouter.ai/api/v1/chat/completions",
-        );
-        providerResponses += 1;
-        return new Response(
-          JSON.stringify({
-            model: "meta/muse-observed-invalid",
-            provider: "controlled-test",
-            choices: [
-              {
-                message: {
-                  content: '{"decision":"not-a-valid-decision"}',
-                },
-              },
-            ],
-            usage: {
-              prompt_tokens: 2,
-              completion_tokens: 2,
-              total_tokens: 4,
-              cost: 0.11,
-            },
-          }),
-          {
-            status: 200,
-            headers: { "content-type": "application/json" },
-          },
-        );
-      };
-
-      let museSummary;
-      try {
-        museSummary = await runMuseReviews(
-          db,
-          { limit: 1, concurrency: 1 },
-          {
-            config,
-            apiKey: "controlled-test-key",
-            getDailySpendUsd: async () => 0,
-            dailyBudgetCapUsd: () => 1,
-          },
-        );
-      } finally {
-        globalThis.fetch = originalFetch;
-      }
-
-      expect(providerResponses).toBe(2);
-      expect(museSummary).toEqual({
-        verified: 0,
-        confirmed: 0,
-        overruled: 0,
-        costUsd: 0.22,
-        deferred: 0,
-        errors: 1,
-        stale: 0,
-      });
-      const spendAfterMuse = await getDailySpendUsd(new Date(), db);
-      expect(spendAfterMuse - spendBeforeMuse).toBeCloseTo(0.22, 8);
-      const [state] = await db
-        .select()
-        .from(signalReviewState)
-        .where(eq(signalReviewState.signalId, signalId));
-      expect(state).toMatchObject({
-        phase: "muse",
-        attemptCount: 1,
-        jevEvaluationId: linkedJevEvaluationId,
-      });
-
-      const receipts = await db
-        .select()
-        .from(faaReviewModelUsage)
-        .where(eq(faaReviewModelUsage.sourceSignalId, signalId));
-      const museReceipts = receipts.filter(({ phase }) => phase === "muse");
-      expect(
-        museReceipts.map(({ configuredModel, returnedModel }) => ({
-          configuredModel,
-          returnedModel,
-        })),
-      ).toEqual([
-        {
-          configuredModel: config.modelA,
-          returnedModel: "meta/muse-observed-invalid",
-        },
-      ]);
-      expect(Number(museReceipts[0]!.costUsd)).toBeCloseTo(0.22, 12);
-
-      const evaluations = await db
-        .select({
-          id: faaEnsembleEvaluations.id,
-          modelId: faaEnsembleEvaluations.modelId,
-        })
-        .from(faaEnsembleEvaluations)
-        .where(eq(faaEnsembleEvaluations.signalId, signalId));
-      expect(evaluations).toHaveLength(1);
-      expect(evaluations[0]).toMatchObject({
-        id: linkedJevEvaluationId,
-        modelId: config.jevModel,
-      });
-      expect(
-        await db
-          .select({ id: faaEnsembleResults.id })
-          .from(faaEnsembleResults)
-          .where(eq(faaEnsembleResults.signalId, signalId)),
-      ).toEqual([]);
-    });
-
-    it("defers a real-client Muse quota response while preserving the linked JEv fence", async () => {
-      const db = getDatabase();
-      const config = {
-        ...resolveEnsembleConfig({ JEV_AUDIT_SAMPLE_RATE: "1" }),
-        concurrency: 1,
-        requestDelayMs: 0,
-      };
-      const signalId = await createReviewSignal("muse-quota");
-      const jevSummary = await runJevReviews(
-        db,
-        { limit: 1, concurrency: 1 },
-        {
-          config,
-          callJev: passR1(0.01),
-          getDailySpendUsd: async () => 0,
-          dailyBudgetCapUsd: () => 1,
-        },
-      );
-      expect(jevSummary).toMatchObject({
-        screened: 1,
-        errors: 0,
-        costUsd: 0.01,
-      });
-      const [afterJev] = await db
-        .select()
-        .from(signalReviewState)
-        .where(eq(signalReviewState.signalId, signalId));
-      expect(afterJev).toMatchObject({ phase: "muse", attemptCount: 0 });
-      if (afterJev?.jevEvaluationId == null) {
-        throw new Error("JEv review did not retain its linked evaluation");
-      }
-      const linkedJevEvaluationId = afterJev.jevEvaluationId;
-
-      let providerResponses = 0;
-      const originalFetch = globalThis.fetch;
-      globalThis.fetch = async (input) => {
-        expect(String(input)).toBe(
-          "https://openrouter.ai/api/v1/chat/completions",
-        );
-        providerResponses += 1;
-        if (providerResponses === 1) {
-          return new Response(
-            JSON.stringify({
-              model: "meta/muse-billed-before-quota",
-              provider: "controlled-test",
-              choices: [
-                {
-                  message: {
-                    content: '{"decision":"not-a-valid-decision"}',
-                  },
-                },
-              ],
-              usage: {
-                prompt_tokens: 2,
-                completion_tokens: 2,
-                total_tokens: 4,
-                cost: 0.11,
-              },
-            }),
-            { status: 200 },
-          );
-        }
-        return new Response(
-          JSON.stringify({
-            error: {
-              message:
-                "Key limit exceeded (total limit). Manage it using https://openrouter.ai/workspaces/default/keys/0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-              code: 403,
-            },
-          }),
-          { status: 403 },
-        );
-      };
-
-      let museSummary;
-      try {
-        museSummary = await runMuseReviews(
-          db,
-          { limit: 1, concurrency: 1 },
-          {
-            config,
-            apiKey: "controlled-test-key",
-            getDailySpendUsd: async () => 0,
-            dailyBudgetCapUsd: () => 1,
-          },
-        );
-      } finally {
-        globalThis.fetch = originalFetch;
-      }
-
-      expect(providerResponses).toBe(2);
-      expect(museSummary).toEqual({
-        verified: 0,
-        confirmed: 0,
-        overruled: 0,
-        costUsd: 0.11,
-        deferred: 1,
-        errors: 0,
-        stale: 0,
-      });
-      const [state] = await db
-        .select()
-        .from(signalReviewState)
-        .where(eq(signalReviewState.signalId, signalId));
-      expect(state).toMatchObject({
-        phase: "muse",
-        attemptCount: 0,
-        jevEvaluationId: linkedJevEvaluationId,
-        inputHash: afterJev.inputHash,
-      });
-      const receipts = await db
-        .select()
-        .from(faaReviewModelUsage)
-        .where(eq(faaReviewModelUsage.sourceSignalId, signalId));
-      expect(receipts).toHaveLength(2);
-      const museReceipts = receipts.filter(({ phase }) => phase === "muse");
-      expect(museReceipts).toHaveLength(1);
-      expect(museReceipts[0]).toMatchObject({
-        configuredModel: config.modelA,
-        returnedModel: "meta/muse-billed-before-quota",
-      });
-      expect(Number(museReceipts[0]!.costUsd)).toBeCloseTo(0.11, 12);
-      const evaluations = await db
-        .select({ id: faaEnsembleEvaluations.id })
-        .from(faaEnsembleEvaluations)
-        .where(eq(faaEnsembleEvaluations.signalId, signalId));
-      expect(evaluations).toEqual([{ id: linkedJevEvaluationId }]);
-      expect(
-        await db
-          .select({ id: faaEnsembleResults.id })
-          .from(faaEnsembleResults)
-          .where(eq(faaEnsembleResults.signalId, signalId)),
-      ).toEqual([]);
-    });
 
     it("does not count a successful evaluation again and uses exact UTC bounds", async () => {
       const db = getDatabase();
@@ -1052,7 +1122,7 @@ describe.skipIf(!DB_TESTS_ENABLED)(
             concurrency: 1,
             requestDelayMs: 0,
           },
-          callJev: passR1(0.2),
+          callJev: completeResearchLadder(0.2),
           getDailySpendUsd: async () => 0,
           dailyBudgetCapUsd: () => 1,
         },
