@@ -14,6 +14,7 @@ import {
   goldenExampleTypeValues,
   identifierTypeValues,
   importStatusValues,
+  investorPickOriginKindValues,
   labelScaleValues,
   leadStatusValues,
   matchDecisionValues,
@@ -178,6 +179,10 @@ export const scoreAxis = pgEnum("score_axis", scoreAxisValues);
 export const programAxis = pgEnum("program_axis", programAxisValues);
 export const programStatus = pgEnum("program_status", programStatusValues);
 export const experimentKind = pgEnum("experiment_kind", experimentKindValues);
+export const investorPickOriginKind = pgEnum(
+  "investor_pick_origin_kind",
+  investorPickOriginKindValues,
+);
 export const feedbackChannel = pgEnum(
   "feedback_channel",
   feedbackChannelValues,
@@ -2363,6 +2368,93 @@ export const sourceSignals = pgTable(
     ),
   ],
 );
+
+/**
+ * Admin curation overlay. It references raw source observations but never
+ * participates in qualification, scoring, source history, or provider work.
+ */
+export const investorPicks = pgTable(
+  "investor_picks",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    sourceSignalId: uuid("source_signal_id")
+      .notNull()
+      .references(() => sourceSignals.id, { onDelete: "restrict" }),
+    note: text("note"),
+    active: boolean("active").notNull().default(true),
+    createdAt: ct(),
+    updatedAt: ut(),
+  },
+  (t) => [
+    uniqueIndex("investor_picks_source_signal_uidx").on(t.sourceSignalId),
+    index("investor_picks_active_updated_idx").on(t.active, t.updatedAt),
+  ],
+);
+
+/**
+ * Immutable provenance annotations on an overlay pick. Reference origins are
+ * keyed by their append-only snapshot member; manual provenance is independent
+ * so an operator-added pick can also later receive a reference-set annotation.
+ */
+export const investorPickOrigins = pgTable(
+  "investor_pick_origins",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    investorPickId: uuid("investor_pick_id")
+      .notNull()
+      .references(() => investorPicks.id, { onDelete: "cascade" }),
+    kind: investorPickOriginKind("kind").notNull(),
+    label: text("label").notNull(),
+    snapshotId: uuid("snapshot_id").references(() => knownUniverseSnapshots.id, {
+      onDelete: "restrict",
+    }),
+    snapshotKey: text("snapshot_key"),
+    memberId: uuid("member_id").references(() => knownUniverseMembers.id, {
+      onDelete: "restrict",
+    }),
+    sourceRow: integer("source_row"),
+    createdAt: ct(),
+  },
+  (t) => [
+    uniqueIndex("investor_pick_origins_member_uidx")
+      .on(t.memberId)
+      .where(sql`${t.memberId} IS NOT NULL`),
+    uniqueIndex("investor_pick_origins_manual_pick_uidx")
+      .on(t.investorPickId)
+      .where(sql`${t.kind} = 'manual'`),
+    index("investor_pick_origins_pick_idx").on(t.investorPickId, t.createdAt),
+    index("investor_pick_origins_snapshot_idx").on(t.snapshotId, t.memberId),
+    check(
+      "investor_pick_origins_provenance_chk",
+      sql`(
+        ${t.kind} = 'manual'
+        AND ${t.snapshotId} IS NULL
+        AND ${t.snapshotKey} IS NULL
+        AND ${t.memberId} IS NULL
+        AND ${t.sourceRow} IS NULL
+      ) OR (
+        ${t.kind} = 'golden'
+        AND ${t.snapshotId} IS NOT NULL
+        AND ${t.snapshotKey} = 'golden-set-v01'
+        AND ${t.memberId} IS NOT NULL
+      ) OR (
+        ${t.kind} = 'booie'
+        AND ${t.snapshotId} IS NOT NULL
+        AND ${t.snapshotKey} = 'booie-original29-2026-09-09'
+        AND ${t.memberId} IS NOT NULL
+      )`,
+    ),
+    check(
+      "investor_pick_origins_label_chk",
+      sql`length(btrim(${t.label})) > 0`,
+    ),
+  ],
+);
+
+export type InvestorPick = SelectRow<typeof investorPicks>;
+export type NewInvestorPick = InsertRow<typeof investorPicks>;
+export type InvestorPickOrigin = SelectRow<typeof investorPickOrigins>;
+export type NewInvestorPickOrigin = InsertRow<typeof investorPickOrigins>;
 
 export type SourceSignal = SelectRow<typeof sourceSignals>;
 export type NewSourceSignal = InsertRow<typeof sourceSignals>;

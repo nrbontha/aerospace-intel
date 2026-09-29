@@ -164,6 +164,46 @@ Ranking and filters execute over the whole matching dataset before page limits, 
 
 The queue loads 100 records at a time. Queue and detail views automatically refresh approximately every 30 seconds while visible, preserve loaded queue depth, and expose pause/resume and manual refresh controls. These are authenticated read requests: viewing, sorting, exporting or refreshing does not initiate paid research or promotion. Historical or input-mismatched results remain labeled separately from current evidence and research progress. Prior Booie, Golden or pipeline membership is provenance, not a score bonus or approval.
 
+**Admin-managed Investor picks** appear above the scientific queue, initially
+showing six picks with an option to expand the complete active shortlist.
+Admins curate them at `/admin/investor-picks`; Viewers can read active picks
+but cannot create, edit, archive, restore, import or inspect archived picks.
+Every mutation requires an authenticated admin and CSRF protection and records
+an audit event. Archiving hides a pick without deleting its provenance or note.
+
+The import buttons use the already-stored `golden-set-v01` (18 members) and
+`booie-original29-2026-09-09` (29 members) snapshots. Booie is not the separate
+303-member historical pipeline. Counts describe reference members, not unique
+verified companies. Reimport retains the original member association, notes
+and archived state; restoring an archived pick is an explicit admin action.
+An existing source is associated automatically only when its normalized name
+and current source-verified domain uniquely match. Otherwise the import
+creates an unverified raw candidate, not a canonical company.
+
+Admins may also select an existing source record or add a name with an optional
+candidate domain and note. A pick is a curation preference, never a score bonus,
+identity assertion, acquisition approval or promotion. Its score and readiness
+retain scientific-queue precedence: current source-backed exclusions override
+model labels, unsupported model-only rejections remain research prospects,
+and stale or missing current triage is unknown/unscored. Curation does not
+schedule providers, expand a paid cohort, change research history or replenish
+any budget.
+
+The equivalent guarded import CLI loads no dotenv file. Run it only inside the
+intended environment, with its explicit `DATABASE_URL` and current review
+model/policy configuration already set:
+
+```sh
+node --import tsx scripts/investor-picks.mts \
+  --set all \
+  --expected-host postgres.railway.internal \
+  --expected-database railway \
+  --apply
+```
+
+The command is idempotent and reports new picks/raw candidates, already
+represented members and preserved archived picks separately.
+
 Explicit backfill controls (use the same model/policy values for manual commands):
 
 | Variable                                                          | Purpose                                                                       |

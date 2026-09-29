@@ -27,5 +27,6 @@ export * from "./unified-targets/export.js";
 export * from "./signal-reviews.js";
 export * from "./investor-ranking.js";
 export * from "./analyst-research.js";
+export * from "./investor-picks.js";
 export * from "./provider-accounting.js";
 export * from "./faa-ensemble/records.js";
