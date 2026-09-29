@@ -1905,8 +1905,9 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       }
     });
 
-    it("awards final-review points only for a current linked completed Muse final", async () => {
+    it("preserves final-review proof and priority pagination", async () => {
       const completedDraft = await createRankingSignal("completed-draft", {
+        createdAt: "2050-01-01T00:00:00.000001Z",
         evidence: FULL_RANKING_EVIDENCE,
         productFit: "supported_product",
         acquisitionReadiness: "ready",
@@ -1914,30 +1915,44 @@ describe.skipIf(!DB_TESTS_ENABLED)(
         completedCase: true,
       });
       const alignedFinal = await createRankingSignal("aligned-final", {
+        createdAt: "2000-01-01T00:00:00.000001Z",
         evidence: FULL_RANKING_EVIDENCE,
         productFit: "supported_product",
         acquisitionReadiness: "ready",
         jevDecision: "high_priority",
         alignedFinal: true,
       });
-      const page = await listSourceSignalAnalystOverviews(getDatabase(), {
+      const firstPage = await listSourceSignalAnalystOverviews(getDatabase(), {
         expectedReviewInputContract: EXPECTED_REVIEW_CONTRACT,
         sourceSignalIds: [completedDraft, alignedFinal],
+        limit: 1,
       });
-      const draftRanking = page.items.find(
-        (item) => item.signal.id === completedDraft,
-      )?.ranking;
-      const finalRanking = page.items.find(
-        (item) => item.signal.id === alignedFinal,
-      )?.ranking;
-      expect(draftRanking).toMatchObject({ status: "ranked", score: 90 });
+      expect(firstPage.items[0]).toMatchObject({
+        signal: { id: alignedFinal },
+        ranking: { status: "ranked", score: 100 },
+      });
       expect(
-        draftRanking?.breakdown.find((item) => item.key === "final_review"),
-      ).toMatchObject({ points: 0, basis: "unresolved" });
-      expect(finalRanking).toMatchObject({ status: "ranked", score: 100 });
-      expect(
-        finalRanking?.breakdown.find((item) => item.key === "final_review"),
+        firstPage.items[0]?.ranking.breakdown.find(
+          (item) => item.key === "final_review",
+        ),
       ).toMatchObject({ points: 10, basis: "verified_review" });
+      expect(firstPage.nextCursor).not.toBeNull();
+
+      const secondPage = await listSourceSignalAnalystOverviews(getDatabase(), {
+        expectedReviewInputContract: EXPECTED_REVIEW_CONTRACT,
+        sourceSignalIds: [completedDraft, alignedFinal],
+        limit: 1,
+        after: firstPage.nextCursor!,
+      });
+      expect(secondPage.items[0]).toMatchObject({
+        signal: { id: completedDraft },
+        ranking: { status: "ranked", score: 90 },
+      });
+      expect(
+        secondPage.items[0]?.ranking.breakdown.find(
+          (item) => item.key === "final_review",
+        ),
+      ).toMatchObject({ points: 0, basis: "unresolved" });
     });
 
     it("keeps ranking and hydrated proof on one snapshot across a concurrent source revision", async () => {
