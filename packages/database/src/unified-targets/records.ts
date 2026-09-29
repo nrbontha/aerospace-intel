@@ -466,10 +466,10 @@ export interface ExpectedFaaReviewInputContract {
   readonly version: string;
   readonly policy: {
     readonly ladder: string;
+    readonly analyst: string;
     readonly jevModel: string;
     readonly museModel: string;
     readonly evaluatorPrompt: string;
-    readonly jevAuditSampleRate: number;
   };
 }
 
@@ -484,10 +484,10 @@ export function matchesExpectedReviewInputContract(
   return (
     manifest["version"] === expected.version &&
     policy["ladder"] === expected.policy.ladder &&
+    policy["analyst"] === expected.policy.analyst &&
     policy["jevModel"] === expected.policy.jevModel &&
     policy["museModel"] === expected.policy.museModel &&
-    policy["evaluatorPrompt"] === expected.policy.evaluatorPrompt &&
-    policy["jevAuditSampleRate"] === expected.policy.jevAuditSampleRate
+    policy["evaluatorPrompt"] === expected.policy.evaluatorPrompt
   );
 }
 

@@ -13,15 +13,21 @@ import {
   normalizeCandidateDomain,
   type Database,
   type SignalReviewClaim,
+  type SignalReviewExecutor,
 } from "@asi/database";
 import { getUsStateCode, normalizeState } from "../geography.js";
+import type {
+  AnalystPrimaryRecord,
+  AnalystResourceObservation,
+} from "../analyst-resources.js";
 
 import {
+  buildOfficialDomainQuery,
   ExaApiKeyMissingError,
   ExaSearchClient,
   ExaSearchError,
   isSuppressedDirectoryDomain,
-  searchOfficialDomainCandidates,
+  normalizeExaOfficialCandidate,
   type ExaSearchErrorCode,
   type OfficialDomainCandidate,
 } from "../search/exa.js";
@@ -35,9 +41,9 @@ import {
 import { currentFaaReviewInputContract } from "../faa-ensemble/runner.js";
 import type { WebsiteOffering } from "../scoring-axial/features.js";
 import {
-  canSpendExa,
-  EXA_SEARCH_COST_USD,
-  recordExaSpendUsd,
+  exaBudgetScopeId,
+  executeAccountedExaSearch,
+  type ExaAccountingContext,
 } from "./exa-budget.js";
 import {
   classifySentence,
@@ -50,6 +56,7 @@ import {
   fetchWebsiteEvidence,
   normalizeEvidencePageText,
   splitScopedEvidenceStatements,
+  WEBSITE_EXCERPTS_MAX_CHARS,
   type ScopedEvidenceStatement,
   type WebsiteFetchResult,
   type WebsiteFetchedPage,
@@ -129,7 +136,11 @@ export interface SourcedEvidenceReference {
   readonly quote: string;
   readonly contentSha256: string;
   readonly retrievedAt: string;
-  readonly sourceKind: "official_site" | "news" | "registry";
+  readonly sourceKind:
+    | "official_site"
+    | "publisher_site"
+    | "news"
+    | "registry";
   readonly firstParty: boolean;
 }
 
@@ -137,6 +148,8 @@ export interface SizeIndicator {
   readonly kind: "revenue" | "employee_count" | "facility_scale";
   readonly excerpt: string;
   readonly evidenceId: string;
+  readonly periodYear: number | null;
+  readonly currentness: "latest_completed_period" | "undated_current";
 }
 
 export interface SourcedSignalResearchEvidence {
@@ -172,11 +185,17 @@ export interface SourcedSignalResearchEvidence {
     readonly status: AcquisitionStatus | "independent";
     readonly owner: string | null;
     readonly year: number | null;
+    readonly conflicting: boolean;
+    readonly currentness:
+      | "explicit_current_relation"
+      | "explicit_current_independence"
+      | "unknown";
     readonly supportEvidenceIds: readonly string[];
   };
   readonly size: {
     readonly status: "supported" | "unknown";
     readonly assessment: SizeAssessment;
+    readonly conflicting: boolean;
     readonly indicators: readonly SizeIndicator[];
   };
   readonly headquarters: {
@@ -210,7 +229,11 @@ export interface SignalEvidenceSourceSignal {
 
 export interface SignalEvidenceInjectedDependencies {
   readonly searchClient?:
-    Pick<ExaSearchClient, "search" | "fetchContents"> | undefined;
+    | Pick<
+        ExaSearchClient,
+        "searchWithMetadata" | "fetchContentsWithMetadata"
+      >
+    | undefined;
   readonly fetchUrl?: typeof safeFetchUrl | undefined;
 }
 
@@ -218,6 +241,7 @@ export interface ResearchSignalEvidenceOptions extends SignalEvidenceInjectedDep
   readonly db: Database;
   readonly signal: SignalEvidenceSourceSignal;
   readonly apiKey: string;
+  readonly exaBudgetScopeId?: string | undefined;
   readonly now?: Date | undefined;
 }
 
@@ -239,6 +263,7 @@ export type ResearchSignalEvidenceResult =
 export interface RunSignalEvidenceResearchOptions extends SignalEvidenceInjectedDependencies {
   readonly db?: Database | undefined;
   readonly apiKey?: string | undefined;
+  readonly exaBudgetScopeId?: string | undefined;
   readonly limit?: number | undefined;
   readonly concurrency?: number | undefined;
   readonly leaseSeconds?: number | undefined;
@@ -276,7 +301,11 @@ interface PendingEvidenceDocument {
   readonly quote: string;
   readonly contentSha256: string;
   readonly retrievedAt: string;
-  readonly sourceKind: "official_site" | "news" | "registry";
+  readonly sourceKind:
+    | "official_site"
+    | "publisher_site"
+    | "news"
+    | "registry";
   readonly firstParty: boolean;
   readonly metadata: Record<string, unknown>;
 }
@@ -311,12 +340,20 @@ export type WebsiteFactSource = Pick<WebsiteFetchResult, "outcome" | "pages">;
 export interface WebsiteFacts {
   readonly ownershipStatus: AcquisitionStatus | "independent" | "unknown";
   readonly owner: string | null;
+  readonly ownershipConflicting: boolean;
+  readonly ownershipObservations: readonly {
+    readonly status: AcquisitionStatus | "independent";
+    readonly owner: string | null;
+  }[];
   readonly ownershipDocuments: readonly PendingEvidenceDocument[];
   readonly sizeDocuments: readonly PendingEvidenceDocument[];
   readonly sizeAssessment: SizeAssessment;
+  readonly sizeConflicting: boolean;
+  readonly sizeObservations: readonly Exclude<SizeAssessment, "unknown">[];
   readonly headquartersDocuments: readonly PendingEvidenceDocument[];
   readonly headquartersStatus: "supported" | "unknown" | "conflicting";
   readonly headquarters: HeadquartersFact | null;
+  readonly headquartersObservations: readonly HeadquartersFact[];
 }
 
 /**
@@ -357,19 +394,44 @@ function assessSignalIdentityContent(
   });
   const textOverlapRatio = identityOverlapRatio(signal.rawName, text);
   const overlapRatio = structuredPublisherMatched ? 1 : textOverlapRatio;
-  const nameMatched =
-    plainTextPublisherExcerpt(text, signal.rawName) !== null ||
-    structuredPublisherMatched;
-  const identifierMatched =
-    hasLabeledIdentifier(text, "UEI", signal.uei) ||
-    hasLabeledIdentifier(text, "CAGE", signal.cage);
+  const plainPublisherMatched =
+    attributablePlainPublisherExcerpt(
+      plainTextPublisherExcerpt(text, signal.rawName),
+    ) ||
+    splitPageSentences(text).some((sentence) =>
+      attributablePlainPublisherExcerpt(
+        plainTextPublisherExcerpt(sentence, signal.rawName),
+      ),
+    );
+  const nameMatched = plainPublisherMatched || structuredPublisherMatched;
+  const ueiAssessment = targetPublisherIdentifierAssessment(
+    pageTexts,
+    pageUrls,
+    signal.rawName,
+    "UEI",
+    signal.uei,
+  );
+  const cageAssessment = targetPublisherIdentifierAssessment(
+    pageTexts,
+    pageUrls,
+    signal.rawName,
+    "CAGE",
+    signal.cage,
+  );
+  const identifierMatched = ueiAssessment.matched || cageAssessment.matched;
+  const identifierConflicting =
+    ueiAssessment.conflicting || cageAssessment.conflicting;
   const locationMatched = hasExactSignalLocation(
     text,
     signal.city,
     signal.state,
   );
+  const strongStructuredIdentity =
+    structuredPublisherMatched && identifierMatched;
   const boilerplate =
-    (enforceMinimumTextLength && text.length < IDENTITY_MIN_TEXT_CHARS) ||
+    (enforceMinimumTextLength &&
+      text.length < IDENTITY_MIN_TEXT_CHARS &&
+      !strongStructuredIdentity) ||
     /domain (?:is )?for sale|parked domain|whois lookup|registrar information/iu.test(
       text,
     );
@@ -380,13 +442,25 @@ function assessSignalIdentityContent(
       : null;
   return {
     status:
-      nameMatched && corroboratedBy !== null && !boilerplate
+      nameMatched &&
+      corroboratedBy !== null &&
+      !identifierConflicting &&
+      !boilerplate
         ? "verified"
         : "ambiguous",
     overlapRatio,
     nameMatched,
     corroboratedBy,
   };
+}
+
+function attributablePlainPublisherExcerpt(excerpt: string | null): boolean {
+  return (
+    excerpt !== null &&
+    !/\b(?:subsidiary|portfolio\s+company|owned\s+by|parent\s+company)\b/iu.test(
+      excerpt,
+    )
+  );
 }
 
 export async function researchSignalEvidence(
@@ -419,6 +493,7 @@ export async function researchSignalEvidence(
       options.signal.rawName,
       {
         client: options.searchClient,
+        accounting: signalExaAccounting(options, now),
         sourcePages: domain.site.pages,
         fetchUrl: options.fetchUrl,
       },
@@ -460,7 +535,11 @@ export async function researchSignalEvidence(
       options.apiKey,
       options.signal.rawName,
       domain.site.domain,
-      { client: options.searchClient, fetchUrl: options.fetchUrl },
+      {
+        client: options.searchClient,
+        accounting: signalExaAccounting(options, now),
+        fetchUrl: options.fetchUrl,
+      },
     );
     costUsd += acquisition.finding.costUsd;
     checkedSources.push(...acquisition.checkedSources);
@@ -554,17 +633,18 @@ export async function researchSignalEvidence(
     acquisitionFinding === null ? websiteFacts.owner : acquisitionFinding.owner;
   const sizeEntries = persisted.filter((entry) => entry.stage === "size");
   const hqEntries = persisted.filter((entry) => entry.stage === "hq");
-  const sizeIndicators = sizeEntries.map((entry): SizeIndicator => ({
-    kind: revenueKind(entry.quote),
-    excerpt: entry.quote,
-    evidenceId: entry.evidenceId,
-  }));
+  const sizeIndicators = sizeEntries.flatMap((entry) => {
+    const indicator = sizeIndicatorFromDocument(entry);
+    return indicator === null ? [] : [indicator];
+  });
   const missingFacts: string[] = [];
   if (domain.site === null) missingFacts.push("verified_official_identity");
   if (namedProductEvidenceIds.length === 0) {
     missingFacts.push("first_party_named_product");
   }
-  if (ownershipStatus === "unknown") missingFacts.push("ownership");
+  if (websiteFacts.ownershipConflicting || ownershipStatus === "unknown") {
+    missingFacts.push("ownership");
+  }
   if (websiteFacts.sizeAssessment === "unknown") {
     missingFacts.push("revenue_under_50m");
   }
@@ -610,16 +690,27 @@ export async function researchSignalEvidence(
       namedProductEvidenceIds,
     },
     ownership: {
-      status: ownershipStatus,
-      owner: ownershipOwner,
-      year: acquisitionFinding?.year ?? null,
+      status: websiteFacts.ownershipConflicting ? "unknown" : ownershipStatus,
+      owner: websiteFacts.ownershipConflicting ? null : ownershipOwner,
+      year:
+        websiteFacts.ownershipConflicting ? null : (acquisitionFinding?.year ?? null),
+      conflicting: websiteFacts.ownershipConflicting,
+      currentness: websiteFacts.ownershipConflicting
+        ? "unknown"
+        : ownershipStatus === "independent"
+          ? "explicit_current_independence"
+          : ownershipStatus === "unknown"
+            ? "unknown"
+            : "explicit_current_relation",
       supportEvidenceIds: uniqueStrings(
         ownershipEntries.map((entry) => entry.evidenceId),
       ),
     },
     size: {
-      status: sizeIndicators.length > 0 ? "supported" : "unknown",
+      status:
+        websiteFacts.sizeAssessment === "unknown" ? "unknown" : "supported",
       assessment: websiteFacts.sizeAssessment,
+      conflicting: websiteFacts.sizeConflicting,
       indicators: sizeIndicators,
     },
     headquarters: {
@@ -642,6 +733,1372 @@ export async function researchSignalEvidence(
     costUsd,
     researchDueAt: new Date(now.getTime() + SIGNAL_RESEARCH_COOLDOWN_MS),
   };
+}
+
+export interface AdmitSignalResourceEvidenceOptions {
+  /** Use the transaction supplied by publishSignalAnalystEvidence. */
+  readonly db: SignalReviewExecutor;
+  readonly signal: SignalEvidenceSourceSignal;
+  readonly currentEvidence: SourcedSignalResearchEvidence;
+  readonly observations: readonly AnalystResourceObservation[];
+}
+
+export interface SignalEvidenceAdmissionResult {
+  readonly researchEvidence: SourcedSignalResearchEvidence;
+  readonly admissionRevision: string;
+  readonly admittedEvidenceIds: readonly string[];
+  readonly checkedSources: readonly CheckedSourceReference[];
+  readonly conflicts: readonly string[];
+  readonly ambiguousPrimaryCandidates: readonly string[];
+}
+
+/**
+ * Admit literal resource observations under the caller's current signal.
+ * Search snippets, failed/access-limited resources and checked-only references
+ * remain history only. Invoke this inside publishSignalAnalystEvidence's
+ * callback; this function intentionally does not publish a case or Jev input.
+ */
+export async function admitSignalResourceEvidence(
+  options: AdmitSignalResourceEvidenceOptions,
+): Promise<SignalEvidenceAdmissionResult> {
+  if (
+    options.currentEvidence.signalId !== options.signal.id ||
+    options.currentEvidence.sourceContext.sourceKey !==
+      options.signal.sourceKey ||
+    options.currentEvidence.sourceContext.sourceLocator !==
+      options.signal.sourceLocator ||
+    options.currentEvidence.sourceContext.sourceFingerprint !==
+      options.signal.sourceFingerprint ||
+    options.currentEvidence.sourceContext.rawName !== options.signal.rawName ||
+    options.currentEvidence.sourceContext.rawDomain !== options.signal.rawDomain ||
+    options.currentEvidence.sourceContext.uei !== options.signal.uei ||
+    options.currentEvidence.sourceContext.cage !== options.signal.cage ||
+    options.currentEvidence.sourceContext.city !== options.signal.city ||
+    options.currentEvidence.sourceContext.state !== options.signal.state ||
+    options.currentEvidence.sourceContext.country !== options.signal.country ||
+    options.currentEvidence.sourceContext.awardCount !== options.signal.awardCount
+  ) {
+    throw new TypeError(
+      "Current evidence does not match the current source-signal identity revision",
+    );
+  }
+  const checkedSources = [
+    ...options.currentEvidence.checkedSources,
+    ...checkedSourcesFromObservations(options.observations),
+  ];
+  const pages = admittedPages(options.observations);
+  const primary = admittedPrimaryRecords(options.observations);
+  const ambiguousPrimaryCandidates = primary.ambiguous
+    ? primary.records.map((record) => record.sourceLocator)
+    : [];
+  const identityRejectedDomains = new Set(
+    explicitlyConflictingPrimaryDomains(options.signal, pages, primary),
+  );
+  const retainedVerifiedDomain =
+    options.currentEvidence.identity.verifiedDomain;
+  if (
+    retainedVerifiedDomain !== null &&
+    primary.records.some(
+      (record) =>
+        exactLegalName(options.signal.rawName, record.legalName) &&
+        (primary.ambiguous ||
+          !primaryRecordCompatibleWithSignal(options.signal, record)),
+    )
+  ) {
+    identityRejectedDomains.add(retainedVerifiedDomain);
+  }
+  const retainedCurrentEvidence = invalidateRejectedPublisherEvidence(
+    options.currentEvidence,
+    identityRejectedDomains,
+  );
+  const identity = resolveAdmittedIdentity(
+    options.signal,
+    retainedCurrentEvidence,
+    pages,
+    primary,
+    identityRejectedDomains,
+  );
+  const verifiedPages =
+    identity.domain === null
+      ? []
+      : pages.filter(
+          (page) => normalizeCandidateDomain(page.url) === identity.domain,
+        );
+  const documents: PendingEvidenceDocument[] = [];
+  for (const page of verifiedPages) {
+    const pageAssessment = assessSignalSiteIdentity(
+      identity.identitySignal,
+      [page.text],
+      [page.url],
+    );
+    const proof = buildSignalIdentityQuote(
+      page.text,
+      page.url,
+      identity.identitySignal,
+      pageAssessment,
+    );
+    if (proof !== "") {
+      documents.push({
+        stage: "domain",
+        url: page.url,
+        title: page.title || `Official-site identity: ${options.signal.rawName}`,
+        quote: proof,
+        contentSha256: page.contentSha256,
+        retrievedAt: page.retrievedAt,
+        sourceKind: "official_site",
+        firstParty: true,
+        metadata: {
+          identityOutcome: "verified",
+          corroboratedBy: identity.corroboratedBy,
+          representation: page.representation,
+        },
+      });
+    }
+    documents.push(
+      websitePageDocument(page, options.signal.rawName),
+      ...websiteProductDocuments(page, options.signal.rawName),
+    );
+  }
+  for (const support of identity.supportingPrimaryRecords) {
+    const document = primaryIdentityDocument(
+      support.record,
+      support.identitySignal,
+    );
+    if (document !== null) documents.push(document);
+  }
+  const websiteFacts = extractWebsiteFacts(
+    verifiedPages.length === 0
+      ? null
+      : { outcome: "success", pages: verifiedPages },
+    options.signal.rawName,
+  );
+  const admittedFacts = mergeExternalOwnershipFacts(
+    websiteFacts,
+    extractExternalOwnershipFacts(
+      pages.filter((page) => {
+        const domain = normalizeCandidateDomain(page.url);
+        const isVerifiedTarget =
+          identity.domain !== null && domain === identity.domain;
+        const isExplicitlyWrongTarget =
+          domain !== null && identityRejectedDomains.has(domain);
+        return !isVerifiedTarget && !isExplicitlyWrongTarget;
+      }),
+      options.signal.rawName,
+    ),
+  );
+  documents.push(
+    ...admittedFacts.ownershipDocuments,
+    ...admittedFacts.sizeDocuments,
+    ...admittedFacts.headquartersDocuments,
+  );
+  const admissionRevision = researchRevision(options.signal, documents);
+  const persisted = await persistEvidenceDocuments(
+    options.db,
+    options.signal.id,
+    admissionRevision,
+    documents,
+  );
+  const evidenceRefs = dedupeEvidenceReferences([
+    ...options.currentEvidence.evidenceRefs,
+    ...persisted.map(toEvidenceReference),
+  ]);
+  const conflicts: string[] = [];
+  const ownership = mergeOwnership(
+    revalidateRetainedOwnership(
+      retainedCurrentEvidence,
+      options.signal.rawName,
+    ),
+    admittedFacts,
+    persisted,
+    conflicts,
+  );
+  const size = mergeSize(
+    retainedCurrentEvidence.size,
+    admittedFacts,
+    persisted,
+    conflicts,
+  );
+  const headquarters = mergeHeadquarters(
+    retainedCurrentEvidence.headquarters,
+    admittedFacts,
+    persisted,
+    conflicts,
+  );
+  const identityEvidenceIds = persisted
+    .filter((document) => document.stage === "domain")
+    .map((document) => document.evidenceId);
+  const namedProductEvidenceIds = persisted
+    .filter(
+      (document) =>
+        document.stage === "website" &&
+        document.firstParty &&
+        document.metadata["namedProductEvidence"] === true,
+    )
+    .map((document) => document.evidenceId);
+  const identityStatus = identity.verified
+    ? "verified"
+    : primary.ambiguous || pages.length > 0
+      ? "ambiguous"
+      : retainedCurrentEvidence.identity.status;
+  const allNamedProducts = uniqueStrings([
+    ...retainedCurrentEvidence.website.namedProductEvidenceIds,
+    ...namedProductEvidenceIds,
+  ]);
+  const missingFacts: string[] = [];
+  if (identityStatus !== "verified") {
+    missingFacts.push("verified_official_identity");
+  }
+  if (allNamedProducts.length === 0) {
+    missingFacts.push("first_party_named_product");
+  }
+  if (ownership.status === "unknown") missingFacts.push("ownership");
+  if (size.assessment === "unknown") missingFacts.push("revenue_under_50m");
+  if (
+    headquarters.status !== "supported" ||
+    headquarters.country !== "US"
+  ) {
+    missingFacts.push("us_headquarters");
+  }
+  const classifiedPages = classifyWebsiteEvidence(verifiedPages);
+  const researchEvidence: SourcedSignalResearchEvidence = {
+    ...retainedCurrentEvidence,
+    identity: {
+      ...retainedCurrentEvidence.identity,
+      status: identityStatus,
+      verifiedDomain:
+        identity.domain ?? retainedCurrentEvidence.identity.verifiedDomain,
+      proofEvidenceIds: uniqueStrings([
+        ...retainedCurrentEvidence.identity.proofEvidenceIds,
+        ...identityEvidenceIds,
+      ]),
+    },
+    website: {
+      status:
+        verifiedPages.length > 0
+          ? "supported"
+          : retainedCurrentEvidence.website.status,
+      offering:
+        retainedCurrentEvidence.website.offering === "unknown"
+          ? classifiedPages.websiteOffering
+          : retainedCurrentEvidence.website.offering,
+      excerpts: boundSignalEvidenceText(
+        [
+          retainedCurrentEvidence.website.excerpts,
+          ...verifiedPages.map((page) => page.excerpt),
+        ]
+          .filter((value) => value !== "")
+          .join("\n"),
+        WEBSITE_EXCERPTS_MAX_CHARS,
+      ),
+      productHints: uniqueStrings([
+        ...retainedCurrentEvidence.website.productHints,
+        ...classifiedPages.productHints,
+      ]),
+      namedProductEvidenceIds: allNamedProducts,
+    },
+    ownership,
+    size,
+    headquarters,
+    missingFacts,
+    checkedSources: dedupeCheckedSources(checkedSources),
+    evidenceRefs,
+  };
+  return {
+    researchEvidence,
+    admissionRevision,
+    admittedEvidenceIds: persisted.map((document) => document.evidenceId),
+    checkedSources: researchEvidence.checkedSources,
+    conflicts,
+    ambiguousPrimaryCandidates,
+  };
+}
+
+interface AdmittedPage extends WebsiteFetchedPage {
+  readonly representation:
+    | "normalized_publisher_text"
+    | "provider_extracted_text";
+}
+
+interface AdmittedPrimarySet {
+  readonly records: readonly AnalystPrimaryRecord[];
+  readonly ambiguous: boolean;
+}
+
+function admittedPages(
+  observations: readonly AnalystResourceObservation[],
+): AdmittedPage[] {
+  const pages: AdmittedPage[] = [];
+  for (const observation of observations) {
+    if (
+      observation.tool === "public_page" &&
+      observation.outcome === "success" &&
+      observation.body !== null
+    ) {
+      const reference = observation.sourceReferences[0];
+      if (
+        reference?.finalUrl === null ||
+        reference?.finalUrl === undefined ||
+        reference.contentSha256 === null ||
+        reference.retrievedAt === null
+      ) {
+        continue;
+      }
+      const text = observation.body;
+      pages.push({
+        url: reference.finalUrl,
+        title: "",
+        text,
+        textChars: text.length,
+        excerpt: boundSignalEvidenceText(text, EVIDENCE_QUOTE_MAX_CHARS),
+        contentSha256: reference.contentSha256,
+        retrievedAt: reference.retrievedAt,
+        representation: "normalized_publisher_text",
+      });
+    } else if (
+      observation.tool === "exa_contents" &&
+      observation.outcome === "success"
+    ) {
+      for (const page of observation.pages) {
+        const reference = observation.sourceReferences.find(
+          (candidate) => candidate.finalUrl === page.url,
+        );
+        if (
+          reference?.retrievedAt === null ||
+          reference?.retrievedAt === undefined
+        ) {
+          continue;
+        }
+        const text = normalizeEvidencePageText(page.extractedText);
+        pages.push({
+          url: page.url,
+          title: page.title,
+          text,
+          textChars: text.length,
+          excerpt: boundSignalEvidenceText(text, EVIDENCE_QUOTE_MAX_CHARS),
+          contentSha256: page.extractedTextSha256,
+          retrievedAt: reference.retrievedAt,
+          representation: "provider_extracted_text",
+        });
+      }
+    }
+  }
+  return dedupeAdmittedPages(pages);
+}
+
+function admittedPrimaryRecords(
+  observations: readonly AnalystResourceObservation[],
+): AdmittedPrimarySet {
+  const records: AnalystPrimaryRecord[] = [];
+  let ambiguous = false;
+  for (const observation of observations) {
+    if (
+      observation.tool !== "primary_records" ||
+      observation.outcome !== "success"
+    ) {
+      continue;
+    }
+    ambiguous ||= observation.ambiguous;
+    for (const record of observation.records) {
+      if (
+        !records.some(
+          (existing) =>
+            existing.sourceFingerprint === record.sourceFingerprint &&
+            existing.sourceLocator === record.sourceLocator,
+        )
+      ) {
+        records.push(record);
+      }
+    }
+  }
+  return {
+    records,
+    ambiguous: ambiguous || admittedPrimaryRecordsConflict(records),
+  };
+}
+
+interface ResolvedAdmittedIdentity {
+  readonly verified: boolean;
+  readonly domain: string | null;
+  readonly corroboratedBy: "identifier" | "location" | null;
+  readonly identitySignal: Pick<
+    SignalEvidenceSourceSignal,
+    "rawName" | "uei" | "cage" | "city" | "state"
+  >;
+  readonly supportingPrimaryRecords: readonly {
+    readonly record: AnalystPrimaryRecord;
+    readonly identitySignal: Pick<
+      SignalEvidenceSourceSignal,
+      "rawName" | "uei" | "cage" | "city" | "state"
+    >;
+  }[];
+}
+
+function resolveAdmittedIdentity(
+  signal: SignalEvidenceSourceSignal,
+  current: SourcedSignalResearchEvidence,
+  pages: readonly AdmittedPage[],
+  primary: AdmittedPrimarySet,
+  rejectedDomains: ReadonlySet<string>,
+): ResolvedAdmittedIdentity {
+  if (
+    current.identity.status === "verified" &&
+    current.identity.verifiedDomain !== null &&
+    !rejectedDomains.has(current.identity.verifiedDomain)
+  ) {
+    return {
+      verified: true,
+      domain: current.identity.verifiedDomain,
+      corroboratedBy: null,
+      identitySignal: signal,
+      supportingPrimaryRecords: [],
+    };
+  }
+  const directMatches = verifiedDomainMatches(signal, pages).filter(
+    (match) => !rejectedDomains.has(match.domain),
+  );
+  if (directMatches.length === 1) {
+    const match = directMatches[0]!;
+    return {
+      verified: true,
+      domain: match.domain,
+      corroboratedBy: match.assessment.corroboratedBy,
+      identitySignal: signal,
+      supportingPrimaryRecords: [],
+    };
+  }
+  if (directMatches.length > 1) {
+    return unresolvedAdmittedIdentity(signal);
+  }
+  const exactPrimary = primary.records.filter(
+    (record) =>
+      primaryRecordMatchesSignal(signal, record) &&
+      primaryIdentityDocument(record, signal) !== null,
+  );
+  if (!primary.ambiguous && exactPrimary.length > 0) {
+    const basis = exactPrimary.some(
+      (record) =>
+        exactIdentifier(signal.uei, record.uei) ||
+        exactIdentifier(signal.cage, record.cage),
+    )
+      ? "identifier"
+      : "location";
+    return {
+      verified: true,
+      domain: current.identity.verifiedDomain,
+      corroboratedBy: basis,
+      identitySignal: signal,
+      supportingPrimaryRecords: exactPrimary.map((record) => ({
+        record,
+        identitySignal: signal,
+      })),
+    };
+  }
+  const pagePrimaryMatches = primary.records.flatMap((record) => {
+    if (
+      !exactLegalName(signal.rawName, record.legalName) ||
+      !primaryRecordCompatibleWithSignal(signal, record)
+    ) {
+      return [];
+    }
+    const identitySignal = {
+      rawName: signal.rawName,
+      uei: signal.uei ?? record.uei,
+      cage: signal.cage ?? record.cage,
+      city: signal.city ?? record.city,
+      state: signal.state ?? record.state,
+    };
+    if (primaryIdentityDocument(record, identitySignal) === null) return [];
+    return verifiedDomainMatches(identitySignal, pages).map((match) => ({
+      record,
+      identitySignal,
+      ...match,
+    }));
+  });
+  const matchedDomains = uniqueStrings(
+    pagePrimaryMatches.map((match) => match.domain),
+  );
+  if (
+    !primary.ambiguous &&
+    matchedDomains.length === 1 &&
+    pagePrimaryMatches.length > 0
+  ) {
+    const match = pagePrimaryMatches[0]!;
+    return {
+      verified: true,
+      domain: match.domain,
+      corroboratedBy: match.assessment.corroboratedBy,
+      identitySignal: match.identitySignal,
+      supportingPrimaryRecords: pagePrimaryMatches.map((candidate) => ({
+        record: candidate.record,
+        identitySignal: candidate.identitySignal,
+      })),
+    };
+  }
+  return unresolvedAdmittedIdentity(signal);
+}
+
+function unresolvedAdmittedIdentity(
+  signal: SignalEvidenceSourceSignal,
+): ResolvedAdmittedIdentity {
+  return {
+    verified: false,
+    domain: null,
+    corroboratedBy: null,
+    identitySignal: signal,
+    supportingPrimaryRecords: [],
+  };
+}
+
+function verifiedDomainMatches(
+  signal: Pick<
+    SignalEvidenceSourceSignal,
+    "rawName" | "uei" | "cage" | "city" | "state"
+  >,
+  pages: readonly AdmittedPage[],
+): readonly {
+  readonly domain: string;
+  readonly assessment: SignalIdentityAssessment;
+}[] {
+  const groups = new Map<string, AdmittedPage[]>();
+  for (const page of pages) {
+    const domain = normalizeCandidateDomain(page.url);
+    if (domain === null) continue;
+    const group = groups.get(domain) ?? [];
+    group.push(page);
+    groups.set(domain, group);
+  }
+  const matches: Array<{
+    readonly domain: string;
+    readonly assessment: SignalIdentityAssessment;
+  }> = [];
+  for (const [domain, group] of groups) {
+    const assessment = assessSignalSiteIdentity(
+      signal,
+      group.map((page) => page.text),
+      group.map((page) => page.url),
+    );
+    const hasCompleteProof = group.some(
+      (page) =>
+        buildSignalIdentityQuote(page.text, page.url, signal, assessment) !== "",
+    );
+    if (assessment.status === "verified" && hasCompleteProof) {
+      matches.push({ domain, assessment });
+    }
+  }
+  return matches;
+}
+
+function explicitlyConflictingPrimaryDomains(
+  signal: SignalEvidenceSourceSignal,
+  pages: readonly AdmittedPage[],
+  primary: AdmittedPrimarySet,
+): ReadonlySet<string> {
+  const rejected = new Set<string>();
+  const pagesByDomain = new Map<string, AdmittedPage[]>();
+  for (const page of pages) {
+    const domain = normalizeCandidateDomain(page.url);
+    if (domain === null) continue;
+    const grouped = pagesByDomain.get(domain) ?? [];
+    grouped.push(page);
+    pagesByDomain.set(domain, grouped);
+  }
+  for (const [domain, grouped] of pagesByDomain) {
+    const texts = grouped.map((page) => page.text);
+    const urls = grouped.map((page) => page.url);
+    const uei = targetPublisherIdentifierAssessment(
+      texts,
+      urls,
+      signal.rawName,
+      "UEI",
+      signal.uei,
+    );
+    const cage = targetPublisherIdentifierAssessment(
+      texts,
+      urls,
+      signal.rawName,
+      "CAGE",
+      signal.cage,
+    );
+    if (uei.conflicting || cage.conflicting) rejected.add(domain);
+  }
+  for (const record of primary.records) {
+    if (
+      !exactLegalName(signal.rawName, record.legalName) ||
+      (!primary.ambiguous &&
+        primaryRecordCompatibleWithSignal(signal, record))
+    ) {
+      continue;
+    }
+    const recordIdentity = {
+      rawName: signal.rawName,
+      uei: record.uei,
+      cage: record.cage,
+      city: record.city,
+      state: record.state,
+    };
+    for (const match of verifiedDomainMatches(recordIdentity, pages)) {
+      rejected.add(match.domain);
+    }
+  }
+  return rejected;
+}
+
+function invalidateRejectedPublisherEvidence(
+  evidence: SourcedSignalResearchEvidence,
+  rejectedDomains: ReadonlySet<string>,
+): SourcedSignalResearchEvidence {
+  if (rejectedDomains.size === 0) return evidence;
+  const rejectedEvidenceIds = new Set(
+    evidence.evidenceRefs
+      .filter((reference) => {
+        const domain = normalizeCandidateDomain(reference.url);
+        return domain !== null && rejectedDomains.has(domain);
+      })
+      .map((reference) => reference.evidenceId),
+  );
+  const retainIds = (ids: readonly string[]): string[] =>
+    ids.filter((id) => !rejectedEvidenceIds.has(id));
+  const identityDomain = evidence.identity.verifiedDomain;
+  const identityInvalidated =
+    identityDomain !== null && rejectedDomains.has(identityDomain);
+  const proofEvidenceIds = retainIds(evidence.identity.proofEvidenceIds);
+  const namedProductEvidenceIds = retainIds(
+    evidence.website.namedProductEvidenceIds,
+  );
+  const hasRetainedWebsiteSupport = evidence.evidenceRefs.some(
+    (reference) =>
+      reference.stage === "website" &&
+      reference.firstParty &&
+      !rejectedEvidenceIds.has(reference.evidenceId),
+  );
+  const websiteInvalidated =
+    identityInvalidated && !hasRetainedWebsiteSupport;
+  const ownershipSupportIds = retainIds(evidence.ownership.supportEvidenceIds);
+  const ownershipInvalidated =
+    evidence.ownership.supportEvidenceIds.length > 0 &&
+    ownershipSupportIds.length === 0;
+  const rebuiltOwnership =
+    evidence.ownership.supportEvidenceIds.length !== ownershipSupportIds.length
+      ? rebuildRetainedOwnership(evidence, ownershipSupportIds)
+      : null;
+  const sizeIndicators = evidence.size.indicators.filter(
+    (indicator) => !rejectedEvidenceIds.has(indicator.evidenceId),
+  );
+  const sizeInvalidated =
+    evidence.size.indicators.length > 0 && sizeIndicators.length === 0;
+  const headquartersSupportIds = retainIds(
+    evidence.headquarters.supportEvidenceIds,
+  );
+  const headquartersInvalidated =
+    evidence.headquarters.supportEvidenceIds.length > 0 &&
+    headquartersSupportIds.length === 0;
+  return {
+    ...evidence,
+    identity: {
+      ...evidence.identity,
+      status: identityInvalidated ? "ambiguous" : evidence.identity.status,
+      verifiedDomain: identityInvalidated
+        ? null
+        : evidence.identity.verifiedDomain,
+      proofEvidenceIds,
+    },
+    website: websiteInvalidated
+      ? {
+          status: "not_checked",
+          offering: "unknown",
+          excerpts: "",
+          productHints: [],
+          namedProductEvidenceIds,
+        }
+      : { ...evidence.website, namedProductEvidenceIds },
+    ownership:
+      rebuiltOwnership ??
+      (ownershipInvalidated ||
+        evidence.ownership.supportEvidenceIds.length !==
+          ownershipSupportIds.length
+        ? {
+            status: "unknown",
+            owner: null,
+            year: null,
+            conflicting: false,
+            currentness: "unknown",
+            supportEvidenceIds: ownershipSupportIds,
+          }
+        : {
+            ...evidence.ownership,
+            supportEvidenceIds: ownershipSupportIds,
+          }),
+    size: sizeInvalidated
+      ? {
+          status: "unknown",
+          assessment: "unknown",
+          conflicting: false,
+          indicators: sizeIndicators,
+        }
+      : { ...evidence.size, indicators: sizeIndicators },
+    headquarters: headquartersInvalidated
+      ? {
+          status: "unknown",
+          city: null,
+          state: null,
+          country: null,
+          supportEvidenceIds: headquartersSupportIds,
+        }
+      : {
+          ...evidence.headquarters,
+          supportEvidenceIds: headquartersSupportIds,
+        },
+  };
+}
+
+function rebuildRetainedOwnership(
+  evidence: SourcedSignalResearchEvidence,
+  supportEvidenceIds: readonly string[],
+): SourcedSignalResearchEvidence["ownership"] | null {
+  const retained = new Set(supportEvidenceIds);
+  const observations: Array<{
+    readonly status: AcquisitionStatus | "independent";
+    readonly owner: string | null;
+  }> = [];
+  for (const reference of evidence.evidenceRefs) {
+    if (
+      reference.stage !== "ownership" ||
+      reference.role !== "support" ||
+      !retained.has(reference.evidenceId)
+    ) {
+      continue;
+    }
+    if (
+      isCurrentAffirmativeIndependence(
+        reference.quote,
+        evidence.sourceContext.rawName,
+      )
+    ) {
+      observations.push({ status: "independent", owner: null });
+      continue;
+    }
+    const vote = classifyOfficialSiteOwnership(
+      reference.quote,
+      evidence.sourceContext.rawName,
+    );
+    if (vote !== null) {
+      observations.push({ status: vote.status, owner: vote.owner });
+    }
+  }
+  if (observations.length === 0) return null;
+  const first = observations[0]!;
+  const conflicting = observations.some(
+    (observation) =>
+      observation.status !== first.status ||
+      normalizedOwnershipOwner(observation.owner) !==
+        normalizedOwnershipOwner(first.owner),
+  );
+  return conflicting
+    ? {
+        status: "unknown",
+        owner: null,
+        year: null,
+        conflicting: true,
+        currentness: "unknown",
+        supportEvidenceIds,
+      }
+    : {
+        status: first.status,
+        owner: first.owner,
+        year: null,
+        conflicting: false,
+        currentness:
+          first.status === "independent"
+            ? "explicit_current_independence"
+            : "explicit_current_relation",
+        supportEvidenceIds,
+      };
+}
+
+function admittedPrimaryRecordsConflict(
+  records: readonly AnalystPrimaryRecord[],
+): boolean {
+  for (let index = 0; index < records.length; index += 1) {
+    for (let other = index + 1; other < records.length; other += 1) {
+      const left = records[index]!;
+      const right = records[other]!;
+      if (!exactLegalName(left.legalName, right.legalName)) return true;
+      if (
+        conflictingOptionalIdentity(left.uei, right.uei) ||
+        conflictingOptionalIdentity(left.cage, right.cage) ||
+        conflictingOptionalIdentity(left.country, right.country)
+      ) {
+        return true;
+      }
+      if (
+        left.city !== null &&
+        left.state !== null &&
+        right.city !== null &&
+        right.state !== null &&
+        (HEADQUARTERS_VALUE_COLLATOR.compare(left.city, right.city) !== 0 ||
+          normalizeState(left.state) !== normalizeState(right.state))
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function conflictingOptionalIdentity(
+  left: string | null,
+  right: string | null,
+): boolean {
+  return (
+    left !== null &&
+    right !== null &&
+    left.trim().toLocaleUpperCase("en-US") !==
+      right.trim().toLocaleUpperCase("en-US")
+  );
+}
+
+function primaryRecordMatchesSignal(
+  signal: SignalEvidenceSourceSignal,
+  record: AnalystPrimaryRecord,
+): boolean {
+  if (
+    !exactLegalName(signal.rawName, record.legalName) ||
+    !primaryRecordCompatibleWithSignal(signal, record)
+  ) {
+    return false;
+  }
+  if (
+    exactIdentifier(signal.uei, record.uei) ||
+    exactIdentifier(signal.cage, record.cage)
+  ) {
+    return true;
+  }
+  return exactPrimaryLocation(signal, record);
+}
+
+function primaryRecordCompatibleWithSignal(
+  signal: Pick<
+    SignalEvidenceSourceSignal,
+    "uei" | "cage" | "city" | "state"
+  >,
+  record: AnalystPrimaryRecord,
+): boolean {
+  return (
+    !conflictingOptionalIdentity(signal.uei, record.uei) &&
+    !conflictingOptionalIdentity(signal.cage, record.cage) &&
+    !conflictingPrimaryLocation(signal, record)
+  );
+}
+
+function exactPrimaryLocation(
+  signal: Pick<SignalEvidenceSourceSignal, "city" | "state">,
+  record: AnalystPrimaryRecord,
+): boolean {
+  return (
+    signal.city !== null &&
+    signal.state !== null &&
+    record.city !== null &&
+    record.state !== null &&
+    HEADQUARTERS_VALUE_COLLATOR.compare(signal.city, record.city) === 0 &&
+    normalizeState(signal.state) === normalizeState(record.state)
+  );
+}
+
+function conflictingPrimaryLocation(
+  signal: Pick<SignalEvidenceSourceSignal, "city" | "state">,
+  record: AnalystPrimaryRecord,
+): boolean {
+  const cityConflicts =
+    signal.city !== null &&
+    record.city !== null &&
+    HEADQUARTERS_VALUE_COLLATOR.compare(signal.city, record.city) !== 0;
+  const stateConflicts =
+    signal.state !== null &&
+    record.state !== null &&
+    normalizeState(signal.state) !== normalizeState(record.state);
+  return cityConflicts || stateConflicts;
+}
+
+function exactLegalName(left: string, right: string): boolean {
+  const leftIdentity = parsedLegalIdentity(left);
+  const rightIdentity = parsedLegalIdentity(right);
+  if (leftIdentity === null || rightIdentity === null) return false;
+  if (
+    leftIdentity.rootTokens.join("\u0000") !==
+    rightIdentity.rootTokens.join("\u0000")
+  ) {
+    return false;
+  }
+  return (
+    leftIdentity.suffix === null ||
+    rightIdentity.suffix === null ||
+    leftIdentity.suffix === rightIdentity.suffix
+  );
+}
+
+function exactIdentifier(
+  left: string | null,
+  right: string | null,
+): boolean {
+  return (
+    left !== null &&
+    right !== null &&
+    left.trim().toLocaleUpperCase("en-US") ===
+      right.trim().toLocaleUpperCase("en-US")
+  );
+}
+
+function primaryIdentityDocument(
+  record: AnalystPrimaryRecord,
+  signal: Pick<
+    SignalEvidenceSourceSignal,
+    "rawName" | "uei" | "cage" | "city" | "state"
+  >,
+): PendingEvidenceDocument | null {
+  const prefix =
+    `${primaryIssuer(record.sourceKey)} primary record; ` +
+    `legal name: ${record.legalName}`;
+  const corroboration = [
+    exactIdentifier(signal.uei, record.uei) && record.uei !== null
+      ? `UEI: ${record.uei}`
+      : null,
+    exactIdentifier(signal.cage, record.cage) && record.cage !== null
+      ? `CAGE: ${record.cage}`
+      : null,
+    signal.city !== null &&
+    signal.state !== null &&
+    record.city !== null &&
+    record.state !== null &&
+    HEADQUARTERS_VALUE_COLLATOR.compare(signal.city, record.city) === 0 &&
+    normalizeState(signal.state) === normalizeState(record.state)
+      ? `location: ${record.city}, ${record.state}`
+      : null,
+  ].filter((value): value is string => value !== null);
+  const quote = corroboration
+    .map((field) => `${prefix}; ${field}`)
+    .find((candidate) => candidate.length <= EVIDENCE_QUOTE_MAX_CHARS);
+  if (quote === undefined) return null;
+  return {
+    stage: "domain",
+    url: record.sourceLocator,
+    title: `${primaryIssuer(record.sourceKey)} identity record: ${signal.rawName}`,
+    quote,
+    contentSha256: sha256Hex(record.payloadJson),
+    retrievedAt: record.observedAt,
+    sourceKind: "registry",
+    firstParty: false,
+    metadata: {
+      identityOutcome: "verified",
+      primarySourceKey: record.sourceKey,
+      primarySourceFingerprint: record.sourceFingerprint,
+      primarySourceLocator: record.sourceLocator,
+      recordAccess: record.recordAccess,
+      issuer: record.issuer,
+      observationAccessedAt: record.observedAt,
+      payloadTruncated: record.payloadTruncated,
+      awardsAreNotRevenue: true,
+    },
+  };
+}
+
+function primaryIssuer(sourceKey: AnalystPrimaryRecord["sourceKey"]): string {
+  switch (sourceKey) {
+    case "faa_pma_database":
+    case "faa_drs_pma":
+    case "faa_drs_pma_search":
+      return "Federal Aviation Administration";
+    case "sam_entity":
+      return "U.S. General Services Administration SAM.gov";
+    case "usaspending":
+      return "USAspending.gov";
+  }
+}
+
+function checkedSourcesFromObservations(
+  observations: readonly AnalystResourceObservation[],
+): CheckedSourceReference[] {
+  const checked: CheckedSourceReference[] = [];
+  for (const observation of observations) {
+    if (observation.tool === "exa_search") continue;
+    for (const reference of observation.sourceReferences) {
+      const support =
+        observation.supportRole === "candidate_evidence" &&
+        observation.failure === null &&
+        observation.accessLimit === null;
+      checked.push({
+        url: reference.finalUrl ?? reference.locator,
+        outcome: support
+          ? "retrieved"
+          : observation.failure === null
+            ? "no_content"
+            : "unreachable",
+        contentSha256: support ? reference.contentSha256 : null,
+        retrievedAt: support ? reference.retrievedAt : null,
+      });
+    }
+  }
+  return checked;
+}
+
+interface ExternalOwnershipFacts {
+  readonly status: AcquisitionStatus | "independent" | "unknown";
+  readonly owner: string | null;
+  readonly conflicting: boolean;
+  readonly observations: WebsiteFacts["ownershipObservations"];
+  readonly documents: readonly PendingEvidenceDocument[];
+}
+
+function extractExternalOwnershipFacts(
+  pages: readonly AdmittedPage[],
+  companyName: string,
+): ExternalOwnershipFacts {
+  const observations: Array<{
+    readonly status: AcquisitionStatus | "independent";
+    readonly owner: string | null;
+  }> = [];
+  const documents: PendingEvidenceDocument[] = [];
+  for (const page of pages) {
+    for (const statement of splitScopedEvidenceStatements(page.text)) {
+      if (statement.quoted) continue;
+      const vote = classifySentence(statement.text, companyName);
+      if (vote === null || !vote.currentRelation) continue;
+      observations.push({ status: vote.status, owner: vote.owner });
+      const quote = statement.text.replace(/\s+/gu, " ").trim();
+      if (quote.length === 0 || quote.length > EVIDENCE_QUOTE_MAX_CHARS) {
+        continue;
+      }
+      documents.push({
+        stage: "ownership",
+        url: page.url,
+        title: page.title || `External ownership source: ${companyName}`,
+        quote,
+        contentSha256: page.contentSha256,
+        retrievedAt: page.retrievedAt,
+        sourceKind: "publisher_site",
+        firstParty: false,
+        metadata: {
+          ownershipStatus: vote.status,
+          owner: vote.owner,
+          currentRelation: true,
+          representation: page.representation,
+        },
+      });
+    }
+  }
+  const conflicting =
+    observations.length > 1 &&
+    observations.some(
+      (observation) =>
+        observation.status !== observations[0]?.status ||
+        normalizedOwnershipOwner(observation.owner) !==
+          normalizedOwnershipOwner(observations[0]?.owner ?? null),
+    );
+  const supported = documents[0];
+  return {
+    status:
+      conflicting || supported === undefined
+        ? "unknown"
+        : (supported.metadata["ownershipStatus"] as
+            | AcquisitionStatus
+            | "independent"),
+    owner:
+      conflicting || supported === undefined
+        ? null
+        : typeof supported.metadata["owner"] === "string"
+          ? supported.metadata["owner"]
+          : null,
+    conflicting,
+    observations,
+    documents,
+  };
+}
+
+function mergeExternalOwnershipFacts(
+  facts: WebsiteFacts,
+  external: ExternalOwnershipFacts,
+): WebsiteFacts {
+  const ownershipObservations = [
+    ...facts.ownershipObservations,
+    ...external.observations,
+  ];
+  const observationsConflict =
+    ownershipObservations.length > 1 &&
+    ownershipObservations.some(
+      (observation) =>
+        observation.status !== ownershipObservations[0]?.status ||
+        normalizedOwnershipOwner(observation.owner) !==
+          normalizedOwnershipOwner(ownershipObservations[0]?.owner ?? null),
+    );
+  const conflicting =
+    facts.ownershipConflicting ||
+    external.conflicting ||
+    observationsConflict;
+  const status =
+    facts.ownershipStatus !== "unknown"
+      ? facts.ownershipStatus
+      : external.status;
+  const owner =
+    facts.ownershipStatus !== "unknown" ? facts.owner : external.owner;
+  return {
+    ...facts,
+    ownershipStatus: conflicting ? "unknown" : status,
+    owner: conflicting ? null : owner,
+    ownershipConflicting: conflicting,
+    ownershipObservations,
+    ownershipDocuments: [
+      ...facts.ownershipDocuments,
+      ...external.documents,
+    ],
+  };
+}
+
+function revalidateRetainedOwnership(
+  evidence: SourcedSignalResearchEvidence,
+  companyName: string,
+): SourcedSignalResearchEvidence["ownership"] {
+  const current = evidence.ownership;
+  if (current.status === "unknown" || current.conflicting) {
+    return {
+      ...current,
+      status: "unknown",
+      owner: null,
+      year: null,
+      conflicting: current.conflicting === true,
+      currentness: "unknown",
+    };
+  }
+  const supportIds = new Set(current.supportEvidenceIds);
+  const valid = evidence.evidenceRefs.some((reference) => {
+    if (
+      reference.role !== "support" ||
+      reference.stage !== "ownership" ||
+      !supportIds.has(reference.evidenceId)
+    ) {
+      return false;
+    }
+    if (current.status === "independent") {
+      return isCurrentAffirmativeIndependence(reference.quote, companyName);
+    }
+    const vote = classifyOfficialSiteOwnership(reference.quote, companyName);
+    if (vote === null || vote.status !== current.status) return false;
+    if (current.status === "dead") return true;
+    return (
+      normalizedOwnershipOwner(vote.owner) ===
+      normalizedOwnershipOwner(current.owner)
+    );
+  });
+  if (!valid) {
+    return {
+      status: "unknown",
+      owner: null,
+      year: null,
+      conflicting: false,
+      currentness: "unknown",
+      supportEvidenceIds: current.supportEvidenceIds,
+    };
+  }
+  return {
+    ...current,
+    conflicting: false,
+    currentness:
+      current.status === "independent"
+        ? "explicit_current_independence"
+        : "explicit_current_relation",
+  };
+}
+
+function normalizedOwnershipOwner(owner: string | null): string | null {
+  return owner === null
+    ? null
+    : owner.replace(/\s+/gu, " ").trim().toLocaleLowerCase("en-US");
+}
+
+function mergeOwnership(
+  current: SourcedSignalResearchEvidence["ownership"],
+  facts: WebsiteFacts,
+  persisted: readonly PersistedDocument[],
+  conflicts: string[],
+): SourcedSignalResearchEvidence["ownership"] {
+  const ids = persisted
+    .filter((document) => document.stage === "ownership")
+    .map((document) => document.evidenceId);
+  const contradictsCurrent =
+    current.status !== "unknown" &&
+    facts.ownershipObservations.some(
+      (observation) =>
+        observation.status !== current.status ||
+        normalizedOwnershipOwner(observation.owner) !==
+          normalizedOwnershipOwner(current.owner),
+    );
+  if (current.conflicting || facts.ownershipConflicting || contradictsCurrent) {
+    conflicts.push("ownership");
+    return {
+      status: "unknown",
+      owner: null,
+      year: null,
+      conflicting: true,
+      currentness: "unknown",
+      supportEvidenceIds: uniqueStrings([...current.supportEvidenceIds, ...ids]),
+    };
+  }
+  if (facts.ownershipStatus === "unknown") {
+    return {
+      ...current,
+      conflicting: false,
+      supportEvidenceIds: uniqueStrings([...current.supportEvidenceIds, ...ids]),
+    };
+  }
+  return {
+    status: facts.ownershipStatus,
+    owner: facts.owner,
+    year: current.year,
+    conflicting: false,
+    currentness:
+      facts.ownershipStatus === "independent"
+        ? "explicit_current_independence"
+        : "explicit_current_relation",
+    supportEvidenceIds: uniqueStrings([...current.supportEvidenceIds, ...ids]),
+  };
+}
+
+function mergeSize(
+  current: SourcedSignalResearchEvidence["size"],
+  facts: WebsiteFacts,
+  persisted: readonly PersistedDocument[],
+  conflicts: string[],
+): SourcedSignalResearchEvidence["size"] {
+  const additions = persisted
+    .filter((document) => document.stage === "size")
+    .flatMap((document) => {
+      const indicator = sizeIndicatorFromDocument(document);
+      return indicator === null ? [] : [indicator];
+    });
+  const contradictsCurrent =
+    current.assessment !== "unknown" &&
+    facts.sizeObservations.some(
+      (assessment) => assessment !== current.assessment,
+    );
+  if (current.conflicting || facts.sizeConflicting || contradictsCurrent) {
+    conflicts.push("revenue");
+    return {
+      status: additions.length > 0 ? "supported" : current.status,
+      assessment: "unknown",
+      conflicting: true,
+      indicators: [...current.indicators, ...additions],
+    };
+  }
+  if (facts.sizeAssessment === "unknown") {
+    return {
+      ...current,
+      conflicting: false,
+      indicators: [...current.indicators, ...additions],
+    };
+  }
+  return {
+    status: additions.length > 0 ? "supported" : current.status,
+    assessment: facts.sizeAssessment,
+    conflicting: false,
+    indicators: [...current.indicators, ...additions],
+  };
+}
+
+function mergeHeadquarters(
+  current: SourcedSignalResearchEvidence["headquarters"],
+  facts: WebsiteFacts,
+  persisted: readonly PersistedDocument[],
+  conflicts: string[],
+): SourcedSignalResearchEvidence["headquarters"] {
+  const ids = persisted
+    .filter((document) => document.stage === "hq")
+    .map((document) => document.evidenceId);
+  if (current.status === "conflicting") {
+    conflicts.push("headquarters");
+    return {
+      ...current,
+      supportEvidenceIds: uniqueStrings([...current.supportEvidenceIds, ...ids]),
+    };
+  }
+  const combinedObserved =
+    current.status === "supported"
+      ? reconcileHeadquartersFacts([
+          {
+            city: current.city,
+            state: current.state,
+            country: current.country,
+          },
+          ...facts.headquartersObservations,
+        ])
+      : reconcileHeadquartersFacts(facts.headquartersObservations);
+  if (
+    facts.headquartersStatus === "conflicting" ||
+    combinedObserved.status === "conflicting"
+  ) {
+    conflicts.push("headquarters");
+    return {
+      status: "conflicting",
+      city: null,
+      state: null,
+      country: null,
+      supportEvidenceIds: uniqueStrings([...current.supportEvidenceIds, ...ids]),
+    };
+  }
+  if (facts.headquartersStatus === "unknown") {
+    return {
+      ...current,
+      supportEvidenceIds: uniqueStrings([...current.supportEvidenceIds, ...ids]),
+    };
+  }
+  const candidate =
+    current.status === "supported"
+      ? combinedObserved.headquarters
+      : facts.headquarters;
+  if (candidate === null) {
+    return {
+      ...current,
+      supportEvidenceIds: uniqueStrings([...current.supportEvidenceIds, ...ids]),
+    };
+  }
+  return {
+    status: "supported",
+    city: candidate.city,
+    state: candidate.state,
+    country: candidate.country,
+    supportEvidenceIds: uniqueStrings([...current.supportEvidenceIds, ...ids]),
+  };
+}
+
+function dedupeEvidenceReferences(
+  references: readonly SourcedEvidenceReference[],
+): SourcedEvidenceReference[] {
+  const seen = new Set<string>();
+  return references.filter((reference) => {
+    const key = `${reference.evidenceId}\u0000${reference.stage}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function dedupeCheckedSources(
+  references: readonly CheckedSourceReference[],
+): CheckedSourceReference[] {
+  const seen = new Set<string>();
+  return references.filter((reference) => {
+    const key = `${reference.url}\u0000${reference.outcome}\u0000${reference.contentSha256 ?? ""}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function dedupeAdmittedPages(pages: readonly AdmittedPage[]): AdmittedPage[] {
+  const seen = new Set<string>();
+  return pages.filter((page) => {
+    const key = `${page.url}\u0000${page.contentSha256}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 }
 
 export async function runSignalEvidenceResearch(
@@ -696,6 +2153,18 @@ export async function runSignalEvidenceResearch(
   );
 }
 
+function signalExaAccounting(
+  options: ResearchSignalEvidenceOptions,
+  now: Date | undefined,
+): ExaAccountingContext {
+  return {
+    db: options.db,
+    budgetScopeId: options.exaBudgetScopeId ?? exaBudgetScopeId(),
+    sourceSignalId: options.signal.id,
+    ...(now === undefined ? {} : { now }),
+  };
+}
+
 async function researchOfficialSite(
   options: ResearchSignalEvidenceOptions,
 ): Promise<DomainResearchResult> {
@@ -717,61 +2186,84 @@ async function researchOfficialSite(
 
   let costUsd = 0;
   let discoveryFailure: ResearchSignalEvidenceResult | null = null;
-  if (options.apiKey.trim().length > 0) {
-    if (!canSpendExa(EXA_SEARCH_COST_USD)) {
-      const failure = operationalFailure(
-        "budget_limited",
-        "domain_budget_limited",
-        null,
-        costUsd,
+  if (
+    options.apiKey.trim().length > 0 ||
+    options.searchClient !== undefined
+  ) {
+    const client =
+      options.searchClient ?? new ExaSearchClient({ apiKey: options.apiKey });
+    try {
+      let discovered: readonly OfficialDomainCandidate[];
+      const query = buildOfficialDomainQuery({
+        legalName: options.signal.rawName,
+        ...(options.signal.city === null ? {} : { city: options.signal.city }),
+        ...(options.signal.state === null
+          ? {}
+          : { state: options.signal.state }),
+        ...(options.signal.uei === null ? {} : { uei: options.signal.uei }),
+        ...(options.signal.cage === null ? {} : { cage: options.signal.cage }),
+      });
+      const accounted = await executeAccountedExaSearch(
+        signalExaAccounting(options, options.now),
+        client,
+        query,
       );
-      if (candidates.length === 0) return failedDomainResult(failure);
-      discoveryFailure = failure;
-    } else {
-      const client =
-        options.searchClient ?? new ExaSearchClient({ apiKey: options.apiKey });
-      try {
-        const discovered = await searchOfficialDomainCandidates(
-          {
-            legalName: options.signal.rawName,
-            ...(options.signal.city === null
-              ? {}
-              : { city: options.signal.city }),
-            ...(options.signal.state === null
-              ? {}
-              : { state: options.signal.state }),
-            ...(options.signal.uei === null ? {} : { uei: options.signal.uei }),
-            ...(options.signal.cage === null
-              ? {}
-              : { cage: options.signal.cage }),
-          },
-          client,
-        );
-        recordExaSpendUsd(EXA_SEARCH_COST_USD);
-        costUsd += EXA_SEARCH_COST_USD;
-        for (const candidate of discovered) {
-          if (
-            !candidates.some((existing) => existing.domain === candidate.domain)
-          ) {
-            candidates.push(candidate);
-          }
-        }
-      } catch (error) {
-        const kind =
-          error instanceof ExaApiKeyMissingError
-            ? "configuration_error"
-            : error instanceof ExaSearchError && !error.transient
-              ? "provider_error"
-              : "retryable_error";
+      if (accounted.outcome === "deferred") {
         const failure = operationalFailure(
-          kind,
-          `domain_${kind}`,
-          error instanceof ExaSearchError ? error.code : null,
+          "budget_limited",
+          accounted.reason === "provider_cooldown"
+            ? "domain_provider_cooldown"
+            : "domain_budget_limited",
+          null,
           costUsd,
         );
         if (candidates.length === 0) return failedDomainResult(failure);
         discoveryFailure = failure;
+        discovered = [];
+      } else if (accounted.outcome === "ambiguous") {
+        const failure = operationalFailure(
+          "retryable_error",
+          "domain_reservation_ambiguous",
+          null,
+          costUsd,
+        );
+        if (candidates.length === 0) return failedDomainResult(failure);
+        discoveryFailure = failure;
+        discovered = [];
+      } else {
+        discovered = accounted.results
+          .map(normalizeExaOfficialCandidate)
+          .filter(
+            (candidate): candidate is OfficialDomainCandidate =>
+              candidate !== null,
+          );
+        costUsd +=
+          accounted.providerCostUsd === null
+            ? 0
+            : Number.parseFloat(accounted.providerCostUsd);
       }
+      for (const candidate of discovered) {
+        if (
+          !candidates.some((existing) => existing.domain === candidate.domain)
+        ) {
+          candidates.push(candidate);
+        }
+      }
+    } catch (error) {
+      const kind =
+        error instanceof ExaApiKeyMissingError
+          ? "configuration_error"
+          : error instanceof ExaSearchError && !error.transient
+            ? "provider_error"
+            : "retryable_error";
+      const failure = operationalFailure(
+        kind,
+        `domain_${kind}`,
+        error instanceof ExaSearchError ? error.code : null,
+        costUsd,
+      );
+      if (candidates.length === 0) return failedDomainResult(failure);
+      discoveryFailure = failure;
     }
   } else {
     const failure = operationalFailure(
@@ -960,12 +2452,17 @@ export function extractWebsiteFacts(
     return {
       ownershipStatus: "unknown",
       owner: null,
+      ownershipConflicting: false,
+      ownershipObservations: [],
       ownershipDocuments: [],
       sizeDocuments: [],
       sizeAssessment: "unknown",
+      sizeConflicting: false,
+      sizeObservations: [],
       headquartersDocuments: [],
       headquartersStatus: "unknown",
       headquarters: null,
+      headquartersObservations: [],
     };
   }
   const ownershipDocuments: PendingEvidenceDocument[] = [];
@@ -975,6 +2472,10 @@ export function extractWebsiteFacts(
     "unknown";
   let owner: string | null = null;
   const unsupportedOwnershipVotes: Array<{
+    readonly status: AcquisitionStatus | "independent";
+    readonly owner: string | null;
+  }> = [];
+  const supportedOwnershipVotes: Array<{
     readonly status: AcquisitionStatus | "independent";
     readonly owner: string | null;
   }> = [];
@@ -1019,6 +2520,10 @@ export function extractWebsiteFacts(
             ownershipStatus = "independent";
           }
           ownershipDocuments.push(document);
+          supportedOwnershipVotes.push({
+            status: "independent",
+            owner: null,
+          });
         }
       }
       const vote = classifyOfficialSiteOwnership(
@@ -1039,15 +2544,27 @@ export function extractWebsiteFacts(
           ownershipStatus = vote.status;
           owner = vote.owner;
           ownershipDocuments.push(document);
+          supportedOwnershipVotes.push({
+            status: vote.status,
+            owner: vote.owner,
+          });
         }
       }
       const sizeKind = explicitSizeKind(canonicalStatement);
+      const sizeCurrentness =
+        sizeKind === null
+          ? null
+          : quantitativeStatementCurrentness(canonicalStatement, sizeKind);
       if (
         sizeKind !== null &&
-        hasTargetSizeBinding(canonicalStatement, companyName, sizeKind) &&
-        !isHistoricalQuantitativeStatement(canonicalStatement)
+        sizeCurrentness !== null &&
+        hasTargetSizeBinding(canonicalStatement, companyName, sizeKind)
       ) {
-        const document = factDocument("size", page, sentence, { sizeKind });
+        const document = factDocument("size", page, sentence, {
+          sizeKind,
+          periodYear: sizeCurrentness.periodYear,
+          currentness: sizeCurrentness.currentness,
+        });
         const assessment = classifyExplicitRevenueSize(canonicalStatement);
         if (assessment !== "unknown") revenueAssessments.push(assessment);
         if (document !== null) {
@@ -1086,14 +2603,24 @@ export function extractWebsiteFacts(
     observedHeadquarters.status === "conflicting"
       ? observedHeadquarters
       : supportedHeadquarters;
-  if (
-    ownershipStatus !== "unknown" &&
-    unsupportedOwnershipVotes.some(
-      (vote) =>
-        vote.status !== ownershipStatus ||
-        (vote.status !== "independent" && vote.owner !== owner),
-    )
-  ) {
+  const ownershipObservations = [
+    ...supportedOwnershipVotes,
+    ...unsupportedOwnershipVotes,
+  ];
+  const ownershipConflict =
+    (supportedOwnershipVotes.length > 1 &&
+      supportedOwnershipVotes.some(
+        (vote) =>
+          vote.status !== supportedOwnershipVotes[0]?.status ||
+          vote.owner !== supportedOwnershipVotes[0]?.owner,
+      )) ||
+    (ownershipStatus !== "unknown" &&
+      unsupportedOwnershipVotes.some(
+        (vote) =>
+          vote.status !== ownershipStatus ||
+          (vote.status !== "independent" && vote.owner !== owner),
+      ));
+  if (ownershipConflict) {
     ownershipStatus = "unknown";
     owner = null;
   }
@@ -1103,6 +2630,8 @@ export function extractWebsiteFacts(
   return {
     ownershipStatus,
     owner,
+    ownershipConflicting: ownershipConflict,
+    ownershipObservations,
     ownershipDocuments,
     sizeDocuments,
     sizeAssessment:
@@ -1110,9 +2639,15 @@ export function extractWebsiteFacts(
       supportedRevenueAssessments.includes(soleAssessment)
         ? soleAssessment
         : "unknown",
+    sizeConflicting: assessments.size > 1,
+    sizeObservations: revenueAssessments.filter(
+      (assessment): assessment is Exclude<SizeAssessment, "unknown"> =>
+        assessment !== "unknown",
+    ),
     headquartersStatus: headquartersResolution.status,
     headquartersDocuments,
     headquarters: headquartersResolution.headquarters,
+    headquartersObservations: headquartersFacts,
   };
 }
 
@@ -1135,6 +2670,7 @@ function websitePageDocument(
       productHints: perPage.productHints,
       ownershipHints: perPage.ownershipHints,
       sizeHints: perPage.sizeHints,
+      ...pageRepresentationMetadata(page),
     },
   };
 }
@@ -1172,22 +2708,27 @@ function factDocument(
     retrievedAt: page.retrievedAt,
     sourceKind: "official_site",
     firstParty: true,
-    metadata,
+    metadata: { ...metadata, ...pageRepresentationMetadata(page) },
   };
 }
 
+function pageRepresentationMetadata(
+  page: WebsiteFetchedPage,
+): Record<string, unknown> {
+  const representation =
+    "representation" in page ? (page as AdmittedPage).representation : undefined;
+  return representation === undefined ? {} : { representation };
+}
+
 async function persistEvidenceDocuments(
-  db: Database,
+  db: SignalReviewExecutor,
   signalId: string,
   revision: string,
   documents: readonly PendingEvidenceDocument[],
 ): Promise<PersistedDocument[]> {
   const persisted: PersistedDocument[] = [];
   for (const document of documents) {
-    const sourceId = await resolveResearchSourceId(
-      db,
-      document.sourceKind === "news" ? "news" : "website",
-    );
+    const sourceId = await resolveResearchSourceId(db, document);
     const documentId = await resolveResearchDocumentId(db, sourceId, document);
     const evidenceHash = sha256Hex(
       [document.contentSha256, document.stage, document.quote].join("\u0000"),
@@ -1240,33 +2781,71 @@ async function persistEvidenceDocuments(
 }
 
 async function resolveResearchSourceId(
-  db: Database,
-  sourceType: "website" | "news",
+  db: SignalReviewExecutor,
+  document: PendingEvidenceDocument,
 ): Promise<string> {
+  const primaryKey = document.metadata["primarySourceKey"];
+  const representation = document.metadata["representation"];
+  const source =
+    document.sourceKind === "registry" && typeof primaryKey === "string"
+      ? primaryKey === "faa_pma_database" ||
+        primaryKey === "faa_drs_pma" ||
+        primaryKey === "faa_drs_pma_search"
+        ? {
+            name: "FAA Dynamic Regulatory System PMA",
+            type: "government_registry",
+            publisher: "Federal Aviation Administration",
+          }
+        : primaryKey === "sam_entity"
+          ? {
+              name: "SAM.gov Entity Management API v4",
+              type: "government_registry",
+              publisher: "U.S. General Services Administration",
+            }
+          : {
+              name: "USAspending",
+              type: "government_registry",
+              publisher: "USAspending.gov",
+            }
+      : representation === "provider_extracted_text"
+        ? {
+            name: "Exa extracted content",
+            type: document.sourceKind === "news" ? "news" : "website",
+            publisher: "Exa",
+          }
+        : {
+            name:
+              document.sourceKind === "news"
+                ? "Publisher news page"
+                : "Publisher website",
+            type: document.sourceKind === "news" ? "news" : "website",
+            publisher: "Publisher at source URL",
+          };
   const found = await db.execute<{ id: string }>(sql`
-    SELECT id FROM data_sources WHERE lower(name) = 'exa' LIMIT 1
+    SELECT id FROM data_sources WHERE lower(name) = lower(${source.name}) LIMIT 1
   `);
   const existing = found.rows[0]?.id;
   if (existing !== undefined) return existing;
   const inserted = await db.execute<{ id: string }>(sql`
     INSERT INTO data_sources (name, source_type, publisher, access, ingestion)
-    VALUES ('Exa', ${sourceType}, 'Exa', 'public', 'manual')
+    VALUES (${source.name}, ${source.type}, ${source.publisher}, 'public', 'manual')
     ON CONFLICT DO NOTHING
     RETURNING id
   `);
   const created = inserted.rows[0]?.id;
   if (created !== undefined) return created;
   const raced = await db.execute<{ id: string }>(sql`
-    SELECT id FROM data_sources WHERE lower(name) = 'exa' LIMIT 1
+    SELECT id FROM data_sources WHERE lower(name) = lower(${source.name}) LIMIT 1
   `);
   const racedId = raced.rows[0]?.id;
-  if (racedId === undefined)
-    throw new Error("Unable to resolve Exa data source");
+  if (racedId === undefined) {
+    throw new Error(`Unable to resolve ${source.name} data source`);
+  }
   return racedId;
 }
 
 async function resolveResearchDocumentId(
-  db: Database,
+  db: SignalReviewExecutor,
   sourceId: string,
   document: PendingEvidenceDocument,
 ): Promise<string> {
@@ -1377,6 +2956,7 @@ async function processClaim(
       db,
       signal,
       apiKey,
+      exaBudgetScopeId: options.exaBudgetScopeId,
       now: options.now,
       searchClient: options.searchClient,
       fetchUrl: options.fetchUrl,
@@ -1767,11 +3347,88 @@ function sameSiteStructuredUrl(
   }
 }
 
+interface StructuredPublisherIdentifier {
+  readonly label: "UEI" | "CAGE";
+  readonly value: string;
+  readonly normalized: Record<string, unknown>;
+}
+
+function structuredTypeIncludes(
+  node: Record<string, unknown>,
+  expected: string,
+): boolean {
+  const rawTypes = node["@type"];
+  const types =
+    typeof rawTypes === "string"
+      ? [rawTypes]
+      : Array.isArray(rawTypes)
+        ? rawTypes.filter((entry): entry is string => typeof entry === "string")
+        : [];
+  return types.some((type) => type.toLocaleLowerCase("en-US") === expected);
+}
+
+function structuredPublisherIdentifiersFromNode(
+  node: Record<string, unknown>,
+): {
+  readonly identifiers: readonly StructuredPublisherIdentifier[];
+  readonly normalizedIdentifier: unknown;
+} {
+  if (
+    !["organization", "corporation", "localbusiness"].some((type) =>
+      structuredTypeIncludes(node, type),
+    )
+  ) {
+    return { identifiers: [], normalizedIdentifier: undefined };
+  }
+  const rawIdentifier = node["identifier"];
+  const values = Array.isArray(rawIdentifier)
+    ? rawIdentifier
+    : rawIdentifier === undefined
+      ? []
+      : [rawIdentifier];
+  const identifiers: StructuredPublisherIdentifier[] = [];
+  for (const value of values) {
+    if (typeof value !== "object" || value === null || Array.isArray(value)) {
+      continue;
+    }
+    const property = value as Record<string, unknown>;
+    if (!structuredTypeIncludes(property, "propertyvalue")) continue;
+    const rawLabel = property["propertyID"];
+    const rawValue = property["value"];
+    if (typeof rawLabel !== "string" || typeof rawValue !== "string") continue;
+    const label = rawLabel.trim().toLocaleUpperCase("en-US");
+    if (label !== "UEI" && label !== "CAGE") continue;
+    const identifierValue = rawValue.trim();
+    if (normalizedValidPublishedIdentifier(label, identifierValue) === null) {
+      continue;
+    }
+    identifiers.push({
+      label,
+      value: identifierValue,
+      normalized: {
+        "@type": property["@type"],
+        propertyID: rawLabel,
+        value: rawValue,
+      },
+    });
+  }
+  return {
+    identifiers,
+    normalizedIdentifier:
+      identifiers.length === 0
+        ? undefined
+        : Array.isArray(rawIdentifier)
+          ? identifiers.map((identifier) => identifier.normalized)
+          : identifiers[0]!.normalized,
+  };
+}
+
 interface StructuredPublisherMatch {
   readonly name: string;
   readonly role: "Organization.root" | "WebSite.name" | "WebSite.publisher";
   readonly locator: string;
   readonly normalizedDocument: Record<string, unknown>;
+  readonly identifiers: readonly StructuredPublisherIdentifier[];
 }
 
 function structuredNodeLocator(node: Record<string, unknown>): string | null {
@@ -1788,6 +3445,11 @@ function structuredNodeFields(
   const fields: Record<string, unknown> = {};
   for (const key of ["@type", "@id", "url", "name"] as const) {
     if (node[key] !== undefined) fields[key] = node[key];
+  }
+  const { normalizedIdentifier } =
+    structuredPublisherIdentifiersFromNode(node);
+  if (normalizedIdentifier !== undefined) {
+    fields["identifier"] = normalizedIdentifier;
   }
   return fields;
 }
@@ -1851,6 +3513,7 @@ function structuredPublisherMatch(
     readonly locator: string;
     readonly name: string;
     readonly normalizedPublisher: unknown;
+    readonly identifiers: readonly StructuredPublisherIdentifier[];
   } | null => {
     if (typeof value === "string") {
       const referenced = nodesById.get(value);
@@ -1862,6 +3525,8 @@ function structuredPublisherMatch(
               name,
               locator: structuredNodeLocator(referenced) ?? value,
               normalizedPublisher: structuredNodeFields(referenced),
+              identifiers:
+                structuredPublisherIdentifiersFromNode(referenced).identifiers,
             };
       }
       return publisherIdentityEquivalent(value, companyName)
@@ -1869,6 +3534,7 @@ function structuredPublisherMatch(
             name: value,
             locator: "WebSite.publisher",
             normalizedPublisher: value,
+            identifiers: [],
           }
         : null;
     }
@@ -1886,6 +3552,8 @@ function structuredPublisherMatch(
           name,
           locator: structuredNodeLocator(matchedNode) ?? "WebSite.publisher",
           normalizedPublisher: structuredNodeFields(matchedNode),
+          identifiers:
+            structuredPublisherIdentifiersFromNode(matchedNode).identifiers,
         };
   };
 
@@ -1915,6 +3583,7 @@ function structuredPublisherMatch(
             ...normalizedWebsite,
             publisher: explicitPublisher.normalizedPublisher,
           },
+          identifiers: explicitPublisher.identifiers,
         };
       }
       const ownName = matchingName(node);
@@ -1927,6 +3596,7 @@ function structuredPublisherMatch(
             ...normalizedWebsite,
             name: ownName,
           },
+          identifiers: [],
         };
       }
     }
@@ -1958,18 +3628,19 @@ function structuredPublisherMatch(
         role: "Organization.root",
         locator: rootField.value,
         normalizedDocument: structuredNodeFields(node),
+        identifiers: structuredPublisherIdentifiersFromNode(node).identifiers,
       };
     }
   }
   return null;
 }
 
-function structuredPublisherExcerpt(
+function structuredPublisherMatches(
   content: string,
   pageUrl: string,
   companyName: string,
-  maxChars = Number.POSITIVE_INFINITY,
-): string | null {
+): readonly StructuredPublisherMatch[] {
+  const publishers: StructuredPublisherMatch[] = [];
   const scripts =
     /<script\b(?=[^>]*\btype\s*=\s*(?:"application\/ld\+json"|'application\/ld\+json'|application\/ld\+json))[^>]*>([\s\S]*?)<\/script\s*>/giu;
   for (const match of content.matchAll(scripts)) {
@@ -1982,7 +3653,22 @@ function structuredPublisherExcerpt(
       continue;
     }
     const publisher = structuredPublisherMatch(document, pageUrl, companyName);
-    if (publisher === null) continue;
+    if (publisher !== null) publishers.push(publisher);
+  }
+  return publishers;
+}
+
+function structuredPublisherExcerpt(
+  content: string,
+  pageUrl: string,
+  companyName: string,
+  maxChars = Number.POSITIVE_INFINITY,
+): string | null {
+  for (const publisher of structuredPublisherMatches(
+    content,
+    pageUrl,
+    companyName,
+  )) {
     const normalizedEvidence =
       `[normalized JSON-LD publisher evidence; not a verbatim quote; ` +
       `role=${publisher.role}; locator=${JSON.stringify(publisher.locator)}]` +
@@ -2098,6 +3784,9 @@ function plainTextPublisherExcerpt(
     const allowedPrefix =
       prefix === "" || /^(?:about|contact|welcome\s+to)$/iu.test(prefix);
     if (!allowedPrefix) continue;
+    const statementStart = lineStart + clauseBoundary + 1;
+    const publisherStatement =
+      splitPageSentences(text.slice(statementStart, lineEnd))[0] ?? line;
 
     const suffix = text.slice(identityEnd, lineEnd);
     const directOperationalDescription =
@@ -2116,7 +3805,10 @@ function plainTextPublisherExcerpt(
       operational !== null &&
       (directOperationalDescription || selfDescription || directIntroduction)
     ) {
-      const excerpt = boundedPublisherContext([line, operational], maxChars);
+      const excerpt = boundedPublisherContext(
+        [publisherStatement, operational],
+        maxChars,
+      );
       if (excerpt !== null) return excerpt;
     }
   }
@@ -2128,20 +3820,166 @@ function hasLabeledIdentifier(
   label: "UEI" | "CAGE",
   rawValue: string | null,
 ): boolean {
-  const value = rawValue?.trim();
-  if (value === undefined || value.length < 4) return false;
-  const exactValue = value
-    .split("")
-    .map((character) => escapeRegExp(character))
-    .join("[\\s-]*");
-  const labelPattern =
+  const expected =
+    rawValue === null
+      ? null
+      : normalizedValidPublishedIdentifier(label, rawValue);
+  return (
+    expected !== null &&
+    labeledIdentifierValues(text, label).some(
+      (value) => normalizedPublishedIdentifier(value) === expected,
+    )
+  );
+}
+
+interface PublisherIdentifierAssessment {
+  readonly matched: boolean;
+  readonly conflicting: boolean;
+}
+
+function targetPublisherIdentifierAssessment(
+  pageTexts: readonly string[],
+  pageUrls: readonly (string | null)[],
+  companyName: string,
+  label: "UEI" | "CAGE",
+  rawValue: string | null,
+): PublisherIdentifierAssessment {
+  const expected =
+    rawValue === null
+      ? null
+      : normalizedValidPublishedIdentifier(label, rawValue);
+  if (expected === null) {
+    return { matched: false, conflicting: false };
+  }
+  let matched = false;
+  let conflicting = false;
+  const observe = (value: string): void => {
+    if (normalizedPublishedIdentifier(value) === expected) {
+      matched = true;
+    } else {
+      conflicting = true;
+    }
+  };
+  for (const [index, content] of pageTexts.entries()) {
+    const text = normalizePageText(content);
+    const pageUrl = pageUrls[index] ?? null;
+    const structuredPublishers =
+      pageUrl === null
+        ? []
+        : structuredPublisherMatches(content, pageUrl, companyName);
+    const targetPublisherEstablished =
+      attributablePlainPublisherExcerpt(
+        plainTextPublisherExcerpt(text, companyName),
+      ) ||
+      splitPageSentences(text).some((sentence) =>
+        attributablePlainPublisherExcerpt(
+          plainTextPublisherExcerpt(sentence, companyName),
+        ),
+      ) ||
+      structuredPublishers.length > 0;
+    if (!targetPublisherEstablished) continue;
+    for (const publisher of structuredPublishers) {
+      for (const identifier of publisher.identifiers) {
+        if (identifier.label === label) observe(identifier.value);
+      }
+    }
+    for (const sentence of splitPageSentences(text)) {
+      if (!identifierStatementTargetsPublisher(sentence, companyName, label)) {
+        continue;
+      }
+      for (const value of labeledIdentifierValues(sentence, label)) {
+        observe(value);
+      }
+    }
+  }
+  return { matched, conflicting };
+}
+
+function identifierStatementTargetsPublisher(
+  sentence: string,
+  companyName: string,
+  label: "UEI" | "CAGE",
+): boolean {
+  if (
+    /\b(?:customer|client|parent(?:\s+company)?|partner|supplier|subsidiary|portfolio\s+company)\b/iu.test(
+      sentence,
+    )
+  ) {
+    return false;
+  }
+  const labelPattern = label === "CAGE" ? "CAGE" : "UEI";
+  if (new RegExp(`^\\s*${labelPattern}\\b`, "iu").test(sentence)) return true;
+  if (
+    new RegExp(
+      `\\b(?:our|we(?:\\s+use)?)\\b[^.!?]{0,80}\\b${labelPattern}\\b`,
+      "iu",
+    ).test(sentence)
+  ) {
+    return true;
+  }
+  const companyPattern = legalNamePattern(companyName);
+  return (
+    companyPattern !== null &&
+    (new RegExp(
+      `${companyPattern}[^.!?]{0,100}\\b${labelPattern}\\b`,
+      "iu",
+    ).test(sentence) ||
+      new RegExp(
+        `\\b${labelPattern}\\b[^.!?]{0,100}${companyPattern}`,
+        "iu",
+      ).test(sentence))
+  );
+}
+
+const LABELED_IDENTIFIER_TOKEN =
+  "(?:[A-Z0-9](?:[ -]+[A-Z0-9])+|[A-Z0-9-]+)";
+const CAGE_LABELED_IDENTIFIER_PATTERN = new RegExp(
+  `\\bCAGE(?:\\s+(code|number|no\\.?))?\\s*([:#-]?)\\s*(${LABELED_IDENTIFIER_TOKEN})(?![A-Z0-9-])`,
+  "giu",
+);
+const UEI_LABELED_IDENTIFIER_PATTERN = new RegExp(
+  `\\bUEI(?:\\s+(code|number|no\\.?))?\\s*([:#-]?)\\s*(${LABELED_IDENTIFIER_TOKEN})(?![A-Z0-9-])`,
+  "giu",
+);
+
+function labeledIdentifierValues(
+  sentence: string,
+  label: "UEI" | "CAGE",
+): readonly string[] {
+  const pattern =
     label === "CAGE"
-      ? "CAGE(?:\\s+(?:code|number|no\\.?))?"
-      : "UEI(?:\\s+(?:number|no\\.?))?";
-  return new RegExp(
-    `\\b${labelPattern}\\s*[:#-]?\\s*${exactValue}(?![A-Z0-9])`,
-    "iu",
-  ).test(text);
+      ? CAGE_LABELED_IDENTIFIER_PATTERN
+      : UEI_LABELED_IDENTIFIER_PATTERN;
+  return [...sentence.matchAll(pattern)].flatMap((match) => {
+    const qualifier = match[1];
+    const delimiter = match[2];
+    const value = match[3];
+    if (
+      value === undefined ||
+      normalizedValidPublishedIdentifier(label, value) === null ||
+      (qualifier === undefined && delimiter === "" && !/\d/u.test(value))
+    ) {
+      return [];
+    }
+    return [value];
+  });
+}
+
+const CAGE_IDENTIFIER_PATTERN = /^[A-Z0-9]{5}$/u;
+const UEI_IDENTIFIER_PATTERN = /^[A-Z0-9]{12}$/u;
+
+function normalizedValidPublishedIdentifier(
+  label: "UEI" | "CAGE",
+  value: string,
+): string | null {
+  const normalized = normalizedPublishedIdentifier(value);
+  const pattern =
+    label === "CAGE" ? CAGE_IDENTIFIER_PATTERN : UEI_IDENTIFIER_PATTERN;
+  return pattern.test(normalized) ? normalized : null;
+}
+
+function normalizedPublishedIdentifier(value: string): string {
+  return value.replace(/[\s-]+/gu, "").toLocaleUpperCase("en-US");
 }
 
 function hasExactSignalLocation(
@@ -2443,36 +4281,52 @@ function classifyOfficialSiteOwnership(sentence: string, companyName: string) {
     ? sentence.replace(/^\s*(?:we|our company|our business)\b/iu, companyName)
     : sentence;
   const classified = classifySentence(attributedSentence, companyName);
-  if (classified !== null) return classified;
-
-  const companyPattern = legalNamePattern(companyName);
-  if (
-    companyPattern !== null &&
-    new RegExp(
-      `^\\s*${companyPattern}\\s+has\\s+(?:recently\\s+)?been\\s+acquired\\s+by\\s+(?:["“][^"”]{1,80}["”]\\s+)?private\\s+investors?\\b`,
-      "iu",
-    ).test(attributedSentence)
-  ) {
-    return {
-      status: "acquired" as const,
-      owner: null,
-      sentence: attributedSentence,
-    };
-  }
-  return null;
+  return classified?.currentRelation === true ? classified : null;
 }
 
-function isHistoricalQuantitativeStatement(sentence: string): boolean {
+interface QuantitativeCurrentness {
+  readonly periodYear: number | null;
+  readonly currentness: "latest_completed_period" | "undated_current";
+}
+
+function quantitativeStatementCurrentness(
+  sentence: string,
+  kind: "revenue" | "employee_count" | "facility_scale",
+): QuantitativeCurrentness | null {
   if (
-    /\b(?:formerly|previously|historically|once|at the time|used to)\b/iu.test(
+    /\b(?:forecast|forecasted|projected|projection|target|guidance|pro forma|expects?|estimated|plans?|aims?|will|next year)\b/iu.test(
+      sentence,
+    ) ||
+    /\b(?:formerly|previously|historically|once|at the time|used to|prior year|previous year)\b/iu.test(
       sentence,
     )
   ) {
-    return true;
+    return null;
   }
+  const yearMatch = /\b(19\d{2}|20\d{2})\b/u.exec(sentence);
+  if (yearMatch?.[1] === undefined) {
+    return /\b(?:last year|last quarter|fiscal[- ]year|for the year ended)\b/iu.test(
+      sentence,
+    )
+      ? null
+      : { periodYear: null, currentness: "undated_current" };
+  }
+  if (kind !== "revenue") return null;
+  const latest =
+    /\b(?:latest|most recent)(?:\s+(?:reported|completed|available))?\s+(?:annual|full[- ]year|fiscal[- ]year|yearly)\b/iu.test(
+      sentence,
+    ) ||
+    /\b(?:latest|most recent)\s+(?:reported|completed)\b/iu.test(sentence);
+  const year = Number.parseInt(yearMatch[1], 10);
   const currentYear = new Date().getUTCFullYear();
-  return [...sentence.matchAll(/\b(19\d{2}|20\d{2})\b/gu)].some(
-    (match) => Number(match[1]) < currentYear - 2,
+  if (!latest || year < currentYear - 2 || year > currentYear) return null;
+  return { periodYear: year, currentness: "latest_completed_period" };
+}
+
+function isHistoricalQuantitativeStatement(sentence: string): boolean {
+  const kind = explicitSizeKind(sentence);
+  return (
+    kind !== null && quantitativeStatementCurrentness(sentence, kind) === null
   );
 }
 
@@ -2780,8 +4634,18 @@ function signalIdentityPageQuotes(
     assessment.corroboratedBy === "identifier"
       ? sentences.find(
           (sentence) =>
-            hasLabeledIdentifier(sentence, "UEI", signal.uei) ||
-            hasLabeledIdentifier(sentence, "CAGE", signal.cage),
+            (identifierStatementTargetsPublisher(
+              sentence,
+              signal.rawName,
+              "UEI",
+            ) &&
+              hasLabeledIdentifier(sentence, "UEI", signal.uei)) ||
+            (identifierStatementTargetsPublisher(
+              sentence,
+              signal.rawName,
+              "CAGE",
+            ) &&
+              hasLabeledIdentifier(sentence, "CAGE", signal.cage)),
         )
       : assessment.corroboratedBy === "location"
         ? sentences.find((sentence) =>
@@ -3332,6 +5196,49 @@ function revenueKind(
   excerpt: string,
 ): "revenue" | "employee_count" | "facility_scale" {
   return explicitSizeKind(excerpt) ?? "facility_scale";
+}
+
+function sizeIndicatorFromDocument(
+  document: PersistedDocument,
+): SizeIndicator | null {
+  const rawCurrentness = document.metadata["currentness"];
+  if (
+    rawCurrentness !== "latest_completed_period" &&
+    rawCurrentness !== "undated_current"
+  ) {
+    return null;
+  }
+  const rawPeriodYear = document.metadata["periodYear"];
+  const periodYear =
+    typeof rawPeriodYear === "number" && Number.isInteger(rawPeriodYear)
+      ? rawPeriodYear
+      : null;
+  if (rawCurrentness === "latest_completed_period" && periodYear === null) {
+    return null;
+  }
+  return {
+    kind: revenueKind(document.quote),
+    excerpt: document.quote,
+    evidenceId: document.evidenceId,
+    periodYear,
+    currentness: rawCurrentness,
+  };
+}
+
+function boundSignalEvidenceText(text: string, maxChars: number): string {
+  const trimmed = text.trim();
+  if (trimmed.length <= maxChars) return trimmed;
+  const prefix = trimmed.slice(0, maxChars);
+  const boundary = Math.max(
+    prefix.lastIndexOf("."),
+    prefix.lastIndexOf("!"),
+    prefix.lastIndexOf("?"),
+    prefix.lastIndexOf("\n"),
+  );
+  return (boundary >= Math.floor(maxChars / 2)
+    ? prefix.slice(0, boundary + 1)
+    : prefix
+  ).trim();
 }
 
 function extractHeadquarters(sentence: string): {

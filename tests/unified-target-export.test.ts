@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import { enrichUnifiedExportRow } from "../packages/database/src/unified-targets/export.js";
+import {
+  enrichSourceSignalExportRow,
+  enrichUnifiedExportRow,
+  toCsvRecord,
+  toSourceSignalCsvRecord,
+} from "../packages/database/src/unified-targets/export.js";
 
 const expectedReviewInputContract = {
   version: "faa_review_input_v1",
@@ -9,7 +14,7 @@ const expectedReviewInputContract = {
     jevModel: "jev-current",
     museModel: "muse-current",
     evaluatorPrompt: "faa_evaluator_v1",
-    jevAuditSampleRate: 0.05,
+    analyst: "analyst-current",
   },
 } as const;
 
@@ -199,5 +204,191 @@ describe("unified target export identity gate", () => {
     expect(absentPolicy["promotion_status"]).toBe("not_current");
     expect(incompatiblePolicy["review_status"]).toBe("stale_or_incompatible");
     expect(incompatiblePolicy["promotion_status"]).toBe("not_current");
+  });
+});
+
+describe("source signal analyst export currentness", () => {
+  const inputHash = "a".repeat(64);
+  const currentRow = {
+    signal_id: "signal-current",
+    signal_source_revision: 9,
+    state_source_revision: 9,
+    review_phase: "muse",
+    review_input_hash: inputHash,
+    review_input_manifest: {
+      ...expectedReviewInputContract,
+      sourceRevision: 9,
+      evidence: {},
+    },
+    state_jev_evaluation_id: "jev-current",
+    jev_evaluation_id: "jev-current",
+    jev_signal_id: "signal-current",
+    jev_model_id: "jev-current",
+    jev_prompt_version: "jev-ladder-rung-prompt",
+    jev_input_hash: inputHash,
+    jev_input_manifest: {
+      ...expectedReviewInputContract,
+      sourceRevision: 9,
+      evidence: {},
+    },
+    jev_error: null,
+    jev_decision: "research",
+    jev_parsed: {
+      version: "jev-triage-v1",
+      decision: "research",
+      confidence: 0.72,
+      productFit: "supported_product",
+      acquisitionReadiness: "needs_research",
+      researchPriority: 1,
+      reasonCodes: ["acquisition_facts_incomplete"],
+      explanation: "Product fit is supported; mandate facts remain open.",
+      observations: [],
+      gaps: [
+        {
+          id: "ownership.current_control",
+          field: "ownership",
+          question: "Who currently controls the business?",
+          priority: 1,
+          reason: "Current ownership is unverified.",
+          supportingSources: [],
+          conflictingSources: [],
+        },
+      ],
+    },
+    analyst_case_id: "case-current",
+    analyst_source_revision: 9,
+    analyst_policy_version: "analyst-current",
+    analyst_input_hash: inputHash,
+    analyst_case_status: "completed",
+    analyst_next_attempt_at: null,
+    analyst_stop_reason: "bounded_complete",
+    analyst_memo: {
+      version: "signal-analyst-memo-v1",
+      inputHash,
+      createdAt: "2026-09-28T12:34:56.123Z",
+      summary: { label: "model_analysis", text: "Model analysis only." },
+      answers: [
+        {
+          gapId: "ownership.current_control",
+          field: "ownership",
+          status: "unresolved",
+          answer: null,
+          evidenceIds: [],
+        },
+      ],
+      nextActions: ["Locate a current ownership filing."],
+    },
+  } satisfies Record<string, unknown>;
+
+  it("exports current triage and requires completed memo/hash proof", () => {
+    const current = enrichSourceSignalExportRow(currentRow, exportContext);
+    const draft = enrichSourceSignalExportRow(
+      { ...currentRow, analyst_case_status: "awaiting_review" },
+      exportContext,
+    );
+    const oldHash = enrichSourceSignalExportRow(
+      {
+        ...currentRow,
+        analyst_memo: { ...currentRow.analyst_memo, inputHash: "b".repeat(64) },
+      },
+      exportContext,
+    );
+
+    expect(current).toMatchObject({
+      triage_current: true,
+      jev_product_fit: "supported_product",
+      jev_acquisition_readiness: "needs_research",
+      jev_research_priority: 1,
+      analyst_episode_current: true,
+      analyst_proof_current: true,
+      analyst_memo_current: true,
+    });
+    expect(draft["analyst_memo_current"]).toBe(false);
+    expect(oldHash["analyst_memo_current"]).toBe(false);
+  });
+
+  it("keeps unknown provider exposure distinct from known zero spend", () => {
+    const record = toSourceSignalCsvRecord({
+      ...enrichSourceSignalExportRow(currentRow, exportContext),
+      provider_known_cost_usd: "0",
+      provider_unknown_estimated_cost_usd: "0.014",
+      provider_receipt_count: 1,
+      provider_unknown_receipt_count: 1,
+    });
+
+    expect(record["Provider Known Cost USD"]).toBe("0");
+    expect(record["Provider Unknown Estimated Cost USD"]).toBe("0.014");
+    expect(record["Provider Unknown Receipt Count"]).toBe("1");
+    expect(record).not.toHaveProperty("Source Payload");
+    expect(record).not.toHaveProperty("Qualification");
+  });
+
+});
+
+describe("unified target analyst fields", () => {
+  it("adds current Jev triage and analyst proof fields without changing membership provenance", () => {
+    const inputHash = "c".repeat(64);
+    const exported = enrichUnifiedExportRow(
+      readyRow({
+        review_input_hash: inputHash,
+        jev_input_hash: inputHash,
+        result_input_hash: inputHash,
+        review_phase: "settled",
+        jev_model_id: "jev-current",
+        jev_prompt_version: "jev-ladder-rung-prompt",
+        jev_input_manifest: {
+          ...expectedReviewInputContract,
+          sourceRevision: 9,
+          evidence: {},
+        },
+        jev_parsed: {
+          version: "jev-triage-v1",
+          decision: "research",
+          confidence: 0.64,
+          productFit: "plausible_supplier",
+          acquisitionReadiness: "needs_research",
+          researchPriority: 2,
+          reasonCodes: ["acquisition_facts_incomplete"],
+          explanation: "Useful fit signal; diligence remains.",
+          observations: [],
+          gaps: [],
+        },
+        analyst_case_id: "case-current",
+        analyst_source_revision: 9,
+        analyst_policy_version: "analyst-current",
+        analyst_input_hash: inputHash,
+        analyst_case_status: "active",
+      }),
+      exportContext,
+    );
+
+    expect(exported).toMatchObject({
+      triage_current: true,
+      jev_product_fit: "plausible_supplier",
+      analyst_episode_current: true,
+      analyst_proof_current: true,
+      analyst_memo_current: false,
+      membership_provenance: [],
+    });
+  });
+
+  it("uses the canonical unscored ranking when no source ranking is linked", () => {
+    const exported = enrichUnifiedExportRow(
+      readyRow({
+        signal_id: null,
+        readiness: null,
+        ranking: null,
+      }),
+      exportContext,
+    );
+    const record = toCsvRecord(exported);
+
+    expect(record).toMatchObject({
+      "Investor Ranking Score": "",
+      "Investor Ranking Status": "unscored",
+      "Investor Ranking Readiness": "unscored",
+    });
+    expect(record["Membership Provenance"]).toBe("");
+    expect(record["Possible Identity Match"]).toBe("no");
   });
 });

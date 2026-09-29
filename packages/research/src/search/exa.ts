@@ -28,6 +28,21 @@ const exaContentsResultSchema = z.object({
 const exaContentsResponseSchema = z.object({
   results: z.array(exaContentsResultSchema).max(EXA_CONTENTS_URL_LIMIT),
 });
+const exaCostEnvelopeSchema = z
+  .object({
+    costDollars: z
+      .union([
+        z.number().finite().nonnegative(),
+        z.string(),
+        z
+          .object({
+            total: z.union([z.number().finite().nonnegative(), z.string()]),
+          })
+          .passthrough(),
+      ])
+      .optional(),
+  })
+  .passthrough();
 
 const officialDomainIdentitySchema = z.object({
   legalName: z.string().trim().min(1).max(200),
@@ -79,6 +94,7 @@ export type ExaSearchErrorCode =
   | "timeout"
   | "network_error"
   | "rate_limited"
+  | "quota_exhausted"
   | "provider_unavailable"
   | "request_rejected"
   | "invalid_response";
@@ -96,6 +112,8 @@ export class ExaSearchError extends Error {
     readonly code: ExaSearchErrorCode,
     readonly transient: boolean,
     readonly status: number | null = null,
+    /** Provider-reported charge retained even when the HTTP 200 body is invalid. */
+    readonly providerCostUsd: string | null = null,
   ) {
     super(
       {
@@ -103,6 +121,7 @@ export class ExaSearchError extends Error {
         timeout: "Exa search request timed out",
         network_error: "Exa search network request failed",
         rate_limited: "Exa search request was rate limited",
+        quota_exhausted: "Exa provider credits are exhausted",
         provider_unavailable: "Exa search provider is temporarily unavailable",
         request_rejected: "Exa search request was rejected",
         invalid_response: "Exa search returned an invalid response",
@@ -123,6 +142,11 @@ export interface ExaContentsResult {
   readonly url: string;
   readonly title: string;
   readonly text: string;
+}
+export interface ExaProviderResult<T> {
+  readonly results: readonly T[];
+  /** Exact decimal text when Exa supplied costDollars; null means unknown. */
+  readonly providerCostUsd: string | null;
 }
 
 export interface ExaOfficialDomainIdentity {
@@ -164,6 +188,12 @@ export class ExaSearchClient {
   }
 
   async search(query: string): Promise<readonly ExaSearchResult[]> {
+    return (await this.searchWithMetadata(query)).results;
+  }
+
+  async searchWithMetadata(
+    query: string,
+  ): Promise<ExaProviderResult<ExaSearchResult>> {
     const apiKey = this.#apiKey;
     if (apiKey === undefined) throw new ExaApiKeyMissingError();
 
@@ -172,62 +202,26 @@ export class ExaSearchClient {
       throw new ExaSearchError("invalid_request", false);
     }
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), EXA_SEARCH_TIMEOUT_MS);
-    let response: Response;
-    try {
-      response = await this.#fetch(EXA_SEARCH_ENDPOINT, {
-        method: "POST",
-        headers: {
-          "content-type": "application/json",
-          "x-api-key": apiKey,
-        },
-        body: JSON.stringify({
-          query: normalizedQuery,
-          numResults: EXA_SEARCH_RESULT_LIMIT,
-          contents: { text: { maxCharacters: EXA_SEARCH_TEXT_MAX_CHARACTERS } },
-        }),
-        signal: controller.signal,
-      });
-    } catch {
-      throw new ExaSearchError(
-        controller.signal.aborted ? "timeout" : "network_error",
-        true,
-      );
-    } finally {
-      clearTimeout(timeout);
-    }
-
-    if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
-      const code =
-        response.status === 429
-          ? "rate_limited"
-          : response.status >= 500
-            ? "provider_unavailable"
-            : "request_rejected";
-      throw new ExaSearchError(
-        code,
-        response.status === 408 ||
-          response.status === 425 ||
-          response.status === 429 ||
-          response.status >= 500,
-        response.status,
-      );
-    }
-
-    let payload: unknown;
-    try {
-      payload = await response.json();
-    } catch {
-      throw new ExaSearchError("invalid_response", false, response.status);
-    }
-
-    const parsed = exaResponseSchema.safeParse(payload);
+    const response = await this.#post(
+      EXA_SEARCH_ENDPOINT,
+      apiKey,
+      {
+        query: normalizedQuery,
+        numResults: EXA_SEARCH_RESULT_LIMIT,
+        contents: { text: { maxCharacters: EXA_SEARCH_TEXT_MAX_CHARACTERS } },
+      },
+    );
+    const providerCostUsd = extractProviderCostUsd(response.payload);
+    const parsed = exaResponseSchema.safeParse(response.payload);
     if (!parsed.success) {
-      throw new ExaSearchError("invalid_response", false, response.status);
+      throw new ExaSearchError(
+        "invalid_response",
+        false,
+        response.status,
+        providerCostUsd,
+      );
     }
-    return parsed.data.results;
+    return { results: parsed.data.results, providerCostUsd };
   }
   /**
    * Fetch extracted text for up to EXA_CONTENTS_URL_LIMIT page URLs via
@@ -238,6 +232,12 @@ export class ExaSearchClient {
   async fetchContents(
     urls: readonly string[],
   ): Promise<readonly ExaContentsResult[]> {
+    return (await this.fetchContentsWithMetadata(urls)).results;
+  }
+
+  async fetchContentsWithMetadata(
+    urls: readonly string[],
+  ): Promise<ExaProviderResult<ExaContentsResult>> {
     const apiKey = this.#apiKey;
     if (apiKey === undefined) throw new ExaApiKeyMissingError();
     const targets = urls
@@ -247,61 +247,94 @@ export class ExaSearchClient {
     if (targets.length === 0)
       throw new ExaSearchError("invalid_request", false);
 
+    const response = await this.#post(EXA_CONTENTS_ENDPOINT, apiKey, {
+      urls: targets,
+      text: { maxCharacters: EXA_CONTENTS_TEXT_MAX_CHARACTERS },
+    });
+    const providerCostUsd = extractProviderCostUsd(response.payload);
+    const parsed = exaContentsResponseSchema.safeParse(response.payload);
+    if (!parsed.success) {
+      throw new ExaSearchError(
+        "invalid_response",
+        false,
+        response.status,
+        providerCostUsd,
+      );
+    }
+    return { results: parsed.data.results, providerCostUsd };
+  }
+
+  async #post(
+    endpoint: string,
+    apiKey: string,
+    body: Record<string, unknown>,
+  ): Promise<{ readonly payload: unknown; readonly status: number }> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), EXA_SEARCH_TIMEOUT_MS);
     let response: Response;
     try {
-      response = await this.#fetch(EXA_CONTENTS_ENDPOINT, {
+      response = await this.#fetch(endpoint, {
         method: "POST",
         headers: {
           "content-type": "application/json",
           "x-api-key": apiKey,
         },
-        body: JSON.stringify({
-          urls: targets,
-          text: { maxCharacters: EXA_CONTENTS_TEXT_MAX_CHARACTERS },
-        }),
+        body: JSON.stringify(body),
         signal: controller.signal,
       });
     } catch {
+      clearTimeout(timeout);
       throw new ExaSearchError(
         controller.signal.aborted ? "timeout" : "network_error",
         true,
       );
-    } finally {
-      clearTimeout(timeout);
     }
 
     if (!response.ok) {
-      await response.body?.cancel().catch(() => undefined);
+      let errorPayload: unknown = null;
+      try {
+        errorPayload = await readResponseJson(response, controller.signal);
+      } catch {
+        await response.body?.cancel().catch(() => undefined);
+        if (controller.signal.aborted) {
+          throw new ExaSearchError("timeout", true, response.status);
+        }
+      } finally {
+        clearTimeout(timeout);
+      }
       const code =
-        response.status === 429
-          ? "rate_limited"
-          : response.status >= 500
-            ? "provider_unavailable"
-            : "request_rejected";
+        response.status === 402
+          ? "quota_exhausted"
+          : response.status === 429
+            ? "rate_limited"
+            : response.status >= 500
+              ? "provider_unavailable"
+              : "request_rejected";
       throw new ExaSearchError(
         code,
-        response.status === 408 ||
+        response.status === 402 ||
+          response.status === 408 ||
           response.status === 425 ||
           response.status === 429 ||
           response.status >= 500,
         response.status,
+        extractProviderCostUsd(errorPayload),
       );
     }
 
     let payload: unknown;
     try {
-      payload = await response.json();
+      payload = await readResponseJson(response, controller.signal);
     } catch {
-      throw new ExaSearchError("invalid_response", false, response.status);
+      throw new ExaSearchError(
+        controller.signal.aborted ? "timeout" : "invalid_response",
+        controller.signal.aborted,
+        response.status,
+      );
+    } finally {
+      clearTimeout(timeout);
     }
-
-    const parsed = exaContentsResponseSchema.safeParse(payload);
-    if (!parsed.success) {
-      throw new ExaSearchError("invalid_response", false, response.status);
-    }
-    return parsed.data.results;
+    return { payload, status: response.status };
   }
 
   async searchOfficialDomainCandidates(
@@ -348,6 +381,60 @@ export async function searchOfficialDomainCandidates(
   }
 
   return candidates;
+}
+
+async function readResponseJson(
+  response: Response,
+  signal: AbortSignal,
+): Promise<unknown> {
+  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+  const { promise, resolve, reject } = Promise.withResolvers<unknown>();
+  const abort = () => {
+    void response.body?.cancel().catch(() => undefined);
+    reject(new DOMException("Aborted", "AbortError"));
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  response.json().then(
+    (value) => {
+      signal.removeEventListener("abort", abort);
+      resolve(value);
+    },
+    (error: unknown) => {
+      signal.removeEventListener("abort", abort);
+      reject(error);
+    },
+  );
+  return promise;
+}
+
+function extractProviderCostUsd(payload: unknown): string | null {
+  const envelope = exaCostEnvelopeSchema.safeParse(payload);
+  if (!envelope.success || envelope.data.costDollars === undefined) return null;
+  const raw =
+    typeof envelope.data.costDollars === "object"
+      ? envelope.data.costDollars.total
+      : envelope.data.costDollars;
+  const decimal =
+    typeof raw === "number" ? plainDecimal(raw) : raw.trim();
+  if (!/^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(decimal)) return null;
+  return decimal;
+}
+
+function plainDecimal(value: number): string {
+  const source = String(value);
+  const match = /^(-?)(\d+)(?:\.(\d+))?[eE]([+-]?\d+)$/u.exec(source);
+  if (match === null) return source;
+  const sign = match[1] ?? "";
+  const integer = match[2] ?? "0";
+  const fraction = match[3] ?? "";
+  const exponent = Number.parseInt(match[4] ?? "0", 10);
+  const digits = integer + fraction;
+  const point = integer.length + exponent;
+  if (point <= 0) return `${sign}0.${"0".repeat(-point)}${digits}`;
+  if (point >= digits.length) {
+    return `${sign}${digits}${"0".repeat(point - digits.length)}`;
+  }
+  return `${sign}${digits.slice(0, point)}.${digits.slice(point)}`;
 }
 
 function normalizeQuery(query: string): string {

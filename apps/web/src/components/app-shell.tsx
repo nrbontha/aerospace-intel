@@ -27,7 +27,8 @@ type NavigationItem = Readonly<{
 }>;
 
 const navigation: readonly NavigationItem[] = [
-  { href: "/feed", label: "Targets" },
+  { href: "/signals", label: "Investor queue" },
+  { href: "/feed", label: "Reviewed targets" },
   { href: "/research", label: "Research" },
   { href: "/universe", label: "Universe" },
 ];
@@ -64,7 +65,7 @@ export function AppShell({ children, user }: AppShellProps) {
         <header className="asi-shell__header">
           <div className="asi-shell__identity">
             <p className="asi-shell__eyebrow">Evidence operations</p>
-            <Link className="asi-shell__product" href="/feed">
+            <Link className="asi-shell__product" href="/signals">
               Aerospace Supplier Intelligence
             </Link>
           </div>

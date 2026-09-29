@@ -123,6 +123,25 @@ export function parseEnsembleArgs(
     flagValue(argv, "--delay-ms"),
     "--delay-ms",
   );
+  const rawAnalystMode = (
+    flagValue(argv, "--analyst-mode") ??
+    env["FAA_ANALYST_MODE"] ??
+    "disabled"
+  ).trim();
+  if (
+    rawAnalystMode !== "disabled" &&
+    rawAnalystMode !== "free_only" &&
+    rawAnalystMode !== "bounded_paid"
+  ) {
+    throw new Error(
+      "--analyst-mode must be disabled, free_only, or bounded_paid",
+    );
+  }
+  const exaBudgetScopeId = (
+    flagValue(argv, "--exa-budget-scope-id") ??
+    env["EXA_BUDGET_SCOPE_ID"] ??
+    ""
+  ).trim();
   return {
     limit,
     status,
@@ -134,6 +153,8 @@ export function parseEnsembleArgs(
     includeKnown,
     benchmarkNames,
     failedOnly,
+    analystMode: rawAnalystMode,
+    ...(exaBudgetScopeId === "" ? {} : { exaBudgetScopeId }),
   };
 }
 

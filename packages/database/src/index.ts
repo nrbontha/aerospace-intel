@@ -25,4 +25,7 @@ export * from "./unified-targets/populate.js";
 export * from "./unified-targets/promote.js";
 export * from "./unified-targets/export.js";
 export * from "./signal-reviews.js";
+export * from "./investor-ranking.js";
+export * from "./analyst-research.js";
+export * from "./provider-accounting.js";
 export * from "./faa-ensemble/records.js";

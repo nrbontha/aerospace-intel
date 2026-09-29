@@ -22,7 +22,6 @@ vi.mock("@asi/database", async (importOriginal) => ({
 import {
   buildEvidencePackage,
   buildFaaReviewInputManifest,
-  currentFaaReviewInputContract,
   buildJevState,
   evaluateJevLadder,
   hashFaaReviewInput,
@@ -33,6 +32,7 @@ import {
   runMuseReviews,
   type FaaEnsembleConfig,
   type FaaEvidencePackage,
+  type JevLadderCaller,
   type JevLadderCallRequest,
 } from "../scripts/run-faa-ensemble.mts";
 
@@ -114,11 +114,18 @@ function sourcedResearch(overrides: Record<string, unknown> = {}) {
     },
     ownership: {
       status: "unknown",
+      conflicting: false,
+      currentness: "unknown",
       owner: null,
       year: null,
       supportEvidenceIds: [],
     },
-    size: { status: "unknown", assessment: "unknown", indicators: [] },
+    size: {
+      status: "unknown",
+      assessment: "unknown",
+      conflicting: false,
+      indicators: [],
+    },
     headquarters: {
       status: "unknown",
       city: null,
@@ -186,6 +193,55 @@ function fullLadderCaller(
           type: "choice",
           choice: finalChoice,
           confidence: 0.8,
+        },
+      },
+      costUsd: null,
+      model: "jev",
+    };
+  };
+}
+
+function unsupportedExclusionCaller(
+  stage: "r1" | "r3" | "r4",
+): JevLadderCaller {
+  return async (request) => {
+    if (request.rung === "r1") {
+      return {
+        answers: {
+          manufacturer: { type: "noul", noul: stage === "r1" ? 0.05 : 0.9 },
+        },
+        costUsd: null,
+        model: "jev",
+      };
+    }
+    if (request.rung === "r2") {
+      return {
+        answers: {
+          product_vs_process: {
+            type: "choice",
+            choice: "product",
+            confidence: 0.8,
+          },
+        },
+        costUsd: null,
+        model: "jev",
+      };
+    }
+    if (request.rung === "r3") {
+      return {
+        answers: {
+          oversize: { type: "noul", noul: stage === "r3" ? 0.9 : 0.1 },
+        },
+        costUsd: null,
+        model: "jev",
+      };
+    }
+    return {
+      answers: {
+        disposition: {
+          type: "choice",
+          choice: stage === "r4" ? "reject" : "research",
+          confidence: 0.9,
         },
       },
       costUsd: null,
@@ -506,16 +562,6 @@ describe("canonical FAA review input", () => {
     });
     expect(hashFaaReviewInput(revised)).not.toBe(hashFaaReviewInput(original));
   });
-  it("uses one pure current contract for manifests and read-only consumers", () => {
-    const config = resolveEnsembleConfig({});
-    const contract = currentFaaReviewInputContract(config);
-    const manifest = buildFaaReviewInputManifest(packageFixture(), config, 3);
-
-    expect(contract).toEqual({
-      version: manifest.version,
-      policy: manifest.policy,
-    });
-  });
 });
 describe("FAA ensemble CLI selection", () => {
   it.each([
@@ -551,6 +597,8 @@ describe("production JEv ladder engine", () => {
       sourcedResearch({
         ownership: {
           status: "pe_owned",
+          conflicting: false,
+          currentness: "explicit_current_relation",
           owner: "Sponsor",
           year: 2010,
           supportEvidenceIds: ["ownership-row"],
@@ -574,19 +622,29 @@ describe("production JEv ladder engine", () => {
     expect(call).not.toHaveBeenCalled();
   });
 
-  it("does not turn an unsupported ownership label into a deterministic veto", async () => {
+  it("does not carry a legacy historical ownership link into a veto", async () => {
     const call = vi.fn(fullLadderCaller("research"));
     const evidence = packageFixture(
       sourcedResearch({
         ownership: {
           status: "pe_owned",
+          conflicting: false,
           owner: "Unattributed Sponsor",
           year: 2010,
-          supportEvidenceIds: [],
+          supportEvidenceIds: ["ownership-row"],
         },
+        evidenceRefs: [
+          supportRef("domain", "Acme Aero LLC"),
+          supportRef("website", "AX-10 actuator"),
+          supportRef("ownership", "Sponsor acquired Acme in 2020."),
+        ],
       }),
     );
 
+    expect(evidence).toMatchObject({
+      ownershipStatus: "unknown",
+      sourcedSupport: { ownership: false },
+    });
     const result = await evaluateJevLadder({ evidence, call });
 
     expect(result).toMatchObject({
@@ -595,6 +653,133 @@ describe("production JEv ladder engine", () => {
       callCount: 4,
     });
     expect(call).toHaveBeenCalled();
+  });
+
+  it("treats a name-only laboratory marker as an identity lead, not proof", async () => {
+    const call = vi.fn(fullLadderCaller("research"));
+    const evidence = buildEvidencePackage(
+      sourceRow({
+        raw_name: "Precision Devices Laboratory Inc",
+        raw_domain: null,
+      }),
+      null,
+      { sourceResearchStatus: "unavailable" },
+    );
+
+    const result = await evaluateJevLadder({ evidence, call });
+
+    expect(result).toMatchObject({
+      decision: "research",
+      exitRung: "r4",
+      callCount: 4,
+      triage: {
+        productFit: "plausible_supplier",
+        acquisitionReadiness: "needs_research",
+        researchPriority: 2,
+      },
+    });
+    expect(result.triage.reasonCodes).toContain(
+      "name_heuristic_unsubstantiated",
+    );
+    expect(result.triage.gaps.map((gap) => gap.id)).toEqual(
+      expect.arrayContaining([
+        "identity.verification",
+        "product_fit.named_products",
+        "source_coverage.primary_documents",
+        "source_access.resume",
+      ]),
+    );
+    expect(result.triage.reasonCodes).toContain(
+      "source_research_unavailable",
+    );
+  });
+
+  it.each(["r1", "r3", "r4"] as const)(
+    "does not affirm an unsupported %s model exclusion",
+    async (stage) => {
+      const call = vi.fn(unsupportedExclusionCaller(stage));
+      const evidence = buildEvidencePackage(
+        sourceRow({ raw_name: "Neutral Components Inc", raw_domain: null }),
+      );
+
+      const result = await evaluateJevLadder({ evidence, call });
+
+      expect(result).toMatchObject({
+        decision: "research",
+        exitRung: "r4",
+        callCount: 4,
+        triage: {
+          acquisitionReadiness: "needs_research",
+          researchPriority: 2,
+        },
+      });
+      expect(result.triage.reasonCodes).toContain(
+        "model_exclusion_unsubstantiated",
+      );
+      expect(result.records.filter((record) => record.terminal)).toHaveLength(
+        1,
+      );
+    },
+  );
+
+  it("keeps missing model probabilities unknown without favorable defaults", async () => {
+    const base = fullLadderCaller("research");
+    const result = await evaluateJevLadder({
+      evidence: packageFixture(),
+      call: async (request) =>
+        request.rung === "r1" || request.rung === "r3"
+          ? { answers: {}, costUsd: null, model: "jev" }
+          : base(request),
+    });
+
+    expect(result.records.find((record) => record.rung === "r1")).toMatchObject({
+      confidence: null,
+      observation: {
+        value: "unknown",
+        confidence: null,
+        reasonCode: "model_manufacturer_fit_unknown",
+      },
+    });
+    expect(result.records.find((record) => record.rung === "r3")).toMatchObject({
+      confidence: null,
+      observation: {
+        value: "unknown",
+        confidence: null,
+        reasonCode: "model_scale_unknown",
+      },
+    });
+  });
+
+  it("separates a process hypothesis from supported or plausible product fit", async () => {
+    const base = fullLadderCaller("research");
+    const result = await evaluateJevLadder({
+      evidence: buildEvidencePackage(
+        sourceRow({ raw_name: "Neutral Process Company", raw_domain: null }),
+      ),
+      call: async (request) =>
+        request.rung === "r2"
+          ? {
+              answers: {
+                product_vs_process: {
+                  type: "choice",
+                  choice: "process",
+                  confidence: 0.8,
+                },
+              },
+              costUsd: null,
+              model: "jev",
+            }
+          : base(request),
+    });
+
+    expect(result).toMatchObject({
+      decision: "research",
+      triage: {
+        productFit: "unknown",
+        acquisitionReadiness: "needs_research",
+        researchPriority: 3,
+      },
+    });
   });
 
   it.each([
@@ -620,6 +805,8 @@ describe("production JEv ladder engine", () => {
       {
         ownership: {
           status: "public_parent",
+          conflicting: false,
+          currentness: "explicit_current_relation",
           owner: "Public Parent",
           year: null,
           supportEvidenceIds: ["ownership-row"],
@@ -636,12 +823,15 @@ describe("production JEv ladder engine", () => {
       {
         size: {
           status: "supported",
+          conflicting: false,
           assessment: "over_50m",
           indicators: [
             {
               kind: "revenue",
               excerpt: "Revenue exceeded $50 million.",
               evidenceId: "size-row",
+              periodYear: 2025,
+              currentness: "latest_completed_period",
             },
           ],
         },
@@ -663,12 +853,141 @@ describe("production JEv ladder engine", () => {
 
       expect(result).toMatchObject({
         decision: "reject",
+        confidence: null,
         exitRung: "r0-veto",
         callCount: 0,
+        triage: {
+          acquisitionReadiness: "blocked",
+          researchPriority: 1,
+          reasonCodes: expect.arrayContaining(["source_backed_mandate_veto"]),
+        },
       });
       expect(call).not.toHaveBeenCalled();
     },
   );
+
+  it("does not treat a dated revenue claim without currentness as mandate proof", async () => {
+    const evidence = packageFixture(
+      sourcedResearch({
+        size: {
+          status: "supported",
+          conflicting: false,
+          assessment: "over_50m",
+          indicators: [
+            {
+              kind: "revenue",
+              excerpt: "Revenue exceeded $50 million in 2023.",
+              evidenceId: "size-row",
+              periodYear: 2023,
+            },
+          ],
+        },
+        evidenceRefs: [
+          supportRef("domain", "Acme Aero LLC"),
+          supportRef("website", "AX-10 actuator"),
+          supportRef("size", "Revenue exceeded $50 million in 2023."),
+        ],
+      }),
+    );
+    const call = vi.fn(fullLadderCaller("research"));
+
+    expect(evidence).toMatchObject({
+      revenueAssessment: "unknown",
+      sourcedSupport: { size: false },
+    });
+    const result = await evaluateJevLadder({ evidence, call });
+    expect(result).toMatchObject({
+      decision: "research",
+      exitRung: "r4",
+      callCount: 4,
+    });
+    expect(call).toHaveBeenCalledTimes(4);
+  });
+
+  it("surfaces durable ownership, size, and HQ evidence conflicts", async () => {
+    const evidence = packageFixture(
+      sourcedResearch({
+        ownership: {
+          status: "public_parent",
+          conflicting: true,
+          currentness: "unknown",
+          owner: "Contested Parent",
+          year: 2024,
+          supportEvidenceIds: ["ownership-row"],
+        },
+        size: {
+          status: "supported",
+          conflicting: true,
+          assessment: "over_50m",
+          indicators: [
+            {
+              kind: "revenue",
+              excerpt: "A source reports revenue above $50 million.",
+              evidenceId: "size-row",
+              periodYear: null,
+              currentness: "undated_current",
+            },
+          ],
+        },
+        headquarters: {
+          status: "conflicting",
+          city: null,
+          state: null,
+          country: null,
+          supportEvidenceIds: ["hq-row"],
+        },
+        evidenceRefs: [
+          supportRef("domain", "Acme Aero LLC"),
+          supportRef("website", "AX-10 actuator"),
+          supportRef("ownership", "Ownership reports conflict."),
+          supportRef("size", "Revenue reports conflict."),
+          supportRef("hq", "Headquarters reports conflict."),
+        ],
+      }),
+    );
+    const call = vi.fn(fullLadderCaller("research"));
+
+    expect(evidence).toMatchObject({
+      ownershipStatus: "unknown",
+      revenueAssessment: "unknown",
+      sourcedSupport: { ownership: false, size: false },
+      evidenceConflicts: {
+        ownership: true,
+        size: true,
+        headquarters: true,
+      },
+    });
+    const result = await evaluateJevLadder({ evidence, call });
+    expect(result).toMatchObject({
+      decision: "research",
+      exitRung: "r4",
+      callCount: 4,
+      triage: {
+        acquisitionReadiness: "needs_research",
+        reasonCodes: expect.arrayContaining([
+          "source_ownership_conflict",
+          "source_revenue_conflict",
+          "source_headquarters_conflict",
+        ]),
+      },
+    });
+    for (const [gapId, contentSha256, stage] of [
+      ["ownership.current_control", "ownership-sha256", "ownership"],
+      ["revenue.annual_below_50m", "size-sha256", "size"],
+      ["headquarters.us_location", "hq-sha256", "hq"],
+    ] as const) {
+      expect(result.triage.gaps.find((gap) => gap.id === gapId)).toMatchObject({
+        supportingSources: [],
+        conflictingSources: expect.arrayContaining([
+          expect.objectContaining({
+            kind: "source_document",
+            contentSha256,
+            stage,
+          }),
+        ]),
+      });
+    }
+  });
 
   it("keeps model HP as research while ownership, HQ, or revenue are unknown", async () => {
     const result = await evaluateJevLadder({
@@ -680,29 +999,177 @@ describe("production JEv ladder engine", () => {
       decision: "research",
       exitRung: "r4",
       callCount: 4,
+      triage: {
+        productFit: "supported_product",
+        acquisitionReadiness: "needs_research",
+        researchPriority: 1,
+        reasonCodes: expect.arrayContaining([
+          "supported_named_product",
+          "acquisition_facts_incomplete",
+        ]),
+      },
     });
     expect(result.records.at(-1)).toMatchObject({
       decision: "research",
       terminal: true,
     });
+    expect(result.triage.observations).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "source_supported_fact",
+          field: "product_fit",
+          value: "supported_product",
+          confidence: null,
+          sourceReferences: expect.arrayContaining([
+            expect.objectContaining({
+              kind: "source_document",
+              stage: "website",
+              role: "support",
+            }),
+          ]),
+        }),
+      ]),
+    );
+  });
+
+  it("grounds product triage claims in retained named-product proof instead of website hints", async () => {
+    const namedProductQuote =
+      "Acme Aero manufactures the AX-10 actuator.";
+    const unrelatedProductHint =
+      "We provide precision machining services and value-added assembly services for demanding programs.";
+    const research = sourcedResearch({
+      website: {
+        status: "supported",
+        offering: "products_menu",
+        excerpts: [namedProductQuote, unrelatedProductHint].join(" "),
+        productHints: [namedProductQuote, unrelatedProductHint],
+        namedProductEvidenceIds: ["named-product-row"],
+      },
+      evidenceRefs: [
+        supportRef("domain", "Acme Aero LLC"),
+        supportRef("website", namedProductQuote, {
+          evidenceId: "named-product-row",
+        }),
+        supportRef("website", namedProductQuote, {
+          evidenceId: "duplicate-quote-context-row",
+          url: "https://context.example/copied-product-claim",
+          contentSha256: "duplicate-quote-sha256",
+        }),
+        supportRef("website", unrelatedProductHint, {
+          evidenceId: "website-context-row",
+        }),
+      ],
+    });
+    const result = await evaluateJevLadder({
+      evidence: packageFixture(research),
+      call: fullLadderCaller("high_priority"),
+    });
+
+    expect(result.triage).toMatchObject({
+      productFit: "supported_product",
+      acquisitionReadiness: "needs_research",
+    });
+    const productObservation = result.triage.observations.find(
+      (observation) =>
+        observation.kind === "source_supported_fact" &&
+        observation.field === "product_fit",
+    );
+    expect(productObservation?.explanation).toContain(namedProductQuote);
+    expect(productObservation?.explanation).not.toContain(
+      unrelatedProductHint,
+    );
+    expect(productObservation?.sourceReferences).toEqual([
+      expect.objectContaining({
+        kind: "source_document",
+        url: "https://acme.example/evidence/website",
+        contentSha256: "website-sha256",
+        quote: namedProductQuote,
+      }),
+    ]);
+    expect(result.triage.explanation).toContain(namedProductQuote);
+    expect(result.triage.explanation).not.toContain(unrelatedProductHint);
+  });
+
+  it("does not borrow duplicate quotes when named-product provenance is unusable", async () => {
+    const namedProductQuote =
+      "Acme Aero manufactures the AX-10 actuator.";
+    const unsupportedProductHint =
+      "We provide precision machining services and value-added assembly services for demanding programs.";
+    const research = sourcedResearch({
+      website: {
+        status: "supported",
+        offering: "products_menu",
+        excerpts: [namedProductQuote, unsupportedProductHint].join(" "),
+        productHints: [namedProductQuote, unsupportedProductHint],
+        namedProductEvidenceIds: ["orphaned-product-row"],
+      },
+      evidenceRefs: [
+        supportRef("domain", "Acme Aero LLC"),
+        supportRef("website", namedProductQuote, {
+          evidenceId: "orphaned-product-row",
+          url: " ",
+          contentSha256: " ",
+        }),
+        supportRef("website", namedProductQuote, {
+          evidenceId: "duplicate-quote-context-row",
+          url: "https://context.example/copied-product-claim",
+          contentSha256: "duplicate-quote-sha256",
+        }),
+        supportRef("website", unsupportedProductHint, {
+          evidenceId: "website-context-row",
+        }),
+      ],
+    });
+    const evidence = packageFixture(research);
+    const result = await evaluateJevLadder({
+      evidence,
+      call: fullLadderCaller("high_priority"),
+    });
+
+    expect(evidence).toMatchObject({
+      sourcedSupport: { product: true },
+      productEvidence: [namedProductQuote, unsupportedProductHint],
+      namedProductProofs: [],
+    });
+    expect(result.triage).toMatchObject({
+      productFit: "plausible_supplier",
+      acquisitionReadiness: "needs_research",
+      gaps: expect.arrayContaining([
+        expect.objectContaining({ id: "product_fit.named_products" }),
+      ]),
+    });
+    expect(
+      result.triage.observations.some(
+        (observation) =>
+          observation.kind === "source_supported_fact" &&
+          observation.field === "product_fit",
+      ),
+    ).toBe(false);
+    expect(result.triage.explanation).not.toContain(namedProductQuote);
+    expect(result.triage.explanation).not.toContain(unsupportedProductHint);
   });
 
   it("retains HP only with sourced positive mandate evidence", async () => {
     const research = sourcedResearch({
       ownership: {
         status: "independent",
+        conflicting: false,
+        currentness: "explicit_current_independence",
         owner: null,
         year: null,
         supportEvidenceIds: ["ownership-row"],
       },
       size: {
         status: "supported",
+        conflicting: false,
         assessment: "under_50m",
         indicators: [
           {
             kind: "revenue",
             excerpt: "The company reports revenue below $50 million.",
             evidenceId: "size-row",
+            periodYear: 2025,
+            currentness: "latest_completed_period",
           },
         ],
       },
@@ -727,7 +1194,15 @@ describe("production JEv ladder engine", () => {
       call: fullLadderCaller("high_priority"),
     });
 
-    expect(result.decision).toBe("high_priority");
+    expect(result).toMatchObject({
+      decision: "high_priority",
+      triage: {
+        productFit: "supported_product",
+        acquisitionReadiness: "ready",
+        researchPriority: 1,
+        gaps: [],
+      },
+    });
   });
 
   it("counts only a non-NULL terminal rung as the terminal judgment", async () => {
@@ -848,20 +1323,6 @@ describe("production JEv ladder engine", () => {
   });
 });
 
-describe("ensemble configuration", () => {
-  it("uses intended defaults when optional numeric env values are unset", () => {
-    expect(resolveEnsembleConfig({})).toMatchObject({
-      jevAuditSampleRate: 0.05,
-    });
-    expect(
-      resolveEnsembleConfig({
-        JEV_AUDIT_SAMPLE_RATE: "",
-      }),
-    ).toMatchObject({
-      jevAuditSampleRate: 0.05,
-    });
-  });
-});
 
 function reviewClaim(
   phase: "jev" | "muse",
@@ -963,66 +1424,6 @@ describe("FAA recorded-spend budget gates", () => {
     );
   });
 
-  it("defers a Muse claim when accounting is unreadable", async () => {
-    const config = unitReviewConfig();
-    const evidence = packageFixture();
-    const manifest = buildFaaReviewInputManifest(evidence, config, 0);
-    const inputHash = hashFaaReviewInput(manifest);
-    const claim = reviewClaim("muse", {
-      inputHash,
-      inputManifest: manifest,
-      jevEvaluationId: "00000000-0000-0000-0000-000000000010",
-    });
-    signalReviewMocks.claimSignalReviews.mockResolvedValue([claim]);
-    const db = {
-      execute: vi
-        .fn()
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [sourceRow()] })
-        .mockResolvedValueOnce({
-          rows: [
-            {
-              id: claim.jevEvaluationId,
-              decision: "research",
-              confidence: "0.8",
-              input_hash: inputHash,
-            },
-          ],
-        }),
-    };
-    const evaluateModel = vi.fn();
-
-    const summary = await runMuseReviews(
-      db as never,
-      { limit: 1, concurrency: 1 },
-      {
-        config,
-        evaluateModel,
-        getDailySpendUsd: vi.fn(async () => {
-          throw new Error("database unavailable");
-        }),
-        dailyBudgetCapUsd: () => 1,
-      },
-    );
-
-    expect(summary).toEqual({
-      verified: 0,
-      confirmed: 0,
-      overruled: 0,
-      deferred: 1,
-      costUsd: 0,
-      errors: 0,
-      stale: 0,
-    });
-    expect(evaluateModel).not.toHaveBeenCalled();
-    expect(signalReviewMocks.commitSignalReview).not.toHaveBeenCalled();
-    expect(signalReviewMocks.failSignalReview).toHaveBeenCalledWith(
-      db,
-      expect.objectContaining({ signalId: claim.signalId, attemptCount: 0 }),
-      expect.stringContaining("accounting unavailable"),
-      { deferred: true },
-    );
-  });
 
   it("keeps an observed first-rung charge when a later JEv rung fails", async () => {
     const claim = reviewClaim("jev");
@@ -1146,14 +1547,15 @@ describe("FAA recorded-spend budget gates", () => {
         .mockResolvedValueOnce({ rows: [sourceRow()] }),
     };
 
+    const ladder = fullLadderCaller("research");
     const summary = await runJevReviews(
       db as never,
       { limit: 1, concurrency: 1 },
       {
         config: unitReviewConfig(),
-        callJev: async () => ({
-          answers: { manufacturer: { type: "noul", noul: 0.1 } },
-          costUsd: 0.2,
+        callJev: async (request) => ({
+          ...(await ladder(request)),
+          costUsd: request.rung === "r1" ? 0.2 : null,
           model: "typesafe/jev-returned",
         }),
         getDailySpendUsd: async () => 0,
@@ -1169,376 +1571,16 @@ describe("FAA recorded-spend budget gates", () => {
     });
     expect(
       signalReviewMocks.insertFaaReviewModelUsageReceipt,
-    ).toHaveBeenCalledOnce();
+    ).toHaveBeenCalledTimes(4);
   });
 
-  it("records Muse spend before a later source/currentness failure", async () => {
-    const config = unitReviewConfig();
-    const evidence = packageFixture();
-    const manifest = buildFaaReviewInputManifest(evidence, config, 0);
-    const inputHash = hashFaaReviewInput(manifest);
-    const claim = reviewClaim("muse", {
-      inputHash,
-      inputManifest: manifest,
-      jevEvaluationId: "00000000-0000-0000-0000-000000000010",
-    });
-    signalReviewMocks.claimSignalReviews.mockResolvedValue([claim]);
-    const db = {
-      execute: vi
-        .fn()
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [sourceRow()] })
-        .mockResolvedValueOnce({
-          rows: [
-            {
-              id: claim.jevEvaluationId,
-              decision: "research",
-              confidence: "80",
-              input_hash: inputHash,
-            },
-          ],
-        })
-        .mockResolvedValueOnce({ rows: [] }),
-    };
-
-    const summary = await runMuseReviews(
-      db as never,
-      { limit: 1, concurrency: 1 },
-      {
-        config,
-        evaluateModel: async () => ({
-          ok: true,
-          result: {
-            decision: "research",
-            confidence: 80,
-            company_type: "manufacturer",
-            aerospace_defense_relevance: "moderate",
-            manufacturing_evidence: "moderate",
-            thesis_signals: [],
-            disqualifiers: [],
-            missing_evidence: [],
-            false_negative_risk: "medium",
-            reason: "controlled response",
-            proprietary_product_evidence: "weak",
-            proprietary_process_only: false,
-            website_products_menu: true,
-            size_indicators: [],
-            likely_oversize: false,
-            suggested_priority: 2,
-          },
-          rawResponse: "{}",
-          tokens: { input: 1, output: 1, total: 2 },
-          costUsd: 0.3,
-          returnedModel: "meta/muse-returned",
-        }),
-        getDailySpendUsd: async () => 0,
-        dailyBudgetCapUsd: () => 1,
-      },
-    );
-
-    expect(summary).toEqual({
-      verified: 0,
-      confirmed: 0,
-      overruled: 0,
-      costUsd: 0.3,
-      deferred: 0,
-      errors: 0,
-      stale: 1,
-    });
-    expect(
-      signalReviewMocks.insertFaaReviewModelUsageReceipt,
-    ).toHaveBeenCalledWith(
-      db,
-      expect.objectContaining({
-        sourceSignalId: claim.signalId,
-        configuredModel: config.modelA,
-        returnedModel: "meta/muse-returned",
-        phase: "muse",
-        costUsd: "0.3",
-      }),
-    );
-    expect(signalReviewMocks.commitSignalReview).not.toHaveBeenCalled();
-  });
-
-  it("records known Muse costs when an injected adapter throws", async () => {
-    const config = unitReviewConfig();
-    const evidence = packageFixture();
-    const manifest = buildFaaReviewInputManifest(evidence, config, 0);
-    const inputHash = hashFaaReviewInput(manifest);
-    const claim = reviewClaim("muse", {
-      inputHash,
-      inputManifest: manifest,
-      jevEvaluationId: "00000000-0000-0000-0000-000000000010",
-    });
-    signalReviewMocks.claimSignalReviews.mockResolvedValue([claim]);
-    const db = {
-      execute: vi
-        .fn()
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [sourceRow()] })
-        .mockResolvedValueOnce({
-          rows: [
-            {
-              id: claim.jevEvaluationId,
-              decision: "research",
-              confidence: "80",
-              input_hash: inputHash,
-            },
-          ],
-        }),
-    };
-
-    const summary = await runMuseReviews(
-      db as never,
-      { limit: 1, concurrency: 1 },
-      {
-        config,
-        evaluateModel: async () => {
-          throw new OpenRouterClientError("invalid_structured_output", false, [
-            {
-              attempt: 1,
-              model: "meta/muse-observed-first",
-              provider: "controlled-test",
-              status: "schema_error",
-              httpStatus: 200,
-              promptSha256: "prompt-sha",
-              responseSha256: "first-response-sha",
-              inputTokens: 2,
-              outputTokens: 2,
-              totalTokens: 4,
-              costUsd: 0.11,
-              latencyMs: 1,
-              retryDelayMs: null,
-              errorCode: "invalid_structured_output",
-            },
-            {
-              attempt: 2,
-              model: "meta/muse-observed-final",
-              provider: "controlled-test",
-              status: "schema_error",
-              httpStatus: 200,
-              promptSha256: "prompt-sha",
-              responseSha256: "final-response-sha",
-              inputTokens: 2,
-              outputTokens: 2,
-              totalTokens: 4,
-              costUsd: 0.11,
-              latencyMs: 1,
-              retryDelayMs: null,
-              errorCode: "invalid_structured_output",
-            },
-          ]);
-        },
-        getDailySpendUsd: async () => 0,
-        dailyBudgetCapUsd: () => 1,
-      },
-    );
-
-    expect(summary).toEqual({
-      verified: 0,
-      confirmed: 0,
-      overruled: 0,
-      costUsd: 0.22,
-      deferred: 0,
-      errors: 1,
-      stale: 0,
-    });
-    expect(
-      signalReviewMocks.insertFaaReviewModelUsageReceipt,
-    ).toHaveBeenCalledOnce();
-    expect(
-      signalReviewMocks.insertFaaReviewModelUsageReceipt,
-    ).toHaveBeenCalledWith(
-      db,
-      expect.objectContaining({
-        sourceSignalId: claim.signalId,
-        configuredModel: config.modelA,
-        returnedModel: "meta/muse-observed-final",
-        phase: "muse",
-        costUsd: "0.22",
-      }),
-    );
-    expect(signalReviewMocks.failSignalReview).toHaveBeenCalledWith(
-      db,
-      claim,
-      "OpenRouter returned invalid structured output",
-    );
-    expect(signalReviewMocks.commitSignalReview).not.toHaveBeenCalled();
-  });
-
-  it("defers quota-exhausted Muse while retaining billed attempts and JEv linkage", async () => {
-    const config = unitReviewConfig();
-    const evidence = packageFixture();
-    const manifest = buildFaaReviewInputManifest(evidence, config, 0);
-    const inputHash = hashFaaReviewInput(manifest);
-    const claim = reviewClaim("muse", {
-      inputHash,
-      inputManifest: manifest,
-      jevEvaluationId: "00000000-0000-0000-0000-000000000010",
-    });
-    signalReviewMocks.claimSignalReviews.mockResolvedValue([claim]);
-    const db = {
-      execute: vi
-        .fn()
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [sourceRow()] })
-        .mockResolvedValueOnce({
-          rows: [
-            {
-              id: claim.jevEvaluationId,
-              decision: "research",
-              confidence: "80",
-              input_hash: inputHash,
-            },
-          ],
-        }),
-    };
-
-    const summary = await runMuseReviews(
-      db as never,
-      { limit: 1, concurrency: 1 },
-      {
-        config,
-        evaluateModel: async () => {
-          throw new OpenRouterClientError("quota_exhausted", false, [
-            {
-              attempt: 1,
-              model: "meta/muse-billed-before-quota",
-              provider: "controlled-test",
-              status: "schema_error",
-              httpStatus: 200,
-              promptSha256: "prompt-sha",
-              responseSha256: "billed-response-sha",
-              inputTokens: 2,
-              outputTokens: 2,
-              totalTokens: 4,
-              costUsd: 0.11,
-              latencyMs: 1,
-              retryDelayMs: null,
-              errorCode: "invalid_structured_output",
-            },
-            {
-              attempt: 2,
-              model: config.modelA,
-              provider: null,
-              status: "failed",
-              httpStatus: 403,
-              promptSha256: "prompt-sha",
-              responseSha256: null,
-              inputTokens: null,
-              outputTokens: null,
-              totalTokens: null,
-              costUsd: null,
-              latencyMs: 1,
-              retryDelayMs: null,
-              errorCode: "quota_exhausted",
-            },
-          ]);
-        },
-        getDailySpendUsd: async () => 0,
-        dailyBudgetCapUsd: () => 1,
-      },
-    );
-
-    expect(summary).toEqual({
-      verified: 0,
-      confirmed: 0,
-      overruled: 0,
-      costUsd: 0.11,
-      deferred: 1,
-      errors: 0,
-      stale: 0,
-    });
-    expect(
-      signalReviewMocks.insertFaaReviewModelUsageReceipt,
-    ).toHaveBeenCalledWith(
-      db,
-      expect.objectContaining({
-        sourceSignalId: claim.signalId,
-        returnedModel: "meta/muse-billed-before-quota",
-        phase: "muse",
-        costUsd: "0.11",
-      }),
-    );
-    expect(signalReviewMocks.commitSignalReview).not.toHaveBeenCalled();
-  });
-
-  it("keeps an unknown failed Muse cost nullable", async () => {
-    const config = unitReviewConfig();
-    const evidence = packageFixture();
-    const manifest = buildFaaReviewInputManifest(evidence, config, 0);
-    const inputHash = hashFaaReviewInput(manifest);
-    const claim = reviewClaim("muse", {
-      inputHash,
-      inputManifest: manifest,
-      jevEvaluationId: "00000000-0000-0000-0000-000000000010",
-    });
-    signalReviewMocks.claimSignalReviews.mockResolvedValue([claim]);
-    const db = {
-      execute: vi
-        .fn()
-        .mockResolvedValueOnce({ rows: [] })
-        .mockResolvedValueOnce({ rows: [sourceRow()] })
-        .mockResolvedValueOnce({
-          rows: [
-            {
-              id: claim.jevEvaluationId,
-              decision: "research",
-              confidence: "80",
-              input_hash: inputHash,
-            },
-          ],
-        }),
-    };
-
-    const summary = await runMuseReviews(
-      db as never,
-      { limit: 1, concurrency: 1 },
-      {
-        config,
-        evaluateModel: async () => {
-          throw new OpenRouterClientError("network_error", true, [
-            {
-              attempt: 1,
-              model: config.modelA,
-              provider: null,
-              status: "transient_error",
-              httpStatus: null,
-              promptSha256: "prompt-sha",
-              responseSha256: null,
-              inputTokens: null,
-              outputTokens: null,
-              totalTokens: null,
-              costUsd: null,
-              latencyMs: 1,
-              retryDelayMs: null,
-              errorCode: "network_error",
-            },
-          ]);
-        },
-        getDailySpendUsd: async () => 0,
-        dailyBudgetCapUsd: () => 1,
-      },
-    );
-
-    expect(summary).toMatchObject({ costUsd: 0, errors: 1 });
-    expect(
-      signalReviewMocks.insertFaaReviewModelUsageReceipt,
-    ).toHaveBeenCalledWith(
-      db,
-      expect.objectContaining({
-        returnedModel: null,
-        phase: "muse",
-        costUsd: null,
-      }),
-    );
-    expect(signalReviewMocks.commitSignalReview).not.toHaveBeenCalled();
-  });
 
   it("preserves deterministic JEv progress when no paid call is needed", async () => {
     const research = sourcedResearch({
       ownership: {
         status: "public_parent",
+        conflicting: false,
+        currentness: "explicit_current_relation",
         owner: "Public Parent",
         year: null,
         supportEvidenceIds: ["ownership-row"],
@@ -1580,5 +1622,35 @@ describe("FAA recorded-spend budget gates", () => {
     expect(readSpend).not.toHaveBeenCalled();
     expect(callJev).not.toHaveBeenCalled();
     expect(signalReviewMocks.commitSignalReview).toHaveBeenCalledOnce();
+  });
+});
+
+describe("bounded Muse execution modes", () => {
+  it("does no reconciliation, claim, planner, or provider work when disabled", async () => {
+    const db = {
+      execute: vi.fn(() => {
+        throw new Error("disabled mode touched the database");
+      }),
+    };
+    const callAnalystModel = vi.fn();
+
+    await expect(
+      runMuseReviews(
+        db as never,
+        { analystMode: "disabled", limit: 1, concurrency: 1 },
+        { callAnalystModel },
+      ),
+    ).resolves.toEqual({
+      verified: 0,
+      confirmed: 0,
+      overruled: 0,
+      evidenceRequeued: 0,
+      costUsd: 0,
+      deferred: 0,
+      errors: 0,
+      stale: 0,
+    });
+    expect(db.execute).not.toHaveBeenCalled();
+    expect(callAnalystModel).not.toHaveBeenCalled();
   });
 });

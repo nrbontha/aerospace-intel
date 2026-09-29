@@ -6,6 +6,26 @@ const blankToUndefined = (value: unknown): unknown =>
 const optionalTrimmedString = (schema: z.ZodString) =>
   z.preprocess(blankToUndefined, schema.trim().optional());
 
+const optionalUuidList = z.preprocess(
+  (value) => {
+    if (value === undefined) return undefined;
+    if (typeof value !== "string") return value;
+    if (value.trim() === "") return [];
+    return value.split(",").map((entry) => entry.trim());
+  },
+  z
+    .array(z.string().uuid())
+    .superRefine((values, context) => {
+      if (new Set(values).size !== values.length) {
+        context.addIssue({
+          code: "custom",
+          message: "UUID list must not contain duplicates",
+        });
+      }
+    })
+    .optional(),
+);
+
 const positiveNumberWithDefault = (defaultValue: number) =>
   z.preprocess(
     blankToUndefined,
@@ -109,10 +129,11 @@ const serverEnvSchema = z
     OPENROUTER_MODEL_FALLBACK: modelId.default("google/gemini-3.7-flash"),
     FAA_MODEL_A: modelId.default("meta/muse-spark-1.3-contributor"),
     FAA_JEV_MODEL: modelId.default("typesafe/jev-1.13"),
-    JEV_AUDIT_SAMPLE_RATE: z.preprocess(
-      blankToUndefined,
-      z.coerce.number().finite().min(0).max(1).default(0.05),
-    ),
+    FAA_ANALYST_MODE: z
+      .enum(["disabled", "free_only", "bounded_paid"])
+      .default("disabled"),
+    FAA_JEV_SOURCE_SIGNAL_IDS: optionalUuidList,
+    EXA_BUDGET_SCOPE_ID: optionalTrimmedString(z.string().min(1)),
     OPENROUTER_MAX_COST_PER_RUN_USD: positiveNumberWithDefault(2),
     OPENROUTER_MAX_COST_PER_DAY_USD: positiveNumberWithDefault(15),
     RESEARCH_MAX_TOOL_CALLS: positiveIntegerWithDefault(50, 10_000),
@@ -142,6 +163,18 @@ const serverEnvSchema = z
           path: ["SESSION_SECRET"],
         });
       }
+    }
+
+    if (
+      env.FAA_ANALYST_MODE !== "disabled" &&
+      env.EXA_BUDGET_SCOPE_ID === undefined
+    ) {
+      context.addIssue({
+        code: "custom",
+        message:
+          "EXA_BUDGET_SCOPE_ID is required when FAA_ANALYST_MODE enables Muse",
+        path: ["EXA_BUDGET_SCOPE_ID"],
+      });
     }
 
     if (env.NODE_ENV === "development" && !isLoopbackAppUrl(env.APP_URL)) {

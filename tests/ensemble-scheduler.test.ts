@@ -16,11 +16,9 @@ const config: FunnelStageConfig = {
   scheduleMinutes: 30,
   batchLimit: 10,
   concurrency: 2,
-  delayMs: 0,
   ladderConcurrency: 2,
   verifyLimit: 10,
-  evidenceLimit: 5,
-  evidenceConcurrency: 2,
+  analystMode: "disabled",
 };
 
 const db = {} as Database;
@@ -138,8 +136,6 @@ describe("ensemble scheduler stage isolation", () => {
       concurrency: 0.5,
       ladderConcurrency: 0.5,
       verifyLimit: 0.5,
-      evidenceLimit: 0.5,
-      evidenceConcurrency: 0.5,
     });
 
     for (const value of [
@@ -149,11 +145,10 @@ describe("ensemble scheduler stage isolation", () => {
       resolved.concurrency,
       resolved.ladderConcurrency,
       resolved.verifyLimit,
-      resolved.evidenceLimit,
-      resolved.evidenceConcurrency,
     ]) {
       expect(Number.isInteger(value)).toBe(true);
       expect(value).toBeGreaterThanOrEqual(1);
     }
+    expect(resolved.analystMode).toBe("disabled");
   });
 });

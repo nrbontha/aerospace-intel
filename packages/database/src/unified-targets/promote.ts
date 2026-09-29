@@ -188,8 +188,8 @@ async function ingestWhileCurrent(
         AND st.input_manifest->'policy'->>'jevModel' = ${expectedContract.policy.jevModel}
         AND st.input_manifest->'policy'->>'museModel' = ${expectedContract.policy.museModel}
         AND st.input_manifest->'policy'->>'evaluatorPrompt' = ${expectedContract.policy.evaluatorPrompt}
-        AND st.input_manifest->'policy'->>'jevAuditSampleRate'
-          = ${String(expectedContract.policy.jevAuditSampleRate)}
+        AND st.input_manifest->'policy'->>'analyst'
+          = ${expectedContract.policy.analyst}
       FOR UPDATE OF st
     `);
     if (
@@ -285,7 +285,7 @@ export async function promoteEnsembleLeads(
        AND st.input_manifest->'policy'->>'jevModel' = $4
        AND st.input_manifest->'policy'->>'museModel' = $5
        AND st.input_manifest->'policy'->>'evaluatorPrompt' = $6
-       AND st.input_manifest->'policy'->>'jevAuditSampleRate' = $7
+       AND st.input_manifest->'policy'->>'analyst' = $7
      ORDER BY r.final_confidence DESC NULLS LAST, r.updated_at ASC
      LIMIT $1`,
     [
@@ -295,7 +295,7 @@ export async function promoteEnsembleLeads(
       expectedContract.policy.jevModel,
       expectedContract.policy.museModel,
       expectedContract.policy.evaluatorPrompt,
-      String(expectedContract.policy.jevAuditSampleRate),
+      expectedContract.policy.analyst,
     ],
   );
 

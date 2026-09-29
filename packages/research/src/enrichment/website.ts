@@ -32,9 +32,9 @@ import { getDatabase, type Database } from "@asi/database/client";
 import { normalizeUnifiedName } from "@asi/database";
 
 import {
-  canSpendExa,
-  recordExaSpendUsd,
-  EXA_CONTENTS_COST_USD,
+  exaBudgetScopeId,
+  executeAccountedExaContents,
+  type ExaAccountingContext,
 } from "./exa-budget.js";
 import { resolveDocumentId, resolveExaSourceId } from "./exa-persist.js";
 import {
@@ -106,7 +106,7 @@ export interface WebsiteFetchedPage {
 export interface WebsiteFetchResult extends WebsiteEvidence {
   readonly outcome: WebsiteFetchOutcome;
   readonly errorCode: ExaSearchErrorCode | null;
-  /** Conservative accounting: EXA_CONTENTS_COST_USD per page returned. */
+  /** Provider-reported cost when known; zero does not assert a free request. */
   readonly costUsd: number;
   readonly fetchesAttempted: number;
   readonly fetchesSucceeded: number;
@@ -125,7 +125,10 @@ export const EMPTY_WEBSITE_EVIDENCE: WebsiteEvidence = {
 };
 
 export interface FetchWebsiteEvidenceOptions {
-  readonly client?: Pick<ExaSearchClient, "fetchContents"> | undefined;
+  readonly client?:
+    | Pick<ExaSearchClient, "fetchContentsWithMetadata">
+    | undefined;
+  readonly accounting?: ExaAccountingContext | undefined;
   readonly fetch?: typeof fetch | undefined;
   /** Already-safe first-party pages from official-site identity retrieval. */
   readonly sourcePages?: readonly SafeFetchResult[] | undefined;
@@ -1029,11 +1032,11 @@ export async function fetchWebsiteEvidence(
 
   const exaUrls = exaCandidateUrls.slice(0, MAX_PAGES);
   if (exaUrls.length === 0) return finish("no_content", []);
-  if (apiKey.trim().length === 0 && options.client === undefined) {
+  if (
+    (apiKey.trim().length === 0 && options.client === undefined) ||
+    options.accounting === undefined
+  ) {
     return finish("configuration_error", []);
-  }
-  if (!canSpendExa(exaUrls.length * EXA_CONTENTS_COST_USD)) {
-    return finish("budget_limited", []);
   }
   const client =
     options.client ??
@@ -1041,10 +1044,25 @@ export async function fetchWebsiteEvidence(
       apiKey,
       ...(options.fetch === undefined ? {} : { fetch: options.fetch }),
     });
-  fetchesAttempted += exaUrls.length;
+  let providerCostUsd: string | null;
   let results: readonly { url: string; title: string; text: string }[];
+  fetchesAttempted += exaUrls.length;
   try {
-    results = await client.fetchContents(exaUrls);
+    const accounted = await executeAccountedExaContents(
+      options.accounting,
+      client,
+      exaUrls,
+    );
+    if (accounted.outcome === "deferred") {
+      return finish("budget_limited", []);
+    }
+    if (accounted.outcome === "ambiguous") {
+      return finish("retryable_error", []);
+    }
+    results = accounted.results;
+    providerCostUsd = accounted.providerCostUsd;
+    costUsd =
+      providerCostUsd === null ? 0 : Number.parseFloat(providerCostUsd);
   } catch (error) {
     if (error instanceof ExaApiKeyMissingError) {
       return finish("configuration_error", []);
@@ -1058,8 +1076,6 @@ export async function fetchWebsiteEvidence(
     }
     return finish("retryable_error", []);
   }
-  costUsd = results.length * EXA_CONTENTS_COST_USD;
-  if (costUsd > 0) recordExaSpendUsd(costUsd);
   const retrievedAt = new Date().toISOString();
   const exaPages = results
     .filter(
@@ -1094,6 +1110,7 @@ export const WEBSITE_ENRICHMENT_TICK_CAP = 10;
 export interface WebsiteEnrichmentCandidate {
   readonly companyName: string;
   readonly domain: string | null;
+  readonly sourceSignalId: string;
 }
 
 export interface WebsiteEnrichmentOptions {
@@ -1204,8 +1221,9 @@ export async function selectWebsiteEnrichmentCandidates(
     company_name: string;
     domain: string | null;
     website_url: string | null;
+    signal_id: string;
   }>(sql`
-    SELECT company_name, domain, website_url
+    SELECT company_name, domain, website_url, signal_id
     FROM unified_targets ut
     WHERE (
         tier IN ('needs_research', 'evaluate', 'high_interest')
@@ -1213,6 +1231,7 @@ export async function selectWebsiteEnrichmentCandidates(
       )
       AND COALESCE(domain, website_url) IS NOT NULL
       AND COALESCE(domain, website_url) <> ''
+      AND signal_id IS NOT NULL
       AND (
         NOT EXISTS (
           SELECT 1 FROM evidence e
@@ -1246,6 +1265,7 @@ export async function selectWebsiteEnrichmentCandidates(
   return result.rows.map((row) => ({
     companyName: row.company_name,
     domain: row.domain ?? row.website_url,
+    sourceSignalId: row.signal_id,
   }));
 }
 
@@ -1279,14 +1299,21 @@ export async function runWebsiteEnrichment(
     let skipped: string | null =
       candidates.length === 0 ? "no_candidates" : null;
     for (const candidate of candidates) {
-      if (candidate.domain === null || !canSpendExa(EXA_CONTENTS_COST_USD)) {
-        skipped = "budget_exhausted";
-        break;
+      if (candidate.domain === null) {
+        skipped = "no_domain";
+        continue;
       }
       const outcome = await fetchWebsiteEvidence(
         apiKey,
         candidate.domain,
         candidate.companyName,
+        {
+          accounting: {
+            db,
+            budgetScopeId: exaBudgetScopeId(),
+            sourceSignalId: candidate.sourceSignalId,
+          },
+        },
       );
       checked += 1;
       costUsd += outcome.costUsd;

@@ -341,7 +341,7 @@ const expectedReviewContract = {
     jevModel: "jev-current",
     museModel: "muse-current",
     evaluatorPrompt: "faa_evaluator_v1",
-    jevAuditSampleRate: 0.05,
+    analyst: "analyst-current",
   },
 } as const;
 

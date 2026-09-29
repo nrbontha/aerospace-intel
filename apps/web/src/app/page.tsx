@@ -5,5 +5,5 @@ import { getCurrentUser } from "@/lib/auth";
 export default async function HomePage() {
   const user = await getCurrentUser();
 
-  redirect(user ? "/feed" : "/login");
+  redirect(user ? "/signals" : "/login");
 }

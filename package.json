@@ -30,6 +30,7 @@
     "ops:restore": "bash scripts/restore.sh",
     "ops:rehearse": "bash scripts/restore-rehearsal.sh",
     "ops:status": "bash -c 'set -a; [ -f .env.local ] && . ./.env.local; set +a; exec npx tsx scripts/ops-status.ts'",
+    "ops:research-scope": "bash -c 'set -a; [ -f .env.local ] && . ./.env.local; set +a; exec npx tsx scripts/research-provider-scope.mts \"$@\"' --",
     "start:web": "npm run db:migrate && npm run start --workspace @asi/web -- --hostname 0.0.0.0 --port ${PORT:-3000}",
     "start:worker": "npm run db:migrate && npm run start --workspace @asi/worker"
   },

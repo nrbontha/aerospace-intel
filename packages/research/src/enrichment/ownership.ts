@@ -19,9 +19,9 @@ import {
   type SafeFetchResult,
 } from "../safe-fetch.js";
 import {
-  canSpendExa,
-  EXA_SEARCH_COST_USD,
-  recordExaSpendUsd,
+  exaBudgetScopeId,
+  executeAccountedExaSearch,
+  type ExaAccountingContext,
 } from "./exa-budget.js";
 import { resolveDocumentId, resolveExaSourceId } from "./exa-persist.js";
 import {
@@ -80,7 +80,10 @@ export interface AcquisitionResearchOutcome {
 }
 
 export interface ResearchAcquisitionHistoryOptions {
-  readonly client?: Pick<ExaSearchClient, "search"> | undefined;
+  readonly client?:
+    | Pick<ExaSearchClient, "searchWithMetadata">
+    | undefined;
+  readonly accounting?: ExaAccountingContext | undefined;
   readonly fetchUrl?: typeof safeFetchUrl | undefined;
 }
 
@@ -290,6 +293,8 @@ interface SentenceVote {
   status: Exclude<AcquisitionStatus, "unknown">;
   owner: string | null;
   sentence: string;
+  /** Acquisition announcements/events do not prove the current owner. */
+  currentRelation: boolean;
 }
 
 export function classifySentence(
@@ -344,7 +349,8 @@ export function classifySentence(
     companySubject !== null &&
     DEAD_SIGNAL_RE.test(subjectTail.split(/[;.!?]/u)[0] ?? "");
   if (companyDead && acquired) return null;
-  if (companyDead) return { status: "dead", owner: null, sentence };
+  if (companyDead)
+    return { status: "dead", owner: null, sentence, currentRelation: true };
   if (!companyAcquiredBy && !companyRelationship && !companyAcquisitionObject) {
     return null;
   }
@@ -369,20 +375,45 @@ export function classifySentence(
         subjectTail,
       )
     ) {
-      return { status: "acquired", owner: null, sentence };
+      return {
+        status: "acquired",
+        owner: null,
+        sentence,
+        currentRelation: companyRelationship,
+      };
     }
     if (companyAcquisitionObject) {
-      return { status: "acquired", owner: null, sentence };
+      return {
+        status: "acquired",
+        owner: null,
+        sentence,
+        currentRelation: false,
+      };
     }
     return null;
   }
   if (PE_SIGNAL_RE.test(sentence)) {
-    return { status: "pe_owned", owner, sentence };
+    return {
+      status: "pe_owned",
+      owner,
+      sentence,
+      currentRelation: companyRelationship,
+    };
   }
   if (PUBLIC_SIGNAL_RE.test(sentence)) {
-    return { status: "public_parent", owner, sentence };
+    return {
+      status: "public_parent",
+      owner,
+      sentence,
+      currentRelation: companyRelationship,
+    };
   }
-  return { status: "acquired", owner, sentence };
+  return {
+    status: "acquired",
+    owner,
+    sentence,
+    currentRelation: companyRelationship,
+  };
 }
 
 function extractYear(text: string): number | null {
@@ -424,21 +455,44 @@ export async function researchAcquisitionHistory(
       errorCode: null,
     };
   }
-  if (!canSpendExa(EXA_SEARCH_COST_USD)) {
+  if (options.accounting === undefined) {
     return {
-      outcome: "budget_limited",
+      outcome: "configuration_error",
       finding: unknown,
       checkedSources: [],
       errorCode: null,
     };
   }
-
   const client = options.client ?? new ExaSearchClient({ apiKey });
   let results: readonly ExaSearchResult[];
+  let costUsd: number;
   try {
-    results = await client.search(
+    const accounted = await executeAccountedExaSearch(
+      options.accounting,
+      client,
       `"${name}" acquired by OR acquisition OR acquired OR dissolved`,
     );
+    if (accounted.outcome === "deferred") {
+      return {
+        outcome: "budget_limited",
+        finding: unknown,
+        checkedSources: [],
+        errorCode: null,
+      };
+    }
+    if (accounted.outcome === "ambiguous") {
+      return {
+        outcome: "retryable_error",
+        finding: unknown,
+        checkedSources: [],
+        errorCode: null,
+      };
+    }
+    results = accounted.results;
+    costUsd =
+      accounted.providerCostUsd === null
+        ? 0
+        : Number.parseFloat(accounted.providerCostUsd);
   } catch (error) {
     return {
       outcome:
@@ -452,8 +506,6 @@ export async function researchAcquisitionHistory(
       errorCode: error instanceof ExaSearchError ? error.code : null,
     };
   }
-  recordExaSpendUsd(EXA_SEARCH_COST_USD);
-  const costUsd = EXA_SEARCH_COST_USD;
   const fetchUrl = options.fetchUrl ?? safeFetchUrl;
   const checkedSources: AcquisitionCheckedSource[] = [];
   const votes: Array<
@@ -520,8 +572,18 @@ export async function researchAcquisitionHistory(
       errorCode: retrievalFailure,
     };
   }
+  const currentVotes = votes.filter((vote) => vote.currentRelation);
+  if (currentVotes.length === 0) {
+    return {
+      outcome: retrievalFailure === null ? "no_evidence" : "retryable_error",
+      finding: { ...unknown, costUsd },
+      checkedSources,
+      errorCode: retrievalFailure,
+    };
+  }
 
-  const first = votes[0];
+
+  const first = currentVotes[0];
   if (first === undefined) {
     return {
       outcome: "no_evidence",
@@ -530,9 +592,9 @@ export async function researchAcquisitionHistory(
       errorCode: null,
     };
   }
-  const statuses = new Set(votes.map((vote) => vote.status));
+  const statuses = new Set(currentVotes.map((vote) => vote.status));
   const owners = new Set(
-    votes
+    currentVotes
       .map((vote) => vote.owner)
       .filter((owner): owner is string => owner !== null),
   );
@@ -555,9 +617,9 @@ export async function researchAcquisitionHistory(
     };
   }
 
-  let proof: (typeof votes)[number] | undefined;
+  let proof: (typeof currentVotes)[number] | undefined;
   let excerpt: string | null = null;
-  for (const vote of votes) {
+  for (const vote of currentVotes) {
     if (
       vote.status !== first.status ||
       (vote.status !== "dead" && vote.owner !== owner)
@@ -730,6 +792,7 @@ async function persistAffirmativeFinding(
 export interface OwnershipCheckCandidate {
   readonly companyName: string;
   readonly domain: string | null;
+  readonly sourceSignalId: string;
 }
 
 export interface OwnershipCheckOptions {
@@ -756,10 +819,12 @@ export async function selectOwnershipCheckCandidates(
   const result = await db.execute<{
     company_name: string;
     domain: string | null;
+    signal_id: string;
   }>(sql`
-    SELECT company_name, domain
+    SELECT company_name, domain, signal_id
     FROM unified_targets
-    WHERE (
+    WHERE signal_id IS NOT NULL
+      AND (
         tier IN ('needs_research', 'evaluate', 'high_interest')
         OR investor_priority = 1
       )
@@ -770,6 +835,7 @@ export async function selectOwnershipCheckCandidates(
   return result.rows.map((row) => ({
     companyName: row.company_name,
     domain: row.domain,
+    sourceSignalId: row.signal_id,
   }));
 }
 
@@ -802,14 +868,17 @@ export async function runOwnershipChecks(
     let skipped: string | null =
       candidates.length === 0 ? "no_candidates" : null;
     for (const candidate of candidates) {
-      if (!canSpendExa(EXA_SEARCH_COST_USD)) {
-        skipped = "budget_exhausted";
-        break;
-      }
       const research = await researchAcquisitionHistory(
         apiKey,
         candidate.companyName,
         candidate.domain ?? undefined,
+        {
+          accounting: {
+            db,
+            budgetScopeId: exaBudgetScopeId(),
+            sourceSignalId: candidate.sourceSignalId,
+          },
+        },
       );
       const outcome = research.finding;
       checked += 1;

@@ -45,9 +45,10 @@ import {
   CANDIDATE_RESEARCH_PROMPT_VERSION,
   collectCandidatePageLinks,
   ExaCompanyListHarvester,
+  createAccountedExaSearchClient,
+  ExaSearchClient,
   FaaDrsBrowserClient,
   FAA_DRS_PUBLIC_PMA_URL,
-  ExaSearchClient,
   OpenRouterClient,
   planTick,
   rescoreCandidateAfterResearch,
@@ -64,6 +65,7 @@ import {
   type CampaignView,
   type FrontierItemView,
   type FrontierProposal,
+  type ExaAccountingContext,
   type ExaSearchResult,
   type OpenRouterAttemptTelemetry,
   type OpenRouterModelRouting,
@@ -132,6 +134,13 @@ export interface TickHandlerDeps {
   readonly searchFaaPma?: FaaDrsBrowserClient["search"];
   /** Generic Exa query override for company-list and source-catalog discovery (tests). */
   readonly searchExa?: (query: string) => Promise<readonly ExaSearchResult[]>;
+  /** Explicit immutable scope for production Exa discovery. */
+  readonly exaAccounting?: {
+    readonly budgetScopeId: string;
+    readonly sourceSignalId: string;
+    readonly analystStepId?: string | null;
+    readonly dailyCapUsd?: string;
+  };
   /** Document fetcher override (tests); default is safe-fetch. */
   readonly fetchDocument?: (
     url: string,
@@ -1086,11 +1095,42 @@ const SOURCE_CATALOG_QUERIES: readonly SourceCatalogQuery[] = [
 ] as const;
 
 function exaSearchClient(
+  db: Database,
   deps: Partial<TickHandlerDeps>,
-): Pick<ExaSearchClient, "search"> {
-  return deps.searchExa === undefined
-    ? new ExaSearchClient({ apiKey: process.env.EXA_API_KEY })
-    : { search: deps.searchExa };
+): { readonly search: (query: string) => Promise<readonly ExaSearchResult[]> } {
+  if (deps.searchExa !== undefined) return { search: deps.searchExa };
+  const accounting = exaDiscoveryAccounting(deps);
+  if (accounting === null) {
+    throw new Error(
+      "Exa discovery requires an API key, allowlisted source signal, and immutable budget scope",
+    );
+  }
+  return createAccountedExaSearchClient(
+    { db, ...accounting },
+    new ExaSearchClient({ apiKey: process.env.EXA_API_KEY }),
+  );
+}
+
+function exaDiscoveryAccounting(
+  deps: Partial<TickHandlerDeps>,
+): Omit<ExaAccountingContext, "db"> | null {
+  const accounting = deps.exaAccounting;
+  if (
+    !process.env.EXA_API_KEY?.trim() ||
+    accounting === undefined ||
+    accounting.budgetScopeId.trim() === "" ||
+    accounting.sourceSignalId.trim() === ""
+  ) {
+    return null;
+  }
+  return {
+    budgetScopeId: accounting.budgetScopeId,
+    sourceSignalId: accounting.sourceSignalId,
+    analystStepId: accounting.analystStepId ?? null,
+    ...(accounting.dailyCapUsd === undefined
+      ? {}
+      : { dailyCapUsd: accounting.dailyCapUsd }),
+  };
 }
 
 async function scoutSourceCatalog(
@@ -1277,20 +1317,23 @@ function createDiscoverSourceHandler(
       };
     }
     if (sourceKey === "source_catalog") {
-      if (deps.searchExa === undefined && !process.env.EXA_API_KEY?.trim()) {
+      if (
+        deps.searchExa === undefined &&
+        exaDiscoveryAccounting(deps) === null
+      ) {
         return {
           outcome: "stuck",
           plan: planJson,
           findings: {
             idle: true,
-            idleReason: "missing_exa_api_key",
+            idleReason: "exa_source_scope_required",
             source: sourceKey,
           },
         };
       }
       const catalog = await scoutSourceCatalog(
         db,
-        exaSearchClient(deps),
+        exaSearchClient(db, deps),
         context.signal,
       );
       return {
@@ -2477,17 +2520,20 @@ function createGoldenNeighborHandler(
         findings: { idleReason: "no_positive_golden_examples" },
       };
     }
-    if (deps.searchExa === undefined && !process.env.EXA_API_KEY?.trim()) {
+    if (
+      deps.searchExa === undefined &&
+      exaDiscoveryAccounting(deps) === null
+    ) {
       return {
         outcome: "stuck",
         plan: planJson,
-        findings: { idle: true, idleReason: "missing_exa_api_key" },
+        findings: { idle: true, idleReason: "exa_source_scope_required" },
       };
     }
 
     const queryTemplates = goldenNeighborQueryTemplates(examples).slice(0, 3);
     const harvest = await new ExaCompanyListHarvester(
-      exaSearchClient(deps),
+      exaSearchClient(db, deps),
     ).harvest(
       { queryTemplates },
       { limit: MAX_SOURCE_SIGNALS_PER_HARVEST_TICK, signal: context.signal },

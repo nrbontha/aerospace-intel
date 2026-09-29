@@ -1,11 +1,9 @@
 /**
- * Current-input FAA signal review core.
- *
- * Evidence-ready claims run one complete JEv ladder and publish only its exact
- * terminal evaluation. Muse then verifies that terminal decision against the
- * same frozen canonical input. Provider failures leave claims retryable and
- * never create a model judgment or result; any observed provider charges remain
- * in the spend ledger.
+ * Current-input FAA signal review core. JEv performs cheap provisional
+ * screening; Muse runs a journalled, bounded plan/tool/observe/replan protocol
+ * over the exact current input. Every external action is durable before it is
+ * attempted, admitted evidence forces a fresh JEv proof, and final evaluation,
+ * result, case, and memo publication share the review claim transaction.
  *
  * `scripts/run-faa-ensemble.mts` is the thin CLI wrapper.
  */
@@ -15,15 +13,24 @@ import { z } from "zod";
 import { ensembleDecisionSchema, type EnsembleDecision } from "./schemas.js";
 
 import {
+  beginSignalAnalystStep,
+  checkpointSignalAnalystCase,
   claimSignalReviews,
   commitSignalReview,
+  completeSignalAnalystCase,
+  ensureSignalAnalystCase,
   failSignalReview,
+  finishSignalAnalystStep,
   getDatabase,
   hashSignalReviewInput,
   insertFaaReviewModelUsageReceipt,
-  reconcileChangedSignalReviews,
+  publishSignalAnalystEvidence,
+  readCurrentSignalAnalystCase,
+  readResearchProviderBudgetScope,
   updateClaimedSignalReviewInput,
   type Database,
+  type ResearchProviderBudgetScopeView,
+  type SignalAnalystStep,
   type SignalReviewClaim,
   type SignalReviewJson,
 } from "@asi/database";
@@ -32,14 +39,46 @@ import {
   isOpenRouterQuotaError,
   OpenRouterClient,
   OpenRouterClientError,
+  type OpenRouterAttemptTelemetry,
 } from "../openrouter.js";
+import {
+  analystResourceRequestHash,
+  createAnalystResourceExecutor,
+  type AnalystResourceExecutor,
+  type AnalystResourceObservation,
+  type AnalystResourceRequest,
+  type AnalystResourceTool,
+} from "../analyst-resources.js";
 import { callJev, JEV_MODEL, type JevCallResult } from "./jev.js";
-import type { SourcedSignalResearchEvidence } from "../enrichment/signal-evidence.js";
+import {
+  admitSignalResourceEvidence,
+  SIGNAL_RESEARCH_VERSION,
+  type SignalEvidenceSourceSignal,
+  type SourcedSignalResearchEvidence,
+} from "../enrichment/signal-evidence.js";
 import type { WebsiteOffering } from "../scoring-axial/features.js";
 import {
   dailyBudgetCapUsd as configuredDailyBudgetCapUsd,
   getDailySpendUsd as getRecordedDailySpendUsd,
 } from "../campaigns/budget.js";
+import {
+  analystModelRequestHash,
+  buildGroundedSignalAnalystMemo,
+  buildSignalAnalystPrompt,
+  SIGNAL_ANALYST_CHECKPOINT_VERSION,
+  SIGNAL_ANALYST_FINAL_PROMPT_VERSION,
+  SIGNAL_ANALYST_PLANNER_PROMPT_VERSION,
+  SIGNAL_ANALYST_SYSTEM_PROMPT,
+  signalAnalystCheckpointSchema,
+  signalAnalystMemoSchema,
+  signalAnalystModelResponseSchema,
+  signalAnalystTurnSchema,
+  type GroundedAnalystFact,
+  type SignalAnalystCheckpoint,
+  type SignalAnalystFinalTurn,
+  type SignalAnalystGap,
+  type SignalAnalystTurn,
+} from "./analyst-protocol.js";
 
 export { ensembleDecisionSchema, type EnsembleDecision };
 import { FAA_QUALIFICATION_PROMPT_VERSION } from "./prompts.js";
@@ -69,8 +108,6 @@ export interface FaaEnsembleConfig {
   readonly requestDelayMs: number;
   /** JEv model id. Env FAA_JEV_MODEL, default typesafe/jev-1.13. */
   readonly jevModel: string;
-  /** Fraction of completed Jev-research inputs deterministically audited. */
-  readonly jevAuditSampleRate: number;
 }
 
 export function resolveEnsembleConfig(
@@ -95,16 +132,11 @@ export function resolveEnsembleConfig(
     (env["FAA_JEV_MODEL"] ?? "").trim() === ""
       ? JEV_MODEL
       : (env["FAA_JEV_MODEL"] ?? "").trim();
-  const rawAuditRate = (env["JEV_AUDIT_SAMPLE_RATE"] ?? "").trim();
-  const auditRate = rawAuditRate === "" ? Number.NaN : Number(rawAuditRate);
-  const jevAuditSampleRate =
-    auditRate >= 0 && auditRate <= 1 ? auditRate : 0.05;
   return {
     modelA,
     concurrency,
     requestDelayMs,
     jevModel,
-    jevAuditSampleRate,
   };
 }
 
@@ -140,8 +172,8 @@ export const evaluatorResultSchema = z.object({
 export type FaaEvaluatorResult = z.infer<typeof evaluatorResultSchema>;
 
 // ---------------------------------------------------------------------------
-// JEv full-ladder questions. Research outcomes are deterministically sampled
-// for Muse audit; high-priority and reject outcomes always receive Muse review.
+// JEv full-ladder questions. Every plausible or supported-fit research result
+// proceeds to Muse; source-backed exclusions still take the verification path.
 // ---------------------------------------------------------------------------
 export const JEV_DISPOSITION_QUESTION = {
   type: "choice",
@@ -197,16 +229,17 @@ export const JEV_PRODUCT_PROCESS_QUESTION = {
  * signal fans out to up to four rows (r1..r4 in call order).
  */
 export const JEV_LADDER_PROMPT_VERSIONS = {
-  r1: "jev-ladder-r1",
-  r2: "jev-ladder-r2",
-  r3: "jev-ladder-r3",
-  r4: "jev-ladder-r4",
+  r1: "jev-ladder-r1-v2",
+  r2: "jev-ladder-r2-v2",
+  r3: "jev-ladder-r3-v2",
+  r4: "jev-ladder-r4-v2",
 } as const;
 
 export type JevLadderRung = keyof typeof JEV_LADDER_PROMPT_VERSIONS;
 
 /**
- * Deterministic rung-3 veto: these ownership classes reject without a call.
+ * Source-backed ownership classes that affirmatively block acquisition
+ * readiness. An unsupported label is never a veto.
  */
 const LADDER_OWNERSHIP_VETO_STATUSES: readonly string[] = [
   "acquired",
@@ -262,6 +295,8 @@ export function buildJevState(
     ownership_owner: pkg.ownershipOwner,
     ownership_year: pkg.ownershipYear,
     size_indicators: pkg.sizeIndicators,
+    source_research_status: pkg.sourceResearchStatus,
+    evidence_conflicts: pkg.evidenceConflicts,
     sourced_product_evidence: pkg.productEvidence,
     revenue_assessment: pkg.revenueAssessment,
     missing_facts: pkg.missingFacts,
@@ -284,6 +319,8 @@ export interface FaaEnsembleCliOptions {
   readonly includeKnown: boolean;
   readonly benchmarkNames: readonly string[];
   readonly failedOnly: boolean;
+  readonly analystMode?: AnalystExecutionMode;
+  readonly exaBudgetScopeId?: string;
 }
 
 // ---------------------------------------------------------------------------
@@ -328,6 +365,18 @@ export type FaaResearchOwnershipStatus =
   | "independent"
   | "unknown";
 
+export interface FaaSourceEvidence {
+  readonly url: string;
+  readonly stage: string;
+  readonly title: string;
+  readonly quote: string;
+  readonly contentSha256: string;
+  readonly sourceKind: string;
+  readonly firstParty: boolean;
+  readonly retrievedAt: string | null;
+  readonly role: "support" | "checked_only";
+}
+
 export interface FaaEvidencePackage {
   readonly signalId: string;
   readonly sourceKey: string | null;
@@ -363,9 +412,18 @@ export interface FaaEvidencePackage {
   readonly ownershipOwner: string | null;
   readonly ownershipYear: number | null;
   readonly revenueAssessment: "under_50m" | "over_50m" | "unknown";
+  /**
+   * Completeness of optional upstream source research. Authoritative raw
+   * records and unverified lead/intake context may still receive cheap
+   * provisional screening when this is incomplete or unavailable; neither
+   * status makes their context proof.
+   */
+  readonly sourceResearchStatus: "complete" | "incomplete" | "unavailable";
   readonly sizeIndicators: readonly string[];
-  /** Only named products supported by sourced company research. */
+  /** Website product hints remain hypotheses/context, not claim text. */
   readonly productEvidence: readonly string[];
+  /** Current admitted named-product references with stable provenance. */
+  readonly namedProductProofs: readonly FaaSourceEvidence[];
   readonly missingFacts: readonly string[];
   /** True only when a semantic fact links to a support-role source reference. */
   readonly sourcedSupport: {
@@ -375,22 +433,19 @@ export interface FaaEvidencePackage {
     readonly size: boolean;
     readonly headquarters: boolean;
   };
-  readonly sourceEvidence: readonly {
-    readonly url: string;
-    readonly stage: string;
-    readonly title: string;
-    readonly quote: string;
-    readonly contentSha256: string;
-    readonly sourceKind: string;
-    readonly firstParty: boolean;
-    readonly retrievedAt: string | null;
-    readonly role: "support" | "checked_only";
-  }[];
+  /** Durable, source-derived semantic conflicts; never model speculation. */
+  readonly evidenceConflicts: {
+    readonly ownership: boolean;
+    readonly size: boolean;
+    readonly headquarters: boolean;
+  };
+  readonly sourceEvidence: readonly FaaSourceEvidence[];
   readonly reviewedHumanFacts: Readonly<Record<string, unknown>>;
 }
 
-export const FAA_REVIEW_INPUT_VERSION = "faa-review-input-v2";
-export const FAA_LADDER_POLICY_VERSION = "faa-jev-ladder-v2";
+export const FAA_REVIEW_INPUT_VERSION = "faa-review-input-v3";
+export const FAA_LADDER_POLICY_VERSION = "faa-jev-ladder-v3";
+export const FAA_ANALYST_POLICY_VERSION = "faa-signal-analyst-v3";
 const MAKES_MAX = 12;
 const MODELS_SAMPLE_MAX = 10;
 const PRODUCT_EVIDENCE_MAX = 12;
@@ -479,45 +534,88 @@ function sourcedProducts(research: Record<string, unknown>): readonly string[] {
   );
 }
 
+function stableSourceEvidenceEntry(raw: unknown): FaaSourceEvidence | null {
+  const source = asRecord(raw);
+  const url = asText(source["url"]);
+  const contentSha256 = asText(source["contentSha256"]);
+  if (url === null || contentSha256 === null) return null;
+  return {
+    url,
+    title: asText(source["title"]) ?? "",
+    quote: asText(source["quote"]) ?? "",
+    contentSha256,
+    sourceKind: asText(source["sourceKind"]) ?? "unknown",
+    stage: asText(source["stage"]) ?? "unknown",
+    firstParty: source["firstParty"] === true,
+    retrievedAt: asText(source["retrievedAt"]),
+    role: source["role"] === "support" ? "support" : "checked_only",
+  };
+}
+
+function stableSourceEvidenceKey(source: FaaSourceEvidence): string {
+  return `${source.url}|${source.contentSha256}|${source.stage}|${source.role}|${source.quote}`;
+}
+
+function sourcedNamedProductProofs(
+  research: Record<string, unknown>,
+): readonly FaaSourceEvidence[] {
+  const website = asRecord(research["website"]);
+  const namedProductIds = new Set(
+    asStringList(website["namedProductEvidenceIds"], 64),
+  );
+  if (
+    namedProductIds.size === 0 ||
+    !Array.isArray(research["evidenceRefs"])
+  ) {
+    return [];
+  }
+  const unique = new Map<string, FaaSourceEvidence>();
+  for (const raw of research["evidenceRefs"]) {
+    const reference = asRecord(raw);
+    const evidenceId = asText(reference["evidenceId"]);
+    const stable = stableSourceEvidenceEntry(reference);
+    if (
+      evidenceId === null ||
+      !namedProductIds.has(evidenceId) ||
+      stable === null ||
+      stable.role !== "support" ||
+      stable.stage !== "website" ||
+      stable.quote === ""
+    ) {
+      continue;
+    }
+    unique.set(stableSourceEvidenceKey(stable), stable);
+  }
+  return [...unique.values()]
+    .sort((a, b) =>
+      stableSourceEvidenceKey(a).localeCompare(stableSourceEvidenceKey(b)),
+    )
+    .slice(0, PRODUCT_EVIDENCE_MAX);
+}
+
 function stableSourceEvidence(
   research: Record<string, unknown>,
 ): FaaEvidencePackage["sourceEvidence"] {
   if (!Array.isArray(research["evidenceRefs"])) return [];
-  const unique = new Map<
-    string,
-    FaaEvidencePackage["sourceEvidence"][number]
-  >();
+  const unique = new Map<string, FaaSourceEvidence>();
   for (const raw of research["evidenceRefs"]) {
-    const source = asRecord(raw);
-    const url = asText(source["url"]);
-    const contentSha256 = asText(source["contentSha256"]);
-    if (url === null || contentSha256 === null) continue;
-    const stable = {
-      url,
-      title: asText(source["title"]) ?? "",
-      quote: asText(source["quote"]) ?? "",
-      contentSha256,
-      sourceKind: asText(source["sourceKind"]) ?? "unknown",
-      stage: asText(source["stage"]) ?? "unknown",
-      firstParty: source["firstParty"] === true,
-      retrievedAt: asText(source["retrievedAt"]),
-      role: source["role"] === "support" ? "support" : "checked_only",
-    } as const;
-    unique.set(
-      `${stable.url}|${stable.contentSha256}|${stable.stage}|${stable.role}|${stable.quote}`,
-      stable,
-    );
+    const stable = stableSourceEvidenceEntry(raw);
+    if (stable === null) continue;
+    unique.set(stableSourceEvidenceKey(stable), stable);
   }
   return [...unique.values()].sort((a, b) =>
-    `${a.url}|${a.contentSha256}|${a.stage}|${a.role}|${a.quote}`.localeCompare(
-      `${b.url}|${b.contentSha256}|${b.stage}|${b.role}|${b.quote}`,
-    ),
+    stableSourceEvidenceKey(a).localeCompare(stableSourceEvidenceKey(b)),
   );
+}
+
+export interface BuildEvidencePackageOptions {
+  readonly sourceResearchStatus?: FaaEvidencePackage["sourceResearchStatus"];
 }
 
 export function buildEvidencePackage(
   row: SourceSignalRowLike,
   sourcedResearch?: SourcedSignalResearchEvidence | SignalReviewJson | null,
+  options: BuildEvidencePackageOptions = {},
 ): FaaEvidencePackage {
   const payload = asRecord(row.source_payload ?? row.sourcePayload);
   const faaRecord = asRecord(payload["record"]);
@@ -538,6 +636,13 @@ export function buildEvidencePackage(
   const ownershipStatus = asText(
     ownership["status"],
   ) as FaaResearchOwnershipStatus | null;
+  const ownershipCurrentness = asText(ownership["currentness"]);
+  const ownershipCurrentnessMatches =
+    ownershipStatus === "independent"
+      ? ownershipCurrentness === "explicit_current_independence"
+      : ownershipStatus !== null &&
+        LADDER_OWNERSHIP_VETO_STATUSES.includes(ownershipStatus) &&
+        ownershipCurrentness === "explicit_current_relation";
   const reviewed = extractReviewedHumanFacts(row);
   const reportedIdentityStatus =
     identity["status"] === "verified" ||
@@ -546,6 +651,22 @@ export function buildEvidencePackage(
       ? identity["status"]
       : "not_found";
   const verifiedDomain = asText(identity["verifiedDomain"]);
+  const currentRevenueEvidenceIds = Array.isArray(size["indicators"])
+    ? size["indicators"]
+        .filter((item) => {
+          const indicator = asRecord(item);
+          const currentness = asText(indicator["currentness"]);
+          if (indicator["kind"] !== "revenue") return false;
+          if (currentness === "undated_current") return true;
+          return (
+            currentness === "latest_completed_period" &&
+            typeof indicator["periodYear"] === "number" &&
+            Number.isInteger(indicator["periodYear"])
+          );
+        })
+        .map((item) => asText(asRecord(item)["evidenceId"]))
+        .filter((item): item is string => item !== null)
+    : [];
   const sourcedSupport = {
     identity: hasLinkedSupport(
       research,
@@ -557,20 +678,18 @@ export function buildEvidencePackage(
       "website",
       asStringList(website["namedProductEvidenceIds"], 64),
     ),
-    ownership: hasLinkedSupport(
-      research,
-      "ownership",
-      asStringList(ownership["supportEvidenceIds"], 64),
-    ),
-    size: hasLinkedSupport(
-      research,
-      "size",
-      Array.isArray(size["indicators"])
-        ? size["indicators"]
-            .map((item) => asText(asRecord(item)["evidenceId"]))
-            .filter((item): item is string => item !== null)
-        : [],
-    ),
+    ownership:
+      ownership["conflicting"] !== true &&
+      ownershipCurrentnessMatches &&
+      hasLinkedSupport(
+        research,
+        "ownership",
+        asStringList(ownership["supportEvidenceIds"], 64),
+      ),
+    size:
+      size["conflicting"] !== true &&
+      size["status"] === "supported" &&
+      hasLinkedSupport(research, "size", currentRevenueEvidenceIds),
     headquarters: hasLinkedSupport(
       research,
       "hq",
@@ -582,6 +701,9 @@ export function buildEvidencePackage(
       ? "ambiguous"
       : reportedIdentityStatus;
   return {
+    sourceResearchStatus:
+      options.sourceResearchStatus ??
+      (Object.keys(research).length > 0 ? "complete" : "incomplete"),
     signalId: row.id,
     sourceKey,
     sourceLocator:
@@ -688,8 +810,16 @@ export function buildEvidencePackage(
           .filter((item): item is string => item !== null)
       : [],
     productEvidence: sourcedSupport.product ? sourcedProducts(research) : [],
+    namedProductProofs: sourcedSupport.product
+      ? sourcedNamedProductProofs(research)
+      : [],
     missingFacts: asStringList(research["missingFacts"], 32),
     sourcedSupport,
+    evidenceConflicts: {
+      ownership: ownership["conflicting"] === true,
+      size: size["conflicting"] === true,
+      headquarters: headquarters["status"] === "conflicting",
+    },
     sourceEvidence: stableSourceEvidence(research),
     reviewedHumanFacts: reviewed,
   };
@@ -701,10 +831,10 @@ export interface FaaReviewInputManifest extends SignalReviewJson {
   readonly evidence: FaaEvidencePackage;
   readonly policy: {
     readonly ladder: typeof FAA_LADDER_POLICY_VERSION;
+    readonly analyst: typeof FAA_ANALYST_POLICY_VERSION;
     readonly jevModel: string;
     readonly museModel: string;
     readonly evaluatorPrompt: string;
-    readonly jevAuditSampleRate: number;
   };
 }
 export type CurrentFaaReviewInputContract = Pick<
@@ -713,26 +843,24 @@ export type CurrentFaaReviewInputContract = Pick<
 >;
 
 export function currentFaaReviewInputContract(
-  config: Pick<
-    FaaEnsembleConfig,
-    "jevModel" | "modelA" | "jevAuditSampleRate"
-  > = resolveEnsembleConfig(),
+  config: Pick<FaaEnsembleConfig, "jevModel" | "modelA"> =
+    resolveEnsembleConfig(),
 ): CurrentFaaReviewInputContract {
   return {
     version: FAA_REVIEW_INPUT_VERSION,
     policy: {
       ladder: FAA_LADDER_POLICY_VERSION,
+      analyst: FAA_ANALYST_POLICY_VERSION,
       jevModel: config.jevModel,
       museModel: config.modelA,
       evaluatorPrompt: FAA_EVALUATOR_PROMPT_VERSION,
-      jevAuditSampleRate: config.jevAuditSampleRate,
     },
   };
 }
 
 export function buildFaaReviewInputManifest(
   evidence: FaaEvidencePackage,
-  config: Pick<FaaEnsembleConfig, "jevModel" | "modelA" | "jevAuditSampleRate">,
+  config: Pick<FaaEnsembleConfig, "jevModel" | "modelA">,
   sourceRevision: number,
 ): FaaReviewInputManifest {
   if (!Number.isInteger(sourceRevision) || sourceRevision < 0) {
@@ -749,8 +877,10 @@ export function hashFaaReviewInput(manifest: FaaReviewInputManifest): string {
   return hashSignalReviewInput(manifest);
 }
 export interface ReconcileCurrentReviewInputsOptions {
-  /** Bound only raw source-revision reconciliation; contract repair is complete. */
+  /** Bounds one pass of revision repair and machine-eligible bootstrap. */
   readonly sourceLimit?: number;
+  /** Undefined keeps the full cheap-screening scope; an empty list permits none. */
+  readonly sourceSignalIds?: readonly string[];
   readonly config?: FaaEnsembleConfig;
 }
 
@@ -800,114 +930,334 @@ export class CurrentReviewInputDrainIncompleteError extends Error {
 }
 
 /**
- * Provider-free currentness repair for every pre-projection/manual entrypoint.
- * Material source changes return to research; prompt/model/policy changes retain
- * current sourced research but require a fresh JEv decision.
+ * Provider-free currentness and liveness repair. Machine-eligible authoritative
+ * records and unverified lead/intake context can receive provisional screening
+ * before optional network enrichment succeeds; human-reviewed and restricted
+ * records remain excluded. Policy-only invalidation retains admitted evidence
+ * and source-retry state. A raw-source revision clears the active bundle so
+ * facts cannot be relabelled onto a changed identity; durable source documents,
+ * links, historical evaluations, human edits, and spend remain for explicit
+ * revalidation.
  */
 export async function reconcileCurrentReviewInputs(
   db: Database = getDatabase(),
   options: ReconcileCurrentReviewInputsOptions = {},
 ): Promise<ReconcileCurrentReviewInputsResult> {
+  if (
+    options.sourceLimit !== undefined &&
+    !Number.isFinite(options.sourceLimit)
+  ) {
+    throw new TypeError("sourceLimit must be finite");
+  }
+  if (options.sourceSignalIds?.length === 0) {
+    return { sourceRevisionChanges: 0, inputContractChanges: 0 };
+  }
   const config = options.config ?? resolveEnsembleConfig();
   const contract = currentFaaReviewInputContract(config);
-  const sourceRevisionChanges = await reconcileChangedSignalReviews(db, {
-    ...(options.sourceLimit === undefined
-      ? {}
-      : { limit: options.sourceLimit }),
-  });
-  const reconciled = await db.execute<{ signal_id: string }>(sql`
-    WITH incompatible AS (
-      SELECT
-        state.signal_id,
-        (
-          state.input_manifest IS NULL
-          OR state.input_manifest->'sourceRevision'
-             IS DISTINCT FROM to_jsonb(state.source_revision)
-        ) AS source_contract_changed
-      FROM signal_review_state state
-      WHERE state.phase IN ('jev', 'muse', 'settled')
+  const sourceLimit = Math.min(
+    1_000,
+    Math.max(1, Math.trunc(options.sourceLimit ?? 250)),
+  );
+  const sourceScope =
+    options.sourceSignalIds === undefined
+      ? sql``
+      : sql`AND source.id IN (${sql.join(
+          options.sourceSignalIds.map((id) => sql`${id}::uuid`),
+          sql`, `,
+        )})`;
+  const reconciled = await db.execute<{ change_kind: string }>(sql`
+    WITH bootstrap_candidates AS MATERIALIZED (
+      SELECT source.id, source.review_revision, source.created_at
+      FROM source_signals source
+      LEFT JOIN signal_review_state state ON state.signal_id = source.id
+      WHERE state.signal_id IS NULL
+        ${sourceScope}
         AND (
-          (
-            state.phase IN ('muse', 'settled')
-            AND (state.input_hash IS NULL OR state.input_manifest IS NULL)
-          )
+          source.status IN ('queued_qualification', 'qualifying', 'qualified')
           OR (
-            state.input_manifest IS NOT NULL
+            source.status IN ('rejected', 'quarantined')
+            AND source.source_key IN (
+              'faa_pma_database',
+              'faa_drs_pma',
+              'faa_drs_pma_search',
+              'sam_entity',
+              'usaspending'
+            )
             AND (
-              state.input_manifest->>'version'
-                IS DISTINCT FROM ${contract.version}
-              OR state.input_manifest->'sourceRevision'
-                IS DISTINCT FROM to_jsonb(state.source_revision)
-              OR state.input_manifest->'policy'->>'ladder'
-                IS DISTINCT FROM ${contract.policy.ladder}
-              OR state.input_manifest->'policy'->>'jevModel'
-                IS DISTINCT FROM ${contract.policy.jevModel}
-              OR state.input_manifest->'policy'->>'museModel'
-                IS DISTINCT FROM ${contract.policy.museModel}
-              OR state.input_manifest->'policy'->>'evaluatorPrompt'
-                IS DISTINCT FROM ${contract.policy.evaluatorPrompt}
-              OR state.input_manifest->'policy'->>'jevAuditSampleRate'
-                IS DISTINCT FROM ${String(contract.policy.jevAuditSampleRate)}
+              source.qualification->>'reason' IN (
+                'qualification_error',
+                'official_identity_not_verified',
+                'identity_not_verified'
+              )
+              OR source.qualification->>'error' IN (
+                'qualification_error',
+                'official_identity_not_verified',
+                'identity_not_verified'
+              )
+              OR source.qualification->'reasons' ?| ARRAY[
+                'qualification_error',
+                'official_identity_not_verified',
+                'identity_not_verified'
+              ]
             )
           )
         )
-      FOR UPDATE OF state
+        AND NOT COALESCE(
+          source.qualification ?| ARRAY[
+            'humanDecision',
+            'humanOverride',
+            'reviewedByUserId',
+            'reviewedBy',
+            'reviewedAt',
+            'decidedByUserId'
+          ]
+          OR source.qualification->>'decisionSource' = 'human'
+          OR source.qualification->>'reviewSource' = 'human',
+          false
+        )
+      ORDER BY source.created_at ASC, source.id ASC
+      LIMIT ${sourceLimit}
+    ),
+    bootstrapped AS (
+      INSERT INTO signal_review_state (
+        signal_id,
+        source_revision,
+        phase,
+        next_attempt_at
+      )
+      SELECT id, review_revision, 'jev', clock_timestamp()
+      FROM bootstrap_candidates
+      ON CONFLICT (signal_id) DO NOTHING
+      RETURNING signal_id
+    ),
+    revision_candidates AS MATERIALIZED (
+      SELECT state.signal_id,
+             source.review_revision,
+             source.source_key
+      FROM signal_review_state state
+      JOIN source_signals source ON source.id = state.signal_id
+      WHERE state.source_revision <> source.review_revision
+        ${sourceScope}
+      ORDER BY state.updated_at ASC, state.signal_id ASC
+      LIMIT ${sourceLimit}
+      FOR UPDATE OF state SKIP LOCKED
+    ),
+    revision_changes AS (
+      UPDATE signal_review_state state
+      SET source_revision = candidate.review_revision,
+          phase = CASE
+            WHEN candidate.source_key IN (
+              'faa_pma_database',
+              'faa_drs_pma',
+              'faa_drs_pma_search',
+              'sam_entity',
+              'usaspending'
+            ) THEN 'jev'
+            ELSE 'research'
+          END,
+          input_hash = NULL,
+          input_manifest = NULL,
+          research_evidence = '{}',
+          jev_evaluation_id = NULL,
+          next_attempt_at = clock_timestamp(),
+          attempt_count = 0,
+          last_error = NULL,
+          lease_token = NULL,
+          lease_expires_at = NULL,
+          research_due_at = NULL,
+          last_research_outcome = NULL,
+          inputs_checked_at = NULL,
+          updated_at = clock_timestamp()
+      FROM revision_candidates candidate
+      WHERE state.signal_id = candidate.signal_id
+      RETURNING state.signal_id
+    ),
+    contract_candidates AS MATERIALIZED (
+      SELECT state.signal_id
+      FROM signal_review_state state
+      JOIN source_signals source ON source.id = state.signal_id
+      WHERE NOT EXISTS (
+          SELECT 1
+          FROM revision_changes changed
+          WHERE changed.signal_id = state.signal_id
+        )
+        ${sourceScope}
+        AND (
+          (
+            state.phase = 'research'
+            AND (
+              source.status IN (
+                'queued_qualification',
+                'qualifying',
+                'qualified'
+              )
+              OR (
+                source.status IN ('rejected', 'quarantined')
+                AND source.source_key IN (
+                  'faa_pma_database',
+                  'faa_drs_pma',
+                  'faa_drs_pma_search',
+                  'sam_entity',
+                  'usaspending'
+                )
+                AND (
+                  source.qualification->>'reason' IN (
+                    'qualification_error',
+                    'official_identity_not_verified',
+                    'identity_not_verified'
+                  )
+                  OR source.qualification->>'error' IN (
+                    'qualification_error',
+                    'official_identity_not_verified',
+                    'identity_not_verified'
+                  )
+                  OR source.qualification->'reasons' ?| ARRAY[
+                    'qualification_error',
+                    'official_identity_not_verified',
+                    'identity_not_verified'
+                  ]
+                )
+              )
+            )
+            AND NOT COALESCE(
+              source.qualification ?| ARRAY[
+                'humanDecision',
+                'humanOverride',
+                'reviewedByUserId',
+                'reviewedBy',
+                'reviewedAt',
+                'decidedByUserId'
+              ]
+              OR source.qualification->>'decisionSource' = 'human'
+              OR source.qualification->>'reviewSource' = 'human',
+              false
+            )
+            AND (
+              state.lease_expires_at IS NULL
+              OR state.lease_expires_at <= clock_timestamp()
+            )
+          )
+          OR (
+            state.phase IN ('jev', 'muse', 'settled')
+            AND (
+              (
+                state.phase IN ('muse', 'settled')
+                AND (state.input_hash IS NULL OR state.input_manifest IS NULL)
+              )
+              OR (
+                state.input_manifest IS NOT NULL
+                AND (
+                  state.input_manifest->>'version'
+                    IS DISTINCT FROM ${contract.version}
+                  OR state.input_manifest->'sourceRevision'
+                    IS DISTINCT FROM to_jsonb(state.source_revision)
+                  OR state.input_manifest->'policy'->>'ladder'
+                    IS DISTINCT FROM ${contract.policy.ladder}
+                  OR state.input_manifest->'policy'->>'analyst'
+                    IS DISTINCT FROM ${contract.policy.analyst}
+                  OR state.input_manifest->'policy'->>'jevModel'
+                    IS DISTINCT FROM ${contract.policy.jevModel}
+                  OR state.input_manifest->'policy'->>'museModel'
+                    IS DISTINCT FROM ${contract.policy.museModel}
+                  OR state.input_manifest->'policy'->>'evaluatorPrompt'
+                    IS DISTINCT FROM ${contract.policy.evaluatorPrompt}
+                )
+              )
+            )
+          )
+        )
+      FOR UPDATE OF state SKIP LOCKED
+    ),
+    contract_changes AS (
+      UPDATE signal_review_state state
+      SET phase = 'jev',
+          input_hash = NULL,
+          input_manifest = NULL,
+          jev_evaluation_id = NULL,
+          next_attempt_at = clock_timestamp(),
+          attempt_count = 0,
+          lease_token = NULL,
+          lease_expires_at = NULL,
+          research_due_at = CASE
+            WHEN state.phase = 'research'
+              THEN COALESCE(state.research_due_at, state.next_attempt_at)
+            ELSE state.research_due_at
+          END,
+          last_research_outcome = CASE
+            WHEN state.phase = 'research' AND state.last_error IS NOT NULL
+              THEN COALESCE(
+                state.last_research_outcome,
+                jsonb_build_object(
+                  'status', 'unavailable',
+                  'reason', state.last_error,
+                  'retryAt', state.next_attempt_at
+                )
+              )
+            ELSE state.last_research_outcome
+          END,
+          updated_at = clock_timestamp()
+      FROM contract_candidates candidate
+      WHERE state.signal_id = candidate.signal_id
+      RETURNING state.signal_id
     )
-    UPDATE signal_review_state state
-    SET phase = CASE
-          WHEN incompatible.source_contract_changed THEN 'research'
-          ELSE 'jev'
-        END,
-        input_hash = NULL,
-        input_manifest = NULL,
-        research_evidence = CASE
-          WHEN incompatible.source_contract_changed THEN '{}'
-          ELSE state.research_evidence
-        END,
-        jev_evaluation_id = NULL,
-        next_attempt_at = clock_timestamp(),
-        attempt_count = 0,
-        last_error = NULL,
-        lease_token = NULL,
-        lease_expires_at = NULL,
-        research_due_at = CASE
-          WHEN incompatible.source_contract_changed THEN NULL
-          ELSE state.research_due_at
-        END,
-        last_research_outcome = CASE
-          WHEN incompatible.source_contract_changed THEN NULL
-          ELSE state.last_research_outcome
-        END,
-        inputs_checked_at = NULL,
-        updated_at = clock_timestamp()
-    FROM incompatible
-    WHERE state.signal_id = incompatible.signal_id
-    RETURNING state.signal_id
+    SELECT 'source_revision' AS change_kind FROM revision_changes
+    UNION ALL
+    SELECT 'input_contract' AS change_kind FROM contract_changes
+    UNION ALL
+    SELECT 'input_contract' AS change_kind FROM bootstrapped
   `);
   return {
-    sourceRevisionChanges,
-    inputContractChanges: reconciled.rows.length,
+    sourceRevisionChanges: reconciled.rows.filter(
+      (row) => row.change_kind === "source_revision",
+    ).length,
+    inputContractChanges: reconciled.rows.filter(
+      (row) => row.change_kind === "input_contract",
+    ).length,
   };
 }
 
-async function hasChangedReviewSources(db: Database): Promise<boolean> {
+async function hasChangedReviewSources(
+  db: Database,
+  sourceSignalIds?: readonly string[],
+): Promise<boolean> {
+  if (sourceSignalIds?.length === 0) return false;
+  const sourceScope =
+    sourceSignalIds === undefined
+      ? sql``
+      : sql`AND source.id IN (${sql.join(
+          sourceSignalIds.map((id) => sql`${id}::uuid`),
+          sql`, `,
+        )})`;
   const remaining = await db.execute<{ exists: boolean }>(sql`
     SELECT EXISTS (
       SELECT 1
       FROM signal_review_state state
       JOIN source_signals source ON source.id = state.signal_id
       WHERE state.source_revision <> source.review_revision
+        ${sourceScope}
     ) AS exists
   `);
   return remaining.rows[0]?.exists === true;
 }
 
-async function countChangedReviewSources(db: Database): Promise<number> {
+async function countChangedReviewSources(
+  db: Database,
+  sourceSignalIds?: readonly string[],
+): Promise<number> {
+  if (sourceSignalIds?.length === 0) return 0;
+  const sourceScope =
+    sourceSignalIds === undefined
+      ? sql``
+      : sql`AND source.id IN (${sql.join(
+          sourceSignalIds.map((id) => sql`${id}::uuid`),
+          sql`, `,
+        )})`;
   const remaining = await db.execute<{ count: number | string }>(sql`
     SELECT count(*)::integer AS count
     FROM signal_review_state state
     JOIN source_signals source ON source.id = state.signal_id
     WHERE state.source_revision <> source.review_revision
+      ${sourceScope}
   `);
   return Number(remaining.rows[0]?.count ?? 0);
 }
@@ -945,7 +1295,7 @@ export async function drainCurrentReviewInputs(
 
     if (pass.sourceRevisionChanges === 0) {
       const remainingSourceRevisionChanges =
-        await countChangedReviewSources(db);
+        await countChangedReviewSources(db, options.sourceSignalIds);
       if (remainingSourceRevisionChanges > 0) {
         throw new CurrentReviewInputDrainIncompleteError(
           {
@@ -965,7 +1315,7 @@ export async function drainCurrentReviewInputs(
     }
     if (reconciliationPasses >= maxPasses) {
       const remainingSourceRevisionChanges =
-        await countChangedReviewSources(db);
+        await countChangedReviewSources(db, options.sourceSignalIds);
       if (remainingSourceRevisionChanges > 0) {
         throw new CurrentReviewInputDrainIncompleteError(
           {
@@ -983,7 +1333,7 @@ export async function drainCurrentReviewInputs(
         reconciliationPasses,
       };
     }
-    if (!(await hasChangedReviewSources(db))) {
+    if (!(await hasChangedReviewSources(db, options.sourceSignalIds))) {
       return {
         sourceRevisionChanges,
         inputContractChanges,
@@ -1079,62 +1429,6 @@ export type ModelEvalOutcome =
       readonly deferred?: boolean;
     };
 
-function failedModelOutcome(
-  error: unknown,
-): Extract<ModelEvalOutcome, { readonly ok: false }> {
-  let costUsd: number | null = null;
-  let returnedModel: string | null = null;
-  if (error instanceof OpenRouterClientError) {
-    for (const attempt of error.attempts) {
-      if (attempt.costUsd !== null) {
-        costUsd = (costUsd ?? 0) + attempt.costUsd;
-      }
-      if (attempt.provider !== null) {
-        returnedModel = attempt.model;
-      }
-    }
-  }
-  return {
-    ok: false,
-    error: error instanceof Error ? error.message : String(error),
-    rawResponse: null,
-    costUsd,
-    returnedModel,
-    deferred: isOpenRouterQuotaError(error),
-  };
-}
-
-async function defaultEvaluateModel(
-  client: OpenRouterClient,
-  modelId: string,
-  pkg: FaaEvidencePackage,
-): Promise<ModelEvalOutcome> {
-  try {
-    const response = await client.generateStructured({
-      route: "fast",
-      models: { fast: modelId, deep: modelId, fallback: modelId },
-      schemaName: FAA_EVALUATOR_PROMPT_VERSION,
-      schema: evaluatorResultSchema,
-      systemPrompt: FAA_EVALUATOR_SYSTEM_PROMPT,
-      prompt: buildEvaluatorPrompt(pkg),
-      maxAttempts: 2,
-    });
-    return {
-      ok: true,
-      result: response.data,
-      rawResponse: JSON.stringify(response.data),
-      tokens: {
-        input: response.telemetry.inputTokens,
-        output: response.telemetry.outputTokens,
-        total: response.telemetry.totalTokens,
-      },
-      costUsd: response.telemetry.costUsd,
-      returnedModel: response.telemetry.model,
-    };
-  } catch (error) {
-    return failedModelOutcome(error);
-  }
-}
 
 // ---------------------------------------------------------------------------
 // Signal selection (resumable; FIFO by creation time)
@@ -1284,6 +1578,7 @@ async function persistEvaluation(
   outcome: ModelEvalOutcome,
   input: FaaReviewPersistenceInput,
   evaluationId: string,
+  promptVersion: string,
 ): Promise<string> {
   const result = outcome.ok ? outcome.result : null;
   const persisted = await db.execute<{ id: string }>(sql`
@@ -1294,7 +1589,7 @@ async function persistEvaluation(
       disqualifiers, missing_evidence, false_negative_risk, reason, tokens,
       cost_usd, error, retry_count
     ) VALUES (
-      ${evaluationId}, ${signalId}, ${modelId}, ${FAA_EVALUATOR_PROMPT_VERSION},
+      ${evaluationId}, ${signalId}, ${modelId}, ${promptVersion},
       ${input.inputHash}, ${JSON.stringify(input.inputManifest)},
       ${outcome.rawResponse},
       ${result === null ? null : JSON.stringify(result)},
@@ -1342,16 +1637,21 @@ async function persistJevEvaluation(
   db: Database,
   signalId: string,
   modelId: string,
-  outcome: {
-    readonly decision: EnsembleDecision | null;
-    readonly confidence: number;
-    readonly costUsd: number | null;
-  },
+  outcome: JevLadderRungRecord,
   promptVersion: string,
   reason: string,
   input: FaaReviewPersistenceInput,
   evaluationId: string,
 ): Promise<string> {
+  const parsed =
+    outcome.triage ??
+    ({
+      decision: outcome.decision,
+      confidence: outcome.confidence,
+      observation: outcome.observation,
+    } as const);
+  const triage = outcome.triage;
+  const persistedReason = triage?.explanation ?? reason;
   const persisted = await db.execute<{ id: string }>(sql`
     INSERT INTO faa_ensemble_evaluations (
       id, signal_id, model_id, prompt_version, input_hash, input_manifest,
@@ -1362,10 +1662,20 @@ async function persistJevEvaluation(
     ) VALUES (
       ${evaluationId}, ${signalId}, ${modelId}, ${promptVersion},
       ${input.inputHash}, ${JSON.stringify(input.inputManifest)},
-      ${JSON.stringify({ decision: outcome.decision, confidence: outcome.confidence })},
-      ${JSON.stringify({ decision: outcome.decision, confidence: outcome.confidence })},
-      ${outcome.decision}, ${Math.round(outcome.confidence * 100)},
-      null, null, null, '[]', '[]', '[]', null, ${reason}, null,
+      ${JSON.stringify(parsed)},
+      ${JSON.stringify(parsed)},
+      ${outcome.decision},
+      ${outcome.confidence === null ? null : Math.round(outcome.confidence * 100)},
+      ${triage?.productFit ?? null}, null,
+      ${triage?.productFit ?? null},
+      ${JSON.stringify(triage?.reasonCodes ?? [])},
+      ${JSON.stringify(
+        triage?.reasonCodes.filter(
+          (code) => code === "source_backed_mandate_veto",
+        ) ?? [],
+      )},
+      ${JSON.stringify(triage?.gaps.map((gap) => gap.id) ?? [])},
+      null, ${persistedReason}, null,
       ${outcome.costUsd}, null, 0, now()
     )
     ON CONFLICT (signal_id, model_id, prompt_version, input_hash) DO UPDATE SET
@@ -1374,6 +1684,13 @@ async function persistJevEvaluation(
       parsed = EXCLUDED.parsed,
       decision = EXCLUDED.decision,
       confidence = EXCLUDED.confidence,
+      company_type = EXCLUDED.company_type,
+      aerospace_defense_relevance = EXCLUDED.aerospace_defense_relevance,
+      manufacturing_evidence = EXCLUDED.manufacturing_evidence,
+      thesis_signals = EXCLUDED.thesis_signals,
+      disqualifiers = EXCLUDED.disqualifiers,
+      missing_evidence = EXCLUDED.missing_evidence,
+      false_negative_risk = EXCLUDED.false_negative_risk,
       reason = EXCLUDED.reason,
       cost_usd = EXCLUDED.cost_usd,
       error = NULL,
@@ -1522,10 +1839,10 @@ export interface FaaEnsembleDependencies extends DailyModelBudgetDependencies {
   readonly db?: Database;
   readonly config?: FaaEnsembleConfig;
   readonly callJev?: JevLadderCaller;
-  readonly evaluateModel?: (
-    modelId: string,
-    pkg: FaaEvidencePackage,
-  ) => Promise<ModelEvalOutcome>;
+  readonly callAnalystModel?: (
+    request: AnalystModelCallRequest,
+  ) => Promise<AnalystModelCallResult>;
+  readonly resourceExecutor?: AnalystResourceExecutor;
 }
 
 export interface FaaEnsembleSummary {
@@ -1595,14 +1912,24 @@ export async function runFaaEnsemble(
   );
   const muse = await runMuseReviews(
     db,
-    { limit: boundedLimit, concurrency: options.concurrency },
-    dependencies.evaluateModel === undefined
-      ? { config, ...budgetDependencies }
-      : {
-          config,
-          evaluateModel: dependencies.evaluateModel,
-          ...budgetDependencies,
-        },
+    {
+      limit: boundedLimit,
+      concurrency: options.concurrency,
+      analystMode: options.analystMode ?? "disabled",
+      ...(options.exaBudgetScopeId === undefined
+        ? {}
+        : { exaBudgetScopeId: options.exaBudgetScopeId }),
+    },
+    {
+      config,
+      ...budgetDependencies,
+      ...(dependencies.callAnalystModel === undefined
+        ? {}
+        : { callAnalystModel: dependencies.callAnalystModel }),
+      ...(dependencies.resourceExecutor === undefined
+        ? {}
+        : { resourceExecutor: dependencies.resourceExecutor }),
+    },
   );
   return {
     dryRunCandidates: null,
@@ -1612,28 +1939,58 @@ export async function runFaaEnsemble(
 }
 
 // ---------------------------------------------------------------------------
-// Current-input staged review. The JEv stage runs the complete ladder and
-// publishes one terminal pointer; Muse claims only that frozen result.
+// Persistent bounded Muse analyst protocol
 // ---------------------------------------------------------------------------
+export type AnalystExecutionMode = "disabled" | "free_only" | "bounded_paid";
+
+export interface SignalAnalystLimits {
+  readonly maxModelCalls: number;
+  readonly maxResourceActions: number;
+  readonly maxActiveWorkMs: number;
+}
+
+const DEFAULT_SIGNAL_ANALYST_LIMITS: SignalAnalystLimits = {
+  maxModelCalls: 8,
+  maxResourceActions: 6,
+  maxActiveWorkMs: 5 * 60_000,
+};
+const SIGNAL_ANALYST_DEFER_MS = 15 * 60_000;
+
 export interface MuseReviewOptions {
-  /** Total cap, including deterministic research audits. */
   readonly limit?: number;
   readonly concurrency?: number;
+  readonly analystMode?: AnalystExecutionMode;
+  readonly exaBudgetScopeId?: string;
+  readonly limits?: Partial<SignalAnalystLimits>;
+}
+
+export interface AnalystModelCallRequest {
+  readonly modelId: string;
+  readonly prompt: string;
+  readonly mustFinalize: boolean;
+}
+
+export interface AnalystModelCallResult {
+  readonly turn: SignalAnalystTurn;
+  readonly returnedModel: string | null;
+  readonly costUsd: number | null;
 }
 
 export interface MuseReviewDependencies extends DailyModelBudgetDependencies {
-  readonly evaluateModel?: (
-    modelId: string,
-    pkg: FaaEvidencePackage,
-  ) => Promise<ModelEvalOutcome>;
   readonly apiKey?: string;
   readonly config?: FaaEnsembleConfig;
+  readonly callAnalystModel?: (
+    request: AnalystModelCallRequest,
+  ) => Promise<AnalystModelCallResult>;
+  readonly resourceExecutor?: AnalystResourceExecutor;
+  readonly now?: () => Date;
 }
 
 export interface MuseReviewSummary {
   readonly verified: number;
   readonly confirmed: number;
   readonly overruled: number;
+  readonly evidenceRequeued: number;
   readonly costUsd: number;
   readonly deferred: number;
   readonly errors: number;
@@ -1643,8 +2000,9 @@ export interface MuseReviewSummary {
 type LinkedJevEvaluation = {
   readonly id: string;
   readonly decision: EnsembleDecision;
-  readonly confidence: number | string;
+  readonly confidence: number | string | null;
   readonly input_hash: string;
+  readonly parsed: unknown;
 };
 
 async function loadLinkedJevEvaluation(
@@ -1653,7 +2011,7 @@ async function loadLinkedJevEvaluation(
 ): Promise<LinkedJevEvaluation | null> {
   if (claim.jevEvaluationId === null || claim.inputHash === null) return null;
   const result = await db.execute<LinkedJevEvaluation>(sql`
-    SELECT id, decision, confidence, input_hash
+    SELECT id, decision, confidence, input_hash, parsed
     FROM faa_ensemble_evaluations
     WHERE id = ${claim.jevEvaluationId}
       AND signal_id = ${claim.signalId}
@@ -1665,61 +2023,704 @@ async function loadLinkedJevEvaluation(
   return result.rows[0] ?? null;
 }
 
-/**
- * Verify claimed current terminal JEv decisions using the exact frozen input.
- * A provider error records no judgment and leaves the claim retryable. The
- * total claim limit already includes research audits selected by the JEv
- * stage, so audits can never exceed the batch cap.
- */
+const signalAnalystLimitsSchema = z
+  .object({
+    maxModelCalls: z.number().int().positive().max(32),
+    maxResourceActions: z.number().int().positive().max(32),
+    maxActiveWorkMs: z.number().int().positive().max(30 * 60_000),
+  })
+  .strict();
+
+function normalizedAnalystLimits(
+  requested: Partial<SignalAnalystLimits> | undefined,
+): SignalAnalystLimits {
+  const bounded = (value: number | undefined, fallback: number, max: number) =>
+    Number.isInteger(value) && (value ?? 0) > 0
+      ? Math.min(value as number, max)
+      : fallback;
+  return {
+    maxModelCalls: bounded(
+      requested?.maxModelCalls,
+      DEFAULT_SIGNAL_ANALYST_LIMITS.maxModelCalls,
+      32,
+    ),
+    maxResourceActions: bounded(
+      requested?.maxResourceActions,
+      DEFAULT_SIGNAL_ANALYST_LIMITS.maxResourceActions,
+      32,
+    ),
+    maxActiveWorkMs: bounded(
+      requested?.maxActiveWorkMs,
+      DEFAULT_SIGNAL_ANALYST_LIMITS.maxActiveWorkMs,
+      30 * 60_000,
+    ),
+  };
+}
+
+function currentTriageGaps(value: unknown): SignalAnalystGap[] {
+  const triage = asRecord(value);
+  if (triage["version"] !== JEV_TRIAGE_OUTPUT_VERSION) return [];
+  return (Array.isArray(triage["gaps"]) ? triage["gaps"] : []).flatMap((raw) => {
+    const gap = asRecord(raw);
+    const id = asText(gap["id"]);
+    const field = asText(gap["field"]);
+    const question = asText(gap["question"]);
+    const reason = asText(gap["reason"]);
+    const priority = gap["priority"];
+    return id !== null &&
+      field !== null &&
+      question !== null &&
+      reason !== null &&
+      (priority === 1 || priority === 2 || priority === 3)
+      ? [{ id, field, question, reason, priority }]
+      : [];
+  });
+}
+
+function initialAnalystCheckpoint(
+  gaps: readonly SignalAnalystGap[],
+): SignalAnalystCheckpoint {
+  return {
+    version: SIGNAL_ANALYST_CHECKPOINT_VERSION,
+    gapCatalog: gaps,
+    pendingModelTurn: null,
+    pendingAction: null,
+    processedObservationStepIds: [],
+    accessLimits: [],
+    lastAnalysisSummary: null,
+    blockedCapability: null,
+  };
+}
+
+function mergeAnalystGaps(
+  checkpoint: SignalAnalystCheckpoint,
+  current: readonly SignalAnalystGap[],
+): SignalAnalystCheckpoint {
+  const gaps = new Map(checkpoint.gapCatalog.map((gap) => [gap.id, gap]));
+  for (const gap of current) gaps.set(gap.id, gap);
+  return { ...checkpoint, gapCatalog: [...gaps.values()] };
+}
+
+function toEvidenceSourceSignal(row: CandidateSignalRow): SignalEvidenceSourceSignal {
+  const createdAt =
+    row.created_at instanceof Date ? row.created_at : new Date(row.created_at);
+  if (Number.isNaN(createdAt.getTime())) throw new Error("Invalid signal created_at");
+  return {
+    id: row.id,
+    sourceKey: asText(row.source_key) ?? asText(row.sourceKey) ?? "",
+    sourceLocator: asText(row.source_locator) ?? asText(row.sourceLocator) ?? "",
+    sourceFingerprint:
+      asText(row.source_fingerprint) ?? asText(row.sourceFingerprint) ?? "",
+    rawName: asText(row.raw_name) ?? asText(row.rawName) ?? "",
+    rawDomain: asText(row.raw_domain) ?? asText(row.rawDomain),
+    uei: asText(row.uei),
+    cage: asText(row.cage),
+    city: asText(row.city),
+    state: asText(row.state),
+    country: asText(row.country),
+    awardCount:
+      typeof row.award_count === "number"
+        ? row.award_count
+        : typeof row.awardCount === "number"
+          ? row.awardCount
+          : null,
+    sourcePayload: asRecord(row.source_payload ?? row.sourcePayload),
+    createdAt,
+  };
+}
+
+function emptyResearchEvidence(
+  row: CandidateSignalRow,
+): SourcedSignalResearchEvidence {
+  const signal = toEvidenceSourceSignal(row);
+  return {
+    version: SIGNAL_RESEARCH_VERSION,
+    signalId: signal.id,
+    sourceContext: {
+      sourceKey: signal.sourceKey,
+      sourceLocator: signal.sourceLocator,
+      sourceFingerprint: signal.sourceFingerprint,
+      rawName: signal.rawName,
+      rawDomain: signal.rawDomain,
+      uei: signal.uei,
+      cage: signal.cage,
+      city: signal.city,
+      state: signal.state,
+      country: signal.country,
+      awardCount: signal.awardCount,
+    },
+    identity: {
+      status: "not_found",
+      verifiedDomain: null,
+      legalName: signal.rawName,
+      proofEvidenceIds: [],
+    },
+    website: {
+      status: "not_checked",
+      offering: "unknown",
+      excerpts: "",
+      productHints: [],
+      namedProductEvidenceIds: [],
+    },
+    ownership: {
+      status: "unknown",
+      owner: null,
+      year: null,
+      conflicting: false,
+      currentness: "unknown",
+      supportEvidenceIds: [],
+    },
+    size: {
+      status: "unknown",
+      assessment: "unknown",
+      conflicting: false,
+      indicators: [],
+    },
+    headquarters: {
+      status: "unknown",
+      city: null,
+      state: null,
+      country: null,
+      supportEvidenceIds: [],
+    },
+    missingFacts: [
+      "verified_official_identity",
+      "first_party_named_product",
+      "ownership",
+      "revenue_under_50m",
+      "us_headquarters",
+    ],
+    checkedSources: [],
+    evidenceRefs: [],
+  };
+}
+
+function sourcedResearchEvidence(
+  row: CandidateSignalRow,
+  value: SignalReviewJson,
+): SourcedSignalResearchEvidence {
+  return value["version"] === SIGNAL_RESEARCH_VERSION
+    ? (value as unknown as SourcedSignalResearchEvidence)
+    : emptyResearchEvidence(row);
+}
+
+const ANALYST_MODEL_ATTEMPT_TIMEOUT_MS = 60_000;
+const ANALYST_NETWORK_RESOURCE_TIMEOUT_MS = 15_000;
+const ANALYST_CLAIM_LEASE_MS = 10 * 60_000;
+
+function stepActiveMs(step: SignalAnalystStep, now: Date): number {
+  if (
+    step.status === "quota_deferred" &&
+    step.modelUsageReceiptId === null &&
+    step.response?.["providerReceiptId"] == null
+  ) {
+    return 0;
+  }
+  const end = step.finishedAt ?? step.lateObservedAt ?? now;
+  const elapsed = Math.max(0, end.getTime() - step.startedAt.getTime());
+  if (
+    step.status !== "in_progress" &&
+    step.status !== "interrupted" &&
+    step.status !== "late_result"
+  ) {
+    return elapsed;
+  }
+  const uncertainExecutionBound =
+    step.kind === "planner" || step.kind === "final_verifier"
+      ? ANALYST_MODEL_ATTEMPT_TIMEOUT_MS
+      : step.kind === "resource:primary_records"
+        ? ANALYST_CLAIM_LEASE_MS
+        : ANALYST_NETWORK_RESOURCE_TIMEOUT_MS;
+  return Math.min(elapsed, uncertainExecutionBound);
+}
+
+function isModelAttempt(step: SignalAnalystStep): boolean {
+  if (step.kind !== "planner" && step.kind !== "final_verifier") return false;
+  return step.status !== "quota_deferred" || step.modelUsageReceiptId !== null;
+}
+
+function isResourceAttempt(step: SignalAnalystStep): boolean {
+  if (!step.kind.startsWith("resource:")) return false;
+  if (step.status === "in_progress" || step.status === "interrupted") return true;
+  if (
+    step.status === "quota_deferred" ||
+    step.status === "exhausted" ||
+    (step.status === "late_result" &&
+      (step.observedStatus === "quota_deferred" ||
+        step.observedStatus === "exhausted"))
+  ) {
+    return step.response?.["providerReceiptId"] != null;
+  }
+  return true;
+}
+
+function observationFromStep(
+  step: SignalAnalystStep,
+): AnalystResourceObservation | null {
+  if (
+    step.response === null ||
+    !(
+      step.status === "completed" ||
+      (step.status === "late_result" && step.observedStatus === "completed")
+    )
+  ) {
+    return null;
+  }
+  return typeof step.response["tool"] === "string"
+    ? (step.response as unknown as AnalystResourceObservation)
+    : null;
+}
+
+interface RetainedAnalystObservation {
+  readonly stepId: string;
+  readonly observation: AnalystResourceObservation;
+}
+
+function retainedObservations(
+  steps: readonly SignalAnalystStep[],
+): RetainedAnalystObservation[] {
+  return steps.flatMap((step) => {
+    const observation = observationFromStep(step);
+    return observation === null ? [] : [{ stepId: step.id, observation }];
+  });
+}
+
+function knownAnalystUrls(
+  evidence: FaaEvidencePackage,
+  observations: readonly RetainedAnalystObservation[],
+): URL[] {
+  const values: (string | null)[] = [
+    evidence.guidUrl,
+    evidence.domain === null ? null : `https://${evidence.domain}/`,
+    evidence.reportedDomain === null ? null : `https://${evidence.reportedDomain}/`,
+    ...evidence.sourceEvidence.map((source) => source.url),
+  ];
+  for (const { observation } of observations) {
+    if (observation.tool === "exa_search") {
+      values.push(...observation.results.map((result) => result.url));
+    } else if (observation.tool === "public_page") {
+      values.push(...observation.linkedUrls);
+      values.push(
+        ...observation.sourceReferences.map(
+          (source) => source.finalUrl ?? source.locator,
+        ),
+      );
+    } else if (observation.tool === "exa_contents") {
+      values.push(...observation.pages.map((page) => page.url));
+    }
+  }
+  return values.flatMap((value) => {
+    if (value === null) return [];
+    try {
+      return [new URL(value)];
+    } catch {
+      return [];
+    }
+  });
+}
+
+function requestApprovalError(
+  request: AnalystResourceRequest,
+  tools: readonly AnalystResourceTool[],
+  knownUrls: readonly URL[],
+): string | null {
+  if (!tools.includes(request.tool)) {
+    return `${request.tool} is unavailable in the current execution mode`;
+  }
+  if (request.tool === "public_page") {
+    const requested = new URL(request.url);
+    if (
+      !knownUrls.some(
+        (known) =>
+          known.href === requested.href ||
+          known.hostname.toLowerCase() === requested.hostname.toLowerCase(),
+      )
+    ) {
+      return "public_page URL was not supplied by the signal or an observation";
+    }
+  }
+  if (
+    request.tool === "exa_contents" &&
+    request.urls.some(
+      (url) => !knownUrls.some((known) => known.href === new URL(url).href),
+    )
+  ) {
+    return "exa_contents URL was not supplied by the signal or an observation";
+  }
+  return null;
+}
+
+type ScopeWithCooldown = ResearchProviderBudgetScopeView & {
+  readonly providerCooldown?: { readonly retryAt: Date; readonly reason: string } | null;
+};
+
+function scopeProblem(
+  mode: Exclude<AnalystExecutionMode, "disabled">,
+  scope: ResearchProviderBudgetScopeView | null,
+  signalId?: string,
+): string | null {
+  if (scope === null) return "Configured analyst scope does not exist";
+  if (scope.scope.sealedAt === null) return "Configured analyst scope is not sealed";
+  if (scope.scope.provider !== "exa") return "Configured analyst scope is not for Exa";
+  if (signalId !== undefined && !scope.allowlistedSourceSignalIds.includes(signalId)) {
+    return "Source signal is not allowlisted by the configured analyst scope";
+  }
+  if (scope.status === "closed") return "Configured analyst scope is closed";
+  if (
+    mode === "bounded_paid" &&
+    scope.status !== "active" &&
+    scope.status !== "exhausted"
+  ) {
+    return "Bounded-paid analyst scope is not active";
+  }
+  return null;
+}
+
+function availableTools(
+  mode: Exclude<AnalystExecutionMode, "disabled">,
+  scope: ResearchProviderBudgetScopeView,
+  now: Date,
+): AnalystResourceTool[] {
+  const free: AnalystResourceTool[] = ["public_page", "primary_records"];
+  const cooldown = (scope as ScopeWithCooldown).providerCooldown;
+  return mode === "bounded_paid" &&
+    scope.status === "active" &&
+    !(cooldown !== null && cooldown !== undefined && cooldown.retryAt > now)
+    ? [...free, "exa_search", "exa_contents"]
+    : free;
+}
+
+function capabilityHash(
+  mode: Exclude<AnalystExecutionMode, "disabled">,
+  scope: ResearchProviderBudgetScopeView,
+): string {
+  const cooldown = (scope as ScopeWithCooldown).providerCooldown;
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        mode,
+        id: scope.scope.id,
+        permit: scope.scope.permitStatus,
+        status: scope.status,
+        cooldown: cooldown?.retryAt.toISOString() ?? null,
+      }),
+    )
+    .digest("hex");
+}
+
+function groundedAnalystFacts(
+  evidence: FaaEvidencePackage,
+  research: SourcedSignalResearchEvidence,
+): Readonly<Record<string, GroundedAnalystFact>> {
+  const validSupportIds = new Set(
+    research.evidenceRefs
+      .filter((reference) => reference.role === "support")
+      .map((reference) => reference.evidenceId),
+  );
+  const activeSupportIds = (ids: readonly string[]) =>
+    [...new Set(ids.filter((id) => validSupportIds.has(id)))];
+  const namedProductProofKeys = new Set(
+    evidence.namedProductProofs.map(stableSourceEvidenceKey),
+  );
+  const namedProductIds = new Set(research.website.namedProductEvidenceIds);
+  const namedProductReferences = evidence.sourcedSupport.product
+    ? research.evidenceRefs.filter((reference) => {
+        if (
+          reference.role !== "support" ||
+          reference.stage !== "website" ||
+          !namedProductIds.has(reference.evidenceId)
+        ) {
+          return false;
+        }
+        const stable = stableSourceEvidenceEntry(reference);
+        return (
+          stable !== null &&
+          stable.quote !== "" &&
+          namedProductProofKeys.has(stableSourceEvidenceKey(stable))
+        );
+      })
+    : [];
+  const namedProductQuotes = [
+    ...new Set(namedProductReferences.map((reference) => reference.quote.trim())),
+  ];
+  const namedProductEvidenceIds = [
+    ...new Set(namedProductReferences.map((reference) => reference.evidenceId)),
+  ];
+  return {
+    identity: {
+      status: evidence.identityStatus === "verified" ? "answered" : "unresolved",
+      answer:
+        evidence.identityStatus === "verified"
+          ? `Verified identity: ${evidence.name}${
+              evidence.domain === null ? "" : ` (${evidence.domain})`
+            }`
+          : null,
+      evidenceIds: evidence.sourcedSupport.identity
+        ? activeSupportIds(research.identity.proofEvidenceIds)
+        : [],
+    },
+    productFit: {
+      status: namedProductEvidenceIds.length > 0 ? "answered" : "unresolved",
+      answer:
+        namedProductEvidenceIds.length > 0
+          ? `Source-backed named products: ${namedProductQuotes.join(", ")}`
+          : null,
+      evidenceIds: namedProductEvidenceIds,
+    },
+    headquarters: {
+      status: evidence.evidenceConflicts.headquarters
+        ? "conflicted"
+        : evidence.headquarters.status === "supported"
+          ? "answered"
+          : "unresolved",
+      answer:
+        evidence.headquarters.status === "supported"
+          ? [
+              evidence.headquarters.city,
+              evidence.headquarters.state,
+              evidence.headquarters.country,
+            ]
+              .filter((value): value is string => value !== null)
+              .join(", ")
+          : null,
+      evidenceIds: evidence.sourcedSupport.headquarters
+        ? activeSupportIds(research.headquarters.supportEvidenceIds)
+        : [],
+    },
+    ownership: {
+      status: evidence.evidenceConflicts.ownership
+        ? "conflicted"
+        : evidence.ownershipStatus !== "unknown"
+          ? "answered"
+          : "unresolved",
+      answer:
+        evidence.ownershipStatus === "unknown"
+          ? null
+          : `Current ownership assessment: ${evidence.ownershipStatus}${
+              evidence.ownershipOwner === null ? "" : ` (${evidence.ownershipOwner})`
+            }`,
+      evidenceIds: evidence.sourcedSupport.ownership
+        ? activeSupportIds(research.ownership.supportEvidenceIds)
+        : [],
+    },
+    revenue: {
+      status: evidence.evidenceConflicts.size
+        ? "conflicted"
+        : evidence.revenueAssessment !== "unknown"
+          ? "answered"
+          : "unresolved",
+      answer:
+        evidence.revenueAssessment === "unknown"
+          ? null
+          : `Annual revenue assessment: ${evidence.revenueAssessment}`,
+      evidenceIds: evidence.sourcedSupport.size
+        ? activeSupportIds(
+            research.size.indicators
+              .filter((indicator) => indicator.kind === "revenue")
+              .map((indicator) => indicator.evidenceId),
+          )
+        : [],
+    },
+    sourceCoverage: {
+      status: research.evidenceRefs.some((reference) => reference.role === "support")
+        ? "answered"
+        : "unresolved",
+      answer: research.evidenceRefs.some((reference) => reference.role === "support")
+        ? "Attributable support-role evidence was admitted."
+        : null,
+      evidenceIds: research.evidenceRefs
+        .filter((reference) => reference.role === "support")
+        .map((reference) => reference.evidenceId),
+    },
+    sourceAvailability: { status: "unresolved", answer: null, evidenceIds: [] },
+  };
+}
+
+function knownAttemptCost(
+  attempts: readonly OpenRouterAttemptTelemetry[],
+): number | null {
+  return attempts.length === 0 ||
+    attempts.some((attempt) => attempt.costUsd === null)
+    ? null
+    : attempts.reduce((sum, attempt) => sum + (attempt.costUsd ?? 0), 0);
+}
+
+async function callConfiguredMuse(
+  client: OpenRouterClient,
+  request: AnalystModelCallRequest,
+): Promise<AnalystModelCallResult> {
+  const response =
+    await client.generateStructured({
+      route: "fast",
+      models: {
+        fast: request.modelId,
+        deep: request.modelId,
+        fallback: request.modelId,
+      },
+      schemaName: request.mustFinalize
+        ? SIGNAL_ANALYST_FINAL_PROMPT_VERSION
+        : SIGNAL_ANALYST_PLANNER_PROMPT_VERSION,
+      schema: signalAnalystModelResponseSchema,
+      systemPrompt: SIGNAL_ANALYST_SYSTEM_PROMPT,
+      prompt: request.prompt,
+      maxAttempts: 1,
+      timeoutMs: 60_000,
+    });
+  return {
+    turn: response.data.turn,
+    returnedModel: response.telemetry.model,
+    costUsd: response.telemetry.costUsd,
+  };
+}
+
+async function executeJournalledModelCall(input: {
+  readonly db: Database;
+  readonly claim: SignalReviewClaim;
+  readonly step: SignalAnalystStep;
+  readonly config: FaaEnsembleConfig;
+  readonly promptVersion: string;
+  readonly call: () => Promise<AnalystModelCallResult>;
+}): Promise<{
+  readonly result: AnalystModelCallResult | null;
+  readonly error: unknown;
+  readonly claimCurrent: boolean;
+  readonly costUsd: number | null;
+}> {
+  let result: AnalystModelCallResult | null = null;
+  let error: unknown = null;
+  let costUsd: number | null = null;
+  let returnedModel: string | null = null;
+  try {
+    const received = await input.call();
+    costUsd = received.costUsd;
+    returnedModel = received.returnedModel;
+    const parsedTurn = signalAnalystTurnSchema.safeParse(received.turn);
+    if (parsedTurn.success) {
+      result = { ...received, turn: parsedTurn.data };
+    } else {
+      error = new Error("Analyst model returned malformed structured output");
+    }
+  } catch (caught) {
+    error = caught;
+    if (caught instanceof OpenRouterClientError) {
+      costUsd = knownAttemptCost(caught.attempts);
+      returnedModel = caught.attempts.at(-1)?.model ?? null;
+    }
+  }
+  const receiptId = randomUUID();
+  await insertFaaReviewModelUsageReceipt(input.db, {
+    id: receiptId,
+    sourceSignalId: input.claim.signalId,
+    configuredModel: input.config.modelA,
+    returnedModel,
+    phase: "muse",
+    rung: null,
+    promptVersion: input.promptVersion,
+    inputHash: input.claim.inputHash,
+    costUsd: costUsd === null ? null : costUsd.toString(),
+    observedAt: new Date(),
+  });
+  const finished = await finishSignalAnalystStep(input.db, input.step.id, {
+    status:
+      result !== null
+        ? "completed"
+        : isOpenRouterQuotaError(error)
+          ? "quota_deferred"
+          : "retryable_failure",
+    response: result === null ? null : (result.turn as unknown as SignalReviewJson),
+    error: result === null ? errorMessage(error) : null,
+    modelUsageReceiptId: receiptId,
+    costKnown: costUsd !== null,
+    costUsd: costUsd === null ? null : costUsd.toString(),
+  });
+  return { result, error, claimCurrent: finished.claimCurrent, costUsd };
+}
+
+class NoMaterialAnalystEvidence extends Error {}
+
 export async function runMuseReviews(
   db: Database = getDatabase(),
   opts: MuseReviewOptions = {},
   deps: MuseReviewDependencies = {},
 ): Promise<MuseReviewSummary> {
+  const mode = opts.analystMode ?? "disabled";
+  const summary = {
+    verified: 0,
+    confirmed: 0,
+    overruled: 0,
+    evidenceRequeued: 0,
+    costUsd: 0,
+    deferred: 0,
+    errors: 0,
+    stale: 0,
+  };
+  if (mode === "disabled") return summary;
+  const scopeId = opts.exaBudgetScopeId?.trim() ?? "";
+  if (scopeId === "") return { ...summary, deferred: 1 };
+  const clock = deps.now ?? (() => new Date());
+  const initialScope = await readResearchProviderBudgetScope(db, scopeId, clock());
+  if (scopeProblem(mode, initialScope) !== null || initialScope === null) {
+    return { ...summary, deferred: 1 };
+  }
   const config = deps.config ?? resolveEnsembleConfig();
   const batchLimit = Math.max(1, opts.limit ?? 120);
   const concurrency = Math.max(1, opts.concurrency ?? config.concurrency);
+  const requestedLimits = normalizedAnalystLimits(opts.limits);
+  const sourceSignalIds = initialScope.allowlistedSourceSignalIds;
   await reconcileCurrentReviewInputs(db, {
-    sourceLimit: Math.max(batchLimit, 250),
+    sourceLimit: Math.max(batchLimit, sourceSignalIds.length),
+    sourceSignalIds,
     config,
   });
-  const apiKey = deps.apiKey ?? process.env["OPENROUTER_API_KEY"] ?? "";
   const client =
-    deps.evaluateModel === undefined ? new OpenRouterClient(apiKey) : null;
-  const evaluate =
-    deps.evaluateModel ??
-    ((modelId: string, evidence: FaaEvidencePackage) => {
-      if (client === null) {
-        throw new Error("OPENROUTER_API_KEY is required");
-      }
-      return defaultEvaluateModel(client, modelId, evidence);
+    deps.callAnalystModel === undefined
+      ? new OpenRouterClient(deps.apiKey ?? process.env["OPENROUTER_API_KEY"] ?? "")
+      : null;
+  const modelCall =
+    deps.callAnalystModel ??
+    ((request: AnalystModelCallRequest) => {
+      if (client === null) throw new Error("OPENROUTER_API_KEY is required");
+      return callConfiguredMuse(client, request);
     });
-  let verified = 0;
-  let confirmed = 0;
-  let overruled = 0;
-  let errors = 0;
-  let stale = 0;
-  let deferred = 0;
-  let costUsd = 0;
+  const executor =
+    deps.resourceExecutor ??
+    createAnalystResourceExecutor({
+      db,
+      executionMode: mode,
+      exaBudgetScopeId: scopeId,
+      ...(process.env["EXA_API_KEY"] === undefined
+        ? {}
+        : { exaApiKey: process.env["EXA_API_KEY"]! }),
+    });
   let claimed = 0;
   while (claimed < batchLimit) {
     const claims = await claimSignalReviews(db, {
       phase: "muse",
       limit: Math.min(concurrency, batchLimit - claimed),
       leaseSeconds: 600,
+      sourceSignalIds,
     });
     if (claims.length === 0) break;
     claimed += claims.length;
-    await runWithConcurrency(claims, concurrency, async (initialClaim) => {
-      const claim = initialClaim;
+    await runWithConcurrency(claims, concurrency, async (claim) => {
       try {
-        const row = await loadSignalReviewRow(db, claim.signalId);
-        if (row === null) {
-          await failSignalReview(db, claim, "Source signal no longer exists");
-          errors += 1;
+        let caseScope = await readResearchProviderBudgetScope(db, scopeId, clock());
+        const accessProblem = scopeProblem(mode, caseScope, claim.signalId);
+        if (accessProblem !== null || caseScope === null) {
+          await deferSignalReview(db, claim, accessProblem ?? "Analyst scope unavailable");
+          summary.deferred += 1;
           return;
         }
-        const evidence = buildEvidencePackage(row, claim.researchEvidence);
+        const row = await loadSignalReviewRow(db, claim.signalId);
+        if (row === null || claim.inputHash === null) {
+          await failSignalReview(db, claim, "Source signal or current input unavailable");
+          summary.errors += 1;
+          return;
+        }
+        const research = sourcedResearchEvidence(row, claim.researchEvidence);
+        const evidence = buildEvidencePackage(row, claim.researchEvidence, {
+          sourceResearchStatus: sourceResearchStatusFromClaim(claim),
+        });
         const manifest = buildFaaReviewInputManifest(
           evidence,
           config,
@@ -1727,24 +2728,19 @@ export async function runMuseReviews(
         );
         const inputHash = hashFaaReviewInput(manifest);
         if (inputHash !== claim.inputHash) {
-          const updatedClaim = await updateClaimedSignalReviewInput(db, claim, {
+          const updated = await updateClaimedSignalReviewInput(db, claim, {
             inputHash,
             inputManifest: manifest,
           });
-          if (updatedClaim !== null) {
+          if (updated !== null) {
             await commitSignalReview(
               db,
-              updatedClaim,
-              {
-                phase: "jev",
-                inputHash,
-                inputManifest: manifest,
-                jevEvaluationId: null,
-              },
+              updated,
+              { phase: "jev", inputHash, inputManifest: manifest, jevEvaluationId: null },
               async () => undefined,
             );
           }
-          stale += 1;
+          summary.stale += 1;
           return;
         }
         const jev = await loadLinkedJevEvaluation(db, claim);
@@ -1755,200 +2751,1046 @@ export async function runMuseReviews(
             { phase: "jev", jevEvaluationId: null },
             async () => undefined,
           );
-          stale += 1;
+          summary.stale += 1;
           return;
         }
-
-        const ensureBudget = createDailyModelBudgetGate(db, deps);
-        await ensureBudget();
-        await sleep(config.requestDelayMs);
-        const receiptId = randomUUID();
-        let outcome: ModelEvalOutcome;
-        try {
-          outcome = await evaluate(config.modelA, evidence);
-        } catch (error) {
-          if (!(error instanceof OpenRouterClientError)) throw error;
-          outcome = failedModelOutcome(error);
-        }
-        const observedAt = new Date();
-        costUsd += outcome.costUsd ?? 0;
-        await insertFaaReviewModelUsageReceipt(db, {
-          id: receiptId,
-          sourceSignalId: claim.signalId,
-          configuredModel: config.modelA,
-          returnedModel: outcome.returnedModel ?? null,
-          phase: "muse",
-          rung: null,
-          promptVersion: FAA_EVALUATOR_PROMPT_VERSION,
+        const currentGaps = currentTriageGaps(jev.parsed);
+        const ensured = await ensureSignalAnalystCase(db, claim, {
+          policyVersion: FAA_ANALYST_POLICY_VERSION,
           inputHash,
-          costUsd: outcome.costUsd === null ? null : outcome.costUsd.toString(),
-          observedAt,
+          limits: requestedLimits as unknown as SignalReviewJson,
+          initialCheckpoint:
+            initialAnalystCheckpoint(currentGaps) as unknown as SignalReviewJson,
         });
-        if (!outcome.ok) {
-          if (outcome.deferred === true) {
-            if (await deferSignalReview(db, claim, outcome.error)) {
-              deferred += 1;
-            } else {
-              stale += 1;
-            }
-            return;
-          }
-          await failSignalReview(db, claim, outcome.error);
-          errors += 1;
+        if (!ensured.accepted) {
+          summary.stale += 1;
           return;
         }
-
-        const currentRow = await loadSignalReviewRow(db, claim.signalId);
-        if (currentRow === null) {
-          await failSignalReview(
+        let view = await readCurrentSignalAnalystCase(db, claim.signalId, {
+          expectedReviewInputContract: currentFaaReviewInputContract(config),
+          stepLimit: 100,
+        });
+        if (view === null || view.case.id !== ensured.value.id) {
+          summary.stale += 1;
+          return;
+        }
+        const analystCaseId = view.case.id;
+        if (view.case.status === "exhausted") {
+          const settled = await commitSignalReview(
             db,
             claim,
-            "Source signal changed or disappeared",
+            { phase: "settled" },
+            async () => undefined,
           );
-          stale += 1;
+          if (!settled.accepted) summary.stale += 1;
           return;
         }
-        const currentManifest = buildFaaReviewInputManifest(
-          buildEvidencePackage(currentRow, claim.researchEvidence),
-          config,
-          sourceRevisionFromRow(currentRow),
+        const limits = signalAnalystLimitsSchema.parse(view.case.limits);
+        let checkpoint = mergeAnalystGaps(
+          signalAnalystCheckpointSchema.parse(view.case.checkpoint),
+          currentGaps,
         );
-        if (hashFaaReviewInput(currentManifest) !== inputHash) {
-          const updatedClaim = await updateClaimedSignalReviewInput(db, claim, {
-            inputHash: hashFaaReviewInput(currentManifest),
-            inputManifest: currentManifest,
-          });
-          if (updatedClaim !== null) {
-            await commitSignalReview(
-              db,
-              updatedClaim,
-              {
-                phase: "jev",
-                inputHash: hashFaaReviewInput(currentManifest),
-                inputManifest: currentManifest,
-                jevEvaluationId: null,
-              },
-              async () => undefined,
-            );
-          }
-          stale += 1;
-          return;
-        }
-
-        const museEvaluationId = evaluationIdFor(
-          inputHash,
-          config.modelA,
-          FAA_EVALUATOR_PROMPT_VERSION,
-        );
-        const agreed = outcome.result.decision === jev.decision;
-        const finalDecision = agreed ? jev.decision : "research";
-        const committed = await commitSignalReview(
-          db,
-          claim,
-          { phase: "settled" },
-          async (tx) => {
-            const persistenceInput = { inputHash, inputManifest: manifest };
-            const persistedMuseId = await persistEvaluation(
-              tx as Database,
-              claim.signalId,
-              config.modelA,
-              outcome,
-              persistenceInput,
-              museEvaluationId,
-            );
-            if (persistedMuseId !== museEvaluationId) {
-              throw new Error(
-                "Muse persistence returned a non-current evaluation id",
-              );
-            }
-            await persistResult(tx as Database, {
-              signalId: claim.signalId,
-              modelAId: config.jevModel,
-              modelBId: config.modelA,
-              modelADecision: jev.decision,
-              modelBDecision: outcome.result.decision,
-              agreed,
-              adjudicationRequired: false,
-              adjudicatorModel: null,
-              adjudicatorOutput: null,
-              finalDecision,
-              finalConfidence: outcome.result.confidence,
-              reason: agreed
-                ? "Current terminal JEv decision confirmed by Muse"
-                : "Current terminal JEv decision not confirmed; retained as research",
-              falseNegativeRisk: outcome.result.false_negative_risk,
-              input: persistenceInput,
-              jevEvaluationId: jev.id,
-              museEvaluationId,
-            });
-          },
-        );
-        if (!committed.accepted) {
-          stale += 1;
-          return;
-        }
-        verified += 1;
-        if (agreed) confirmed += 1;
-        else overruled += 1;
-      } catch (error) {
+        const capability = capabilityHash(mode, caseScope);
+        const initialTools = availableTools(mode, caseScope, clock());
+        const blockedTool = checkpoint.pendingAction?.request.tool;
+        const capabilityRemainsBlocked =
+          blockedTool === undefined
+            ? !initialTools.includes("exa_search")
+            : !initialTools.includes(blockedTool);
         if (
-          error instanceof DailyModelBudgetDeferred ||
-          isOpenRouterQuotaError(error)
+          checkpoint.blockedCapability?.fingerprint === capability &&
+          capabilityRemainsBlocked
         ) {
-          if (await deferSignalReview(db, claim, error)) {
-            deferred += 1;
-          } else {
-            stale += 1;
+          await checkpointSignalAnalystCase(db, claim, view.case.id, {
+            checkpoint: checkpoint as unknown as SignalReviewJson,
+            status: "deferred",
+            inputHash,
+            nextAttemptAt: new Date(clock().getTime() + SIGNAL_ANALYST_DEFER_MS),
+            stopReason: checkpoint.blockedCapability.reason,
+            memo: view.case.memo,
+          });
+          await deferSignalReview(db, claim, checkpoint.blockedCapability.reason);
+          summary.deferred += 1;
+          return;
+        }
+        const completeBoundedEpisodeWithoutVerification = async (
+          reason: string,
+        ): Promise<void> => {
+          const memo = buildGroundedSignalAnalystMemo({
+            inputHash,
+            createdAt: clock(),
+            summary:
+              checkpoint.lastAnalysisSummary ??
+              "The bounded analyst episode ended without a valid final verification; unresolved questions remain explicit.",
+            gaps: checkpoint.gapCatalog,
+            currentGapIds: new Set(currentGaps.map((gap) => gap.id)),
+            factsByField: groundedAnalystFacts(evidence, research),
+            unresolvedQuestions: currentGaps.map((gap) => gap.question),
+            nextActions: [],
+          });
+          const currentRow = await loadSignalReviewRow(db, claim.signalId);
+          const currentManifest =
+            currentRow === null
+              ? null
+              : buildFaaReviewInputManifest(
+                  buildEvidencePackage(currentRow, claim.researchEvidence, {
+                    sourceResearchStatus: sourceResearchStatusFromClaim(claim),
+                  }),
+                  config,
+                  sourceRevisionFromRow(currentRow),
+                );
+          if (
+            currentManifest === null ||
+            hashFaaReviewInput(currentManifest) !== inputHash
+          ) {
+            summary.stale += 1;
+            return;
           }
+          const finalCheckpoint: SignalAnalystCheckpoint = {
+            ...checkpoint,
+            pendingAction: null,
+            pendingModelTurn: null,
+            accessLimits: [...new Set([...checkpoint.accessLimits, reason])],
+            blockedCapability: null,
+          };
+          const exhausted = await checkpointSignalAnalystCase(
+            db,
+            claim,
+            analystCaseId,
+            {
+              checkpoint: finalCheckpoint as unknown as SignalReviewJson,
+              status: "exhausted",
+              inputHash,
+              stopReason: reason,
+              memo: memo as unknown as SignalReviewJson,
+            },
+          );
+          if (!exhausted.accepted) {
+            summary.stale += 1;
+            return;
+          }
+          const settled = await commitSignalReview(
+            db,
+            claim,
+            { phase: "settled" },
+            async () => undefined,
+          );
+          if (!settled.accepted) summary.stale += 1;
+        };
+        checkpoint = { ...checkpoint, blockedCapability: null };
+        for (;;) {
+          view = await readCurrentSignalAnalystCase(db, claim.signalId, {
+            expectedReviewInputContract: currentFaaReviewInputContract(config),
+            stepLimit: 100,
+          });
+          if (view === null || view.case.id !== ensured.value.id) {
+            summary.stale += 1;
+            return;
+          }
+          const steps = view.steps;
+          const observations = retainedObservations(steps);
+          const modelCount = steps.filter(isModelAttempt).length;
+          const resourceCount = steps.filter(isResourceAttempt).length;
+          const activeMs = steps.reduce(
+            (total, step) => total + stepActiveMs(step, clock()),
+            0,
+          );
+          let tools = availableTools(mode, caseScope, clock());
+          const mustFinalize =
+            modelCount + 1 >= limits.maxModelCalls ||
+            resourceCount >= limits.maxResourceActions ||
+            activeMs >= limits.maxActiveWorkMs;
+
+          if (checkpoint.pendingAction !== null) {
+            const pending = checkpoint.pendingAction;
+            const requestHash = analystResourceRequestHash(pending.request);
+            const knownCompleted = steps.find(
+              (step) =>
+                step.requestHash === requestHash &&
+                observationFromStep(step) !== null,
+            );
+            const requiresReclaim = steps.some(
+              (step) =>
+                step.requestHash === requestHash &&
+                step.status === "in_progress",
+            );
+            if (knownCompleted === undefined && !requiresReclaim) {
+              const hardStopReason =
+                resourceCount >= limits.maxResourceActions
+                  ? "Resource action limit reached before the pending request could run"
+                  : activeMs >= limits.maxActiveWorkMs
+                    ? "Active-work limit reached before the pending request could run"
+                    : null;
+              if (hardStopReason !== null) {
+                checkpoint = {
+                  ...checkpoint,
+                  pendingAction: null,
+                  accessLimits: [
+                    ...new Set([
+                      ...checkpoint.accessLimits,
+                      `${pending.request.tool}: ${hardStopReason}`,
+                    ]),
+                  ],
+                };
+                const saved = await checkpointSignalAnalystCase(
+                  db,
+                  claim,
+                  view.case.id,
+                  {
+                    checkpoint: checkpoint as unknown as SignalReviewJson,
+                    status: "active",
+                    inputHash,
+                    stopReason: hardStopReason,
+                  },
+                );
+                if (!saved.accepted) {
+                  summary.stale += 1;
+                  return;
+                }
+                continue;
+              }
+              caseScope = await readResearchProviderBudgetScope(
+                db,
+                scopeId,
+                clock(),
+              );
+              const pendingScopeProblem = scopeProblem(
+                mode,
+                caseScope,
+                claim.signalId,
+              );
+              if (pendingScopeProblem !== null || caseScope === null) {
+                const reason =
+                  pendingScopeProblem ?? "Analyst scope unavailable";
+                checkpoint = {
+                  ...checkpoint,
+                  blockedCapability:
+                    caseScope === null
+                      ? checkpoint.blockedCapability
+                      : {
+                          fingerprint: capabilityHash(mode, caseScope),
+                          reason,
+                        },
+                };
+                await checkpointSignalAnalystCase(db, claim, view.case.id, {
+                  checkpoint: checkpoint as unknown as SignalReviewJson,
+                  status: "deferred",
+                  inputHash,
+                  nextAttemptAt: new Date(
+                    clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
+                  ),
+                  stopReason: reason,
+                });
+                await deferSignalReview(db, claim, reason);
+                summary.deferred += 1;
+                return;
+              }
+              tools = availableTools(mode, caseScope, clock());
+              if (!tools.includes(pending.request.tool)) {
+                const reason = `${pending.request.tool} is temporarily unavailable in the current analyst capability`;
+                checkpoint = {
+                  ...checkpoint,
+                  blockedCapability: {
+                    fingerprint: capabilityHash(mode, caseScope),
+                    reason,
+                  },
+                };
+                await checkpointSignalAnalystCase(db, claim, view.case.id, {
+                  checkpoint: checkpoint as unknown as SignalReviewJson,
+                  status: "deferred",
+                  inputHash,
+                  nextAttemptAt: new Date(
+                    clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
+                  ),
+                  stopReason: reason,
+                });
+                await deferSignalReview(db, claim, reason);
+                summary.deferred += 1;
+                return;
+              }
+            }
+            const approval =
+              knownCompleted === undefined && !requiresReclaim
+                ? requestApprovalError(
+                    pending.request,
+                    tools,
+                    knownAnalystUrls(evidence, observations),
+                  )
+                : null;
+            const begun =
+              knownCompleted === undefined
+                ? await beginSignalAnalystStep(db, claim, view.case.id, {
+                    kind: `resource:${pending.request.tool}`,
+                    request: pending.request as unknown as SignalReviewJson,
+                    requestHash,
+                  })
+                : {
+                    accepted: true as const,
+                    value: {
+                      outcome: "reused" as const,
+                      step: knownCompleted,
+                    },
+                  };
+            if (!begun.accepted) {
+              summary.stale += 1;
+              return;
+            }
+            if (begun.value.outcome === "interrupted") {
+              checkpoint = {
+                ...checkpoint,
+                accessLimits: [
+                  ...checkpoint.accessLimits,
+                  `${pending.request.tool}: interrupted with unknown outcome`,
+                ],
+              };
+              await checkpointSignalAnalystCase(db, claim, view.case.id, {
+                checkpoint: checkpoint as unknown as SignalReviewJson,
+                status: "deferred",
+                inputHash,
+                nextAttemptAt: new Date(clock().getTime() + SIGNAL_ANALYST_DEFER_MS),
+                stopReason: "Interrupted resource action has an unknown outcome",
+              });
+              await deferSignalReview(
+                db,
+                claim,
+                "Interrupted resource action has an unknown outcome",
+              );
+              summary.deferred += 1;
+              return;
+            }
+            if (begun.value.outcome === "active") {
+              await deferSignalReview(db, claim, "Resource action remains active");
+              summary.deferred += 1;
+              return;
+            }
+            if (begun.value.outcome === "exhausted") {
+              checkpoint = {
+                ...checkpoint,
+                pendingAction: null,
+                accessLimits: [
+                  ...new Set([
+                    ...checkpoint.accessLimits,
+                    begun.value.step.error ?? "Resource request is exhausted",
+                  ]),
+                ],
+              };
+              const saved = await checkpointSignalAnalystCase(
+                db,
+                claim,
+                view.case.id,
+                {
+                  checkpoint: checkpoint as unknown as SignalReviewJson,
+                  status: "active",
+                  inputHash,
+                },
+              );
+              if (!saved.accepted) {
+                summary.stale += 1;
+                return;
+              }
+              continue;
+            }
+            const step = begun.value.step;
+            let observation = observationFromStep(step);
+            if (observation === null) {
+              if (approval !== null) {
+                await finishSignalAnalystStep(db, step.id, {
+                  status: "exhausted",
+                  error: approval,
+                  costKnown: false,
+                  costUsd: null,
+                });
+                checkpoint = {
+                  ...checkpoint,
+                  pendingAction: null,
+                  accessLimits: [...checkpoint.accessLimits, approval],
+                };
+                continue;
+              }
+              const saved = await checkpointSignalAnalystCase(
+                db,
+                claim,
+                view.case.id,
+                {
+                  checkpoint: checkpoint as unknown as SignalReviewJson,
+                  status: "active",
+                  inputHash,
+                },
+              );
+              if (!saved.accepted) {
+                summary.stale += 1;
+                return;
+              }
+              observation = await executor.execute(
+                {
+                  sourceSignalId: claim.signalId,
+                  analystStepId: step.id,
+                  now: clock(),
+                },
+                pending.request,
+              );
+              const observedStatus =
+                observation.outcome === "deferred"
+                  ? "quota_deferred"
+                  : observation.failure?.retryable === true
+                    ? "retryable_failure"
+                    : "completed";
+              const finished = await finishSignalAnalystStep(db, step.id, {
+                status: observedStatus,
+                response: observation as unknown as SignalReviewJson,
+                error: observation.failure?.message ?? null,
+                costKnown: observation.providerCostKnown,
+                costUsd: observation.providerCostUsd,
+              });
+              if (!finished.claimCurrent) {
+                summary.stale += 1;
+                return;
+              }
+              if (observedStatus === "quota_deferred") {
+                await checkpointSignalAnalystCase(db, claim, view.case.id, {
+                  checkpoint: checkpoint as unknown as SignalReviewJson,
+                  status: "deferred",
+                  inputHash,
+                  nextAttemptAt: new Date(
+                    clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
+                  ),
+                  stopReason: observation.accessLimit ?? "Provider quota deferred",
+                });
+                await deferSignalReview(
+                  db,
+                  claim,
+                  observation.accessLimit ?? "Provider quota deferred",
+                );
+                summary.deferred += 1;
+                return;
+              }
+            }
+            if (observation.failure?.retryable === true) {
+              const reason = observation.failure.message;
+              await checkpointSignalAnalystCase(db, claim, view.case.id, {
+                checkpoint: checkpoint as unknown as SignalReviewJson,
+                status: "deferred",
+                inputHash,
+                nextAttemptAt: new Date(
+                  clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
+                ),
+                stopReason: reason,
+              });
+              await deferSignalReview(db, claim, reason);
+              summary.deferred += 1;
+              return;
+            }
+            const processed: SignalAnalystCheckpoint = {
+              ...checkpoint,
+              pendingAction: null,
+              processedObservationStepIds:
+                checkpoint.processedObservationStepIds.includes(step.id)
+                  ? checkpoint.processedObservationStepIds
+                  : [...checkpoint.processedObservationStepIds, step.id],
+              accessLimits:
+                observation.accessLimit === null
+                  ? checkpoint.accessLimits
+                  : [...checkpoint.accessLimits, observation.accessLimit],
+            };
+            if (
+              !checkpoint.processedObservationStepIds.includes(step.id) &&
+              observation.supportRole === "candidate_evidence"
+            ) {
+              try {
+                const published = await publishSignalAnalystEvidence(
+                  db,
+                  claim,
+                  view.case.id,
+                  async (tx) => {
+                    const admission = await admitSignalResourceEvidence({
+                      db: tx,
+                      signal: toEvidenceSourceSignal(row),
+                      currentEvidence: research,
+                      observations: [observation],
+                    });
+                    const nextManifest = buildFaaReviewInputManifest(
+                      buildEvidencePackage(row, admission.researchEvidence, {
+                        sourceResearchStatus: "complete",
+                      }),
+                      config,
+                      sourceRevisionFromRow(row),
+                    );
+                    if (hashFaaReviewInput(nextManifest) === inputHash) {
+                      throw new NoMaterialAnalystEvidence();
+                    }
+                    return {
+                      researchEvidence:
+                        admission.researchEvidence as unknown as SignalReviewJson,
+                      outcome: {
+                        status: "completed",
+                        analystCaseId,
+                        admittedEvidenceIds: admission.admittedEvidenceIds,
+                        conflicts: admission.conflicts,
+                      },
+                      checkpoint: processed as unknown as SignalReviewJson,
+                      value: admission,
+                    };
+                  },
+                );
+                if (!published.accepted) {
+                  summary.stale += 1;
+                  return;
+                }
+                summary.evidenceRequeued += 1;
+                return;
+              } catch (error) {
+                if (!(error instanceof NoMaterialAnalystEvidence)) throw error;
+              }
+            }
+            checkpoint = processed;
+            const saved = await checkpointSignalAnalystCase(
+              db,
+              claim,
+              view.case.id,
+              {
+                checkpoint: checkpoint as unknown as SignalReviewJson,
+                status: "active",
+                inputHash,
+              },
+            );
+            if (!saved.accepted) {
+              summary.stale += 1;
+              return;
+            }
+            continue;
+          }
+
+          if (checkpoint.pendingModelTurn === null) {
+            caseScope = await readResearchProviderBudgetScope(db, scopeId, clock());
+            const liveProblem = scopeProblem(mode, caseScope, claim.signalId);
+            if (liveProblem !== null || caseScope === null) {
+              await checkpointSignalAnalystCase(db, claim, view.case.id, {
+                checkpoint: checkpoint as unknown as SignalReviewJson,
+                status: "deferred",
+                inputHash,
+                nextAttemptAt: new Date(
+                  clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
+                ),
+                stopReason: liveProblem,
+              });
+              await deferSignalReview(
+                db,
+                claim,
+                liveProblem ?? "Analyst scope unavailable",
+              );
+              summary.deferred += 1;
+              return;
+            }
+            if (
+              modelCount >= limits.maxModelCalls ||
+              activeMs >= limits.maxActiveWorkMs
+            ) {
+              await completeBoundedEpisodeWithoutVerification(
+                modelCount >= limits.maxModelCalls
+                  ? "Model-call limit reached without a valid final verification"
+                  : "Active-work limit reached without a valid final verification",
+              );
+              return;
+            }
+            const liveTools = availableTools(mode, caseScope, clock());
+            const prompt = buildSignalAnalystPrompt({
+              company: evidence,
+              triage: jev.parsed,
+              gaps: checkpoint.gapCatalog,
+              availableTools: liveTools,
+              observations,
+              remainingModelCalls: Math.max(
+                0,
+                limits.maxModelCalls - modelCount,
+              ),
+              remainingResourceActions: Math.max(
+                0,
+                limits.maxResourceActions - resourceCount,
+              ),
+              activeTimeRemainingMs: Math.max(
+                0,
+                limits.maxActiveWorkMs - activeMs,
+              ),
+              mustFinalize,
+            });
+            const promptVersion = mustFinalize
+              ? SIGNAL_ANALYST_FINAL_PROMPT_VERSION
+              : SIGNAL_ANALYST_PLANNER_PROMPT_VERSION;
+            const requestHash = analystModelRequestHash({
+              caseId: view.case.id,
+              inputHash,
+              promptVersion,
+              prompt,
+            });
+            checkpoint = {
+              ...checkpoint,
+              pendingModelTurn: {
+                kind: mustFinalize ? "final_verifier" : "planner",
+                requestHash,
+                inputHash,
+                promptVersion,
+                prompt,
+                mustFinalize,
+              },
+            };
+            const saved = await checkpointSignalAnalystCase(
+              db,
+              claim,
+              view.case.id,
+              {
+                checkpoint: checkpoint as unknown as SignalReviewJson,
+                status: "active",
+                inputHash,
+              },
+            );
+            if (!saved.accepted) {
+              summary.stale += 1;
+              return;
+            }
+            continue;
+          }
+
+          const pendingModel = checkpoint.pendingModelTurn;
+          if (pendingModel.inputHash !== inputHash) {
+            checkpoint = { ...checkpoint, pendingModelTurn: null };
+            const saved = await checkpointSignalAnalystCase(
+              db,
+              claim,
+              view.case.id,
+              {
+                checkpoint: checkpoint as unknown as SignalReviewJson,
+                status: "active",
+                inputHash,
+                stopReason:
+                  "Discarded a pending model turn from a superseded input hash",
+              },
+            );
+            if (!saved.accepted) {
+              summary.stale += 1;
+              return;
+            }
+            continue;
+          }
+          const knownModelResult = steps.find(
+            (step) =>
+              step.requestHash === pendingModel.requestHash &&
+              step.response !== null &&
+              (step.status === "completed" ||
+                (step.status === "late_result" &&
+                  step.observedStatus === "completed")),
+          );
+          const modelRequiresReclaim = steps.some(
+            (step) =>
+              step.requestHash === pendingModel.requestHash &&
+              step.status === "in_progress",
+          );
+          if (
+            knownModelResult === undefined &&
+            !modelRequiresReclaim &&
+            (modelCount >= limits.maxModelCalls ||
+              activeMs >= limits.maxActiveWorkMs)
+          ) {
+            await completeBoundedEpisodeWithoutVerification(
+              modelCount >= limits.maxModelCalls
+                ? "Model-call limit reached without a valid final verification"
+                : "Active-work limit reached without a valid final verification",
+            );
+            return;
+          }
+          const begun =
+            knownModelResult === undefined
+              ? await beginSignalAnalystStep(db, claim, view.case.id, {
+                  kind: pendingModel.kind,
+                  request: {
+                    promptVersion: pendingModel.promptVersion,
+                    inputHash,
+                    promptSha256: createHash("sha256")
+                      .update(pendingModel.prompt)
+                      .digest("hex"),
+                  },
+                  requestHash: pendingModel.requestHash,
+                })
+              : {
+                  accepted: true as const,
+                  value: {
+                    outcome: "reused" as const,
+                    step: knownModelResult,
+                  },
+                };
+          if (!begun.accepted) {
+            summary.stale += 1;
+            return;
+          }
+          let turn: SignalAnalystTurn;
+          let finalCallCostUsd: number | null = null;
+          let finalReturnedModel: string | null = null;
+          if (begun.value.outcome === "reused") {
+            const reused = signalAnalystTurnSchema.safeParse(
+              begun.value.step.response,
+            );
+            if (!reused.success) {
+              await completeBoundedEpisodeWithoutVerification(
+                "Durably recorded model output was malformed and no valid final verification is available",
+              );
+              return;
+            }
+            turn = reused.data;
+            finalCallCostUsd =
+              begun.value.step.costUsd === null
+                ? null
+                : Number(begun.value.step.costUsd);
+            finalReturnedModel =
+              view.modelUsage.find(
+                (usage) => usage.id === begun.value.step.modelUsageReceiptId,
+              )?.returnedModel ?? null;
+          } else if (begun.value.outcome === "started") {
+            try {
+              const ensureBudget = createDailyModelBudgetGate(db, deps);
+              await ensureBudget();
+            } catch (error) {
+              await finishSignalAnalystStep(db, begun.value.step.id, {
+                status: "quota_deferred",
+                error: errorMessage(error),
+                costKnown: false,
+                costUsd: null,
+              });
+              throw error;
+            }
+            await sleep(config.requestDelayMs);
+            const modelResult = await executeJournalledModelCall({
+              db,
+              claim,
+              step: begun.value.step,
+              config,
+              promptVersion: pendingModel.promptVersion,
+              call: () =>
+                modelCall({
+                  modelId: config.modelA,
+                  prompt: pendingModel.prompt,
+                  mustFinalize: pendingModel.mustFinalize,
+                }),
+            });
+            summary.costUsd += modelResult.costUsd ?? 0;
+            if (!modelResult.claimCurrent) {
+              summary.stale += 1;
+              return;
+            }
+            if (modelResult.result === null) {
+              if (isOpenRouterQuotaError(modelResult.error)) {
+                await checkpointSignalAnalystCase(db, claim, view.case.id, {
+                  checkpoint: checkpoint as unknown as SignalReviewJson,
+                  status: "deferred",
+                  inputHash,
+                  nextAttemptAt: new Date(
+                    clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
+                  ),
+                  stopReason: errorMessage(modelResult.error),
+                });
+                await deferSignalReview(db, claim, modelResult.error);
+                summary.deferred += 1;
+              } else if (modelCount + 1 >= limits.maxModelCalls) {
+                await completeBoundedEpisodeWithoutVerification(
+                  `Final model opportunity failed: ${errorMessage(modelResult.error)}`,
+                );
+              } else {
+                await failSignalReview(
+                  db,
+                  claim,
+                  errorMessage(modelResult.error),
+                );
+                summary.errors += 1;
+              }
+              return;
+            }
+            turn = modelResult.result.turn;
+            finalCallCostUsd = modelResult.result.costUsd;
+            finalReturnedModel = modelResult.result.returnedModel;
+          } else {
+            await deferSignalReview(db, claim, "Analyst model action is unresolved");
+            summary.deferred += 1;
+            return;
+          }
+          caseScope = await readResearchProviderBudgetScope(db, scopeId, clock());
+          if (caseScope === null) {
+            await deferSignalReview(db, claim, "Analyst scope unavailable");
+            summary.deferred += 1;
+            return;
+          }
+          const liveTools = availableTools(mode, caseScope, clock());
+          if (turn.kind === "action") {
+            checkpoint = {
+              ...checkpoint,
+              pendingModelTurn: null,
+              lastAnalysisSummary: turn.analysisSummary,
+            };
+            const postModelView = await readCurrentSignalAnalystCase(
+              db,
+              claim.signalId,
+              {
+                expectedReviewInputContract: currentFaaReviewInputContract(config),
+                stepLimit: 100,
+              },
+            );
+            if (
+              postModelView === null ||
+              postModelView.case.id !== analystCaseId
+            ) {
+              summary.stale += 1;
+              return;
+            }
+            const postModelCount = postModelView.steps.filter(isModelAttempt).length;
+            const postActiveMs = postModelView.steps.reduce(
+              (total, step) => total + stepActiveMs(step, clock()),
+              0,
+            );
+            if (
+              pendingModel.mustFinalize ||
+              postModelCount >= limits.maxModelCalls ||
+              postActiveMs >= limits.maxActiveWorkMs
+            ) {
+              await completeBoundedEpisodeWithoutVerification(
+                "The model returned a resource action when the host required a final response",
+              );
+              return;
+            }
+            const pendingAction = {
+              plannerStepId: begun.value.step.id,
+              purpose: turn.purpose,
+              gapIds: turn.gapIds,
+              request: turn.request,
+            };
+            if (!liveTools.includes(turn.request.tool)) {
+              const reason = `${turn.request.tool} is temporarily unavailable in the current analyst capability`;
+              checkpoint = {
+                ...checkpoint,
+                pendingAction,
+                blockedCapability: {
+                  fingerprint: capabilityHash(mode, caseScope),
+                  reason,
+                },
+              };
+              await checkpointSignalAnalystCase(db, claim, view.case.id, {
+                checkpoint: checkpoint as unknown as SignalReviewJson,
+                status: "deferred",
+                inputHash,
+                nextAttemptAt: new Date(
+                  clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
+                ),
+                stopReason: reason,
+              });
+              await deferSignalReview(db, claim, reason);
+              summary.deferred += 1;
+              return;
+            }
+            const approval = requestApprovalError(
+              turn.request,
+              liveTools,
+              knownAnalystUrls(evidence, observations),
+            );
+            checkpoint = {
+              ...checkpoint,
+              pendingAction: approval === null ? pendingAction : null,
+              accessLimits:
+                approval === null
+                  ? checkpoint.accessLimits
+                  : [...checkpoint.accessLimits, approval],
+            };
+            const saved = await checkpointSignalAnalystCase(
+              db,
+              claim,
+              view.case.id,
+              {
+                checkpoint: checkpoint as unknown as SignalReviewJson,
+                status: "active",
+                inputHash,
+              },
+            );
+            if (!saved.accepted) {
+              summary.stale += 1;
+              return;
+            }
+            continue;
+          }
+
+          const memo = buildGroundedSignalAnalystMemo({
+            inputHash,
+            createdAt: clock(),
+            summary: turn.analysisSummary,
+            gaps: checkpoint.gapCatalog,
+            currentGapIds: new Set(currentGaps.map((gap) => gap.id)),
+            factsByField: groundedAnalystFacts(evidence, research),
+            unresolvedQuestions: turn.unresolvedQuestions,
+            nextActions: turn.nextActions,
+          });
+          const unresolved = memo.answers.some(
+            (answer) => answer.status !== "answered",
+          );
+          const evidenceBackedBlocker =
+            asRecord(jev.parsed)["acquisitionReadiness"] === "blocked";
+          const paidUnavailable =
+            mode === "free_only" ||
+            caseScope.status === "exhausted" ||
+            !liveTools.includes("exa_search");
+          if (unresolved && paidUnavailable && !evidenceBackedBlocker) {
+            const reason =
+              mode === "free_only"
+                ? "Unresolved research requires paid discovery unavailable in free-only mode"
+                : "Unresolved research is waiting for paid provider availability";
+            checkpoint = {
+              ...checkpoint,
+              pendingModelTurn: null,
+              lastAnalysisSummary: turn.analysisSummary,
+              blockedCapability: {
+                fingerprint: capabilityHash(mode, caseScope),
+                reason,
+              },
+            };
+            await checkpointSignalAnalystCase(db, claim, view.case.id, {
+              checkpoint: checkpoint as unknown as SignalReviewJson,
+              status: "deferred",
+              inputHash,
+              nextAttemptAt: new Date(clock().getTime() + SIGNAL_ANALYST_DEFER_MS),
+              stopReason: reason,
+              memo: memo as unknown as SignalReviewJson,
+            });
+            await deferSignalReview(db, claim, reason);
+            summary.deferred += 1;
+            return;
+          }
+          const finalTurn = turn as SignalAnalystFinalTurn;
+          const outcome: ModelEvalOutcome = {
+            ok: true,
+            result: finalTurn.verification,
+            rawResponse: JSON.stringify(finalTurn.verification),
+            tokens: { input: null, output: null, total: null },
+            costUsd: finalCallCostUsd,
+            returnedModel: finalReturnedModel,
+          };
+          const currentRow = await loadSignalReviewRow(db, claim.signalId);
+          const currentManifest =
+            currentRow === null
+              ? null
+              : buildFaaReviewInputManifest(
+                  buildEvidencePackage(
+                    currentRow,
+                    claim.researchEvidence,
+                    {
+                      sourceResearchStatus: sourceResearchStatusFromClaim(claim),
+                    },
+                  ),
+                  config,
+                  sourceRevisionFromRow(currentRow),
+                );
+          if (
+            currentManifest === null ||
+            hashFaaReviewInput(currentManifest) !== inputHash
+          ) {
+            summary.stale += 1;
+            return;
+          }
+          const museEvaluationId = evaluationIdFor(
+            inputHash,
+            config.modelA,
+            pendingModel.promptVersion,
+          );
+          const agreed = finalTurn.verification.decision === jev.decision;
+          const finalCheckpoint: SignalAnalystCheckpoint = {
+            ...checkpoint,
+            pendingAction: null,
+            pendingModelTurn: null,
+            lastAnalysisSummary: turn.analysisSummary,
+            blockedCapability: null,
+          };
+          const committed = await commitSignalReview(
+            db,
+            claim,
+            { phase: "settled" },
+            async (tx) => {
+              const persistenceInput = { inputHash, inputManifest: manifest };
+              await persistEvaluation(
+                tx as Database,
+                claim.signalId,
+                config.modelA,
+                outcome,
+                persistenceInput,
+                museEvaluationId,
+                pendingModel.promptVersion,
+              );
+              await persistResult(tx as Database, {
+                signalId: claim.signalId,
+                modelAId: config.jevModel,
+                modelBId: config.modelA,
+                modelADecision: jev.decision,
+                modelBDecision: finalTurn.verification.decision,
+                agreed,
+                adjudicationRequired: false,
+                adjudicatorModel: null,
+                adjudicatorOutput: null,
+                finalDecision: agreed ? jev.decision : "research",
+                finalConfidence: finalTurn.verification.confidence,
+                reason: agreed
+                  ? "Current JEv decision confirmed by bounded Muse research"
+                  : "Current JEv decision not confirmed; retained as research",
+                falseNegativeRisk: finalTurn.verification.false_negative_risk,
+                input: persistenceInput,
+                jevEvaluationId: jev.id,
+                museEvaluationId,
+              });
+              await completeSignalAnalystCase(tx, claim, analystCaseId, {
+                checkpoint: finalCheckpoint as unknown as SignalReviewJson,
+                memo: signalAnalystMemoSchema.parse(
+                  memo,
+                ) as unknown as SignalReviewJson,
+                stopReason: unresolved
+                  ? "Bounded research completed with explicit unresolved questions"
+                  : null,
+              });
+            },
+          );
+          if (!committed.accepted) {
+            summary.stale += 1;
+            return;
+          }
+          summary.verified += 1;
+          if (agreed) summary.confirmed += 1;
+          else summary.overruled += 1;
+          return;
+        }
+      } catch (error) {
+        if (error instanceof DailyModelBudgetDeferred || isOpenRouterQuotaError(error)) {
+          if (await deferSignalReview(db, claim, error)) summary.deferred += 1;
+          else summary.stale += 1;
           return;
         }
         await failSignalReview(db, claim, errorMessage(error));
-        errors += 1;
+        summary.errors += 1;
       }
     });
     if (claims.length < concurrency) break;
   }
-  return {
-    verified,
-    confirmed,
-    overruled,
-    costUsd,
-    deferred,
-    errors,
-    stale,
-  };
+  return summary;
 }
 
-// ---------------------------------------------------------------------------
-// Deterministic r0 name-shape rungs ($0, no model calls; run before r1).
+// Deterministic r0 name-shape observations ($0, run before r1).
 //
-// Survivors reach the ladder with nearly text-free states (name + address/zip
-// + domain; USAspending NAICS/PSC arrays always empty; website evidence for
-// ~11 rows), so the first cut must come from the name itself. Each rung is
-// a pure regex/shape predicate over pkg.name:
-// - nonprofit-academic / government-recipient: FINAL-reject. Both cleared the
-//   zero-new-miss gate on the full 34-case bakeoff (only Embry-Riddle
-//   Aeronautical University fires, already reject-expected; no add/hold row
-//   matches either pattern).
-// - personal-name / single-token: route to research with a reason tag. A
-//   person-shaped name (TOM BOWER) cannot FINAL-reject: the hold row "Middle
-//   Fork" shares the shape. These rungs persist a NULL-decision abstain row
-//   and let the ladder continue, so bakeoff finals are byte-identical.
+// Names are useful identity/entity-type leads but cannot prove an exclusion.
+// Every match is persisted as a nonterminal heuristic observation with the raw
+// source-signal reference; source-backed mandate facts are evaluated separately.
 // ---------------------------------------------------------------------------
 
 /** Prompt versions for the deterministic r0 name-shape rungs. */
 export const JEV_LADDER_R0_PROMPT_VERSIONS = {
-  "personal-name": "jev-ladder-r0-personal-name",
-  "nonprofit-academic": "jev-ladder-r0-nonprofit-academic",
-  "government-recipient": "jev-ladder-r0-government-recipient",
-  "ownership-veto": "jev-ladder-r0-ownership-veto",
-  "mandate-veto": "jev-ladder-r0-mandate-veto",
-  "single-token": "jev-ladder-r0-single-token",
+  "personal-name": "jev-ladder-r0-personal-name-v2",
+  "nonprofit-academic": "jev-ladder-r0-nonprofit-academic-v2",
+  "government-recipient": "jev-ladder-r0-government-recipient-v2",
+  "ownership-veto": "jev-ladder-r0-ownership-veto-v2",
+  "mandate-veto": "jev-ladder-r0-mandate-veto-v2",
+  "single-token": "jev-ladder-r0-single-token-v2",
 } as const;
 
 export type JevLadderR0Rung = keyof typeof JEV_LADDER_R0_PROMPT_VERSIONS;
 
-/** Nonprofit/academic/government markers that never describe a manufacturer. */
+/** Nonprofit/academic/government markers used only as research leads. */
 const R0_NONPROFIT_ACADEMIC_PATTERNS: readonly RegExp[] = [
   /\bLABORATORY\b/i,
   /\bUNIVERSITY\b/i,
@@ -2109,25 +3951,98 @@ export function matchSingleTokenName(name: string): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// Staged JEv ladder (conditional re-screen for the research backlog)
+// Staged JEv ladder (cheap provisional screening).
 //
-// JEv costs ~$0.00002/call: instead of one disposition call per signal, the
-// ladder spends one cheap call per rung and stops at the first decisive rung:
-// r1 manufacturer (noul; non-manufacturer -> reject) -> r2 product_vs_process
-// (choice; process-only -> research) -> r3 deterministic ownership veto
-// (strategic_owned/pe_owned/public/dead -> reject, no call) then oversize
-// (noul inverted; oversize -> reject) -> r4 disposition (verdict stands).
-// Each rung persists its own faa_ensemble_evaluations row under the JEv
-// model id with prompt_version jev-ladder-r1..r4.
+// All model rungs produce hypotheses. Unsupported non-manufacturer, oversize,
+// and reject estimates cannot become hard exclusions. Only admitted
+// support-role evidence can trigger the deterministic mandate veto. The full
+// ladder retains normalized observations and finishes with differentiated
+// product-fit, readiness, priority, and gap triage.
 // ---------------------------------------------------------------------------
 
 /** Rung where a completed ladder operation exited. */
-export type LadderExitRung = "r0-veto" | "r1" | "r3" | "r4";
+export type LadderExitRung = "r0-veto" | "r4";
 export type JevLadderModelRung = "r1" | "r2" | "r3" | "r4";
+
+export const JEV_TRIAGE_OUTPUT_VERSION = "jev-triage-v1";
+export type JevProductFit =
+  | "supported_product"
+  | "plausible_supplier"
+  | "process_or_service"
+  | "unknown"
+  | "outside_scope";
+export type JevAcquisitionReadiness =
+  | "ready"
+  | "needs_research"
+  | "blocked";
+export type JevResearchPriority = 1 | 2 | 3;
+export type JevObservationKind =
+  | "source_supported_fact"
+  | "source_context"
+  | "model_hypothesis"
+  | "heuristic_lead";
+
+export type JevSourceReference =
+  | {
+      readonly kind: "source_signal";
+      readonly sourceKey: string | null;
+      readonly sourceLocator: string | null;
+      readonly sourceFingerprint: string | null;
+    }
+  | {
+      readonly kind: "source_document";
+      readonly url: string;
+      readonly stage: string;
+      readonly title: string;
+      readonly quote: string;
+      readonly contentSha256: string;
+      readonly sourceKind: string;
+      readonly firstParty: boolean;
+      readonly retrievedAt: string | null;
+      readonly role: "support" | "checked_only";
+    };
+
+export interface JevRungObservation {
+  readonly rung: "r0" | JevLadderModelRung;
+  readonly kind: JevObservationKind;
+  readonly field: string;
+  readonly value: string | number | boolean | null;
+  /** Model confidence only; null for source facts, context, and heuristics. */
+  readonly confidence: number | null;
+  readonly reasonCode: string;
+  readonly explanation: string;
+  readonly sourceReferences: readonly JevSourceReference[];
+}
+
+export interface JevResearchGap {
+  readonly id: string;
+  readonly field: string;
+  readonly question: string;
+  readonly priority: JevResearchPriority;
+  readonly reason: string;
+  readonly supportingSources: readonly JevSourceReference[];
+  readonly conflictingSources: readonly JevSourceReference[];
+}
+
+export interface JevTriageOutput {
+  readonly version: typeof JEV_TRIAGE_OUTPUT_VERSION;
+  readonly decision: EnsembleDecision;
+  /** Terminal model signal only; null when a source-backed fact decides. */
+  readonly confidence: number | null;
+  readonly productFit: JevProductFit;
+  readonly acquisitionReadiness: JevAcquisitionReadiness;
+  /** 1 is highest. This prioritizes research, not investment qualification. */
+  readonly researchPriority: JevResearchPriority;
+  readonly reasonCodes: readonly string[];
+  readonly explanation: string;
+  readonly observations: readonly JevRungObservation[];
+  readonly gaps: readonly JevResearchGap[];
+}
 
 export interface LadderSignalVerdict {
   readonly decision: EnsembleDecision;
-  readonly confidence: number;
+  /** Model confidence only; source-backed deterministic vetoes use null. */
+  readonly confidence: number | null;
   readonly costUsd: number | null;
   readonly exitRung: LadderExitRung;
 }
@@ -2147,13 +4062,18 @@ export interface JevLadderRungRecord {
   readonly rung: "r0" | JevLadderModelRung;
   readonly promptVersion: string;
   readonly decision: EnsembleDecision | null;
-  readonly confidence: number;
+  /** Model confidence only; null for deterministic observations. */
+  readonly confidence: number | null;
   readonly costUsd: number | null;
   readonly reason: string;
+  readonly observation: JevRungObservation;
   readonly terminal: boolean;
+  /** Present only on the exact terminal evaluation record. */
+  readonly triage: JevTriageOutput | null;
 }
 
 export interface JevLadderEvaluation extends LadderSignalVerdict {
+  readonly triage: JevTriageOutput;
   readonly records: readonly JevLadderRungRecord[];
   readonly callCount: number;
 }
@@ -2163,10 +4083,10 @@ export interface EvaluateJevLadderInput {
   readonly call: JevLadderCaller;
 }
 
-function clampConfidence(value: unknown): number {
+function clampConfidence(value: unknown): number | null {
   return typeof value === "number" && Number.isFinite(value)
     ? Math.max(0, Math.min(1, value))
-    : 0.5;
+    : null;
 }
 
 function hasSourcedSupport(
@@ -2211,6 +4131,7 @@ function hasActionableMandateEvidence(evidence: FaaEvidencePackage): boolean {
     evidence.identityStatus === "verified" &&
     hasSourcedSupport(evidence, "domain") &&
     evidence.productEvidence.length > 0 &&
+    evidence.namedProductProofs.length > 0 &&
     hasSourcedSupport(evidence, "website") &&
     evidence.headquarters.status === "supported" &&
     hasSourcedSupport(evidence, "hq") &&
@@ -2224,13 +4145,391 @@ function hasActionableMandateEvidence(evidence: FaaEvidencePackage): boolean {
   );
 }
 
-function completeLadder(
+type TriageEvidenceStage = "domain" | "website" | "ownership" | "size" | "hq";
+
+function sourceSignalReference(
+  evidence: FaaEvidencePackage,
+): JevSourceReference {
+  return {
+    kind: "source_signal",
+    sourceKey: evidence.sourceKey,
+    sourceLocator: evidence.sourceLocator,
+    sourceFingerprint: evidence.sourceFingerprint,
+  };
+}
+
+function sourceReferences(
+  evidence: FaaEvidencePackage,
+  stages: readonly TriageEvidenceStage[],
+): readonly JevSourceReference[] {
+  return evidence.sourceEvidence
+    .filter(
+      (source) =>
+        stages.includes(source.stage as TriageEvidenceStage) &&
+        source.role === "support",
+    )
+    .map((source) => ({ kind: "source_document", ...source }));
+}
+
+function observationValue(
+  records: readonly JevLadderRungRecord[],
+  field: string,
+): string | number | boolean | null | undefined {
+  return records.find((record) => record.observation.field === field)?.observation
+    .value;
+}
+
+function buildJevTriage(
+  evidence: FaaEvidencePackage,
   records: readonly JevLadderRungRecord[],
   decision: EnsembleDecision,
-  confidence: number,
+  confidence: number | null,
+): JevTriageOutput {
+  const sourceContextReasonCode =
+    evidence.sourceRecordKind === "faa_holder_records"
+      ? "faa_applicability_context_not_product_proof"
+      : evidence.sourceRecordKind === "government_awards"
+        ? "government_recipient_context_not_product_proof"
+        : "unverified_source_context_not_proof";
+  const sourceContextExplanation =
+    evidence.sourceRecordKind === "faa_holder_records"
+      ? "The raw FAA record is aircraft applicability context; it does not prove identity, product ownership, headquarters, revenue, or independence."
+      : evidence.sourceRecordKind === "government_awards"
+        ? "The raw government record is recipient context; it does not prove identity, product ownership, headquarters, revenue, or independence."
+        : "The lead or intake record is unverified discovery context; it does not prove identity, product ownership, headquarters, revenue, or independence.";
+  const sourceContext: JevRungObservation = {
+    rung: "r0",
+    kind: "source_context",
+    field: "source_record",
+    value: evidence.sourceRecordKind,
+    confidence: null,
+    reasonCode: sourceContextReasonCode,
+    explanation: sourceContextExplanation,
+    sourceReferences: [sourceSignalReference(evidence)],
+  };
+  const namedProductClaim = [
+    ...new Set(evidence.namedProductProofs.map((proof) => proof.quote)),
+  ].join(", ");
+  const namedProductReferences: readonly JevSourceReference[] =
+    evidence.namedProductProofs.map((proof) => ({
+      kind: "source_document",
+      ...proof,
+    }));
+  const hasSupportedProducts =
+    evidence.productEvidence.length > 0 &&
+    evidence.namedProductProofs.length > 0 &&
+    hasSourcedSupport(evidence, "website");
+  const observations: JevRungObservation[] = [sourceContext];
+  if (
+    evidence.identityStatus === "verified" &&
+    evidence.sourcedSupport.identity
+  ) {
+    observations.push({
+      rung: "r0",
+      kind: "source_supported_fact",
+      field: "identity",
+      value: "verified",
+      confidence: null,
+      reasonCode: "source_supported_identity",
+      explanation:
+        evidence.domain === null
+          ? "Admitted support-role evidence verifies the company identity."
+          : "Admitted support-role evidence verifies the company identity and domain.",
+      sourceReferences: sourceReferences(evidence, ["domain"]),
+    });
+  }
+  if (hasSupportedProducts) {
+    observations.push({
+      rung: "r0",
+      kind: "source_supported_fact",
+      field: "product_fit",
+      value: "supported_product",
+      confidence: null,
+      reasonCode: "source_supported_named_products",
+      explanation: `Admitted support-role evidence names manufactured products: ${namedProductClaim}.`,
+      sourceReferences: namedProductReferences,
+    });
+  }
+  if (
+    evidence.headquarters.status === "supported" &&
+    evidence.sourcedSupport.headquarters
+  ) {
+    observations.push({
+      rung: "r0",
+      kind: "source_supported_fact",
+      field: "headquarters",
+      value: evidence.headquarters.country,
+      confidence: null,
+      reasonCode: "source_supported_headquarters",
+      explanation:
+        "Admitted support-role evidence explicitly identifies headquarters.",
+      sourceReferences: sourceReferences(evidence, ["hq"]),
+    });
+  }
+  if (
+    evidence.ownershipStatus !== "unknown" &&
+    evidence.sourcedSupport.ownership
+  ) {
+    observations.push({
+      rung: "r0",
+      kind: "source_supported_fact",
+      field: "ownership",
+      value: evidence.ownershipStatus,
+      confidence: null,
+      reasonCode: "source_supported_ownership",
+      explanation:
+        "Admitted support-role evidence establishes the current ownership assessment.",
+      sourceReferences: sourceReferences(evidence, ["ownership"]),
+    });
+  }
+  if (
+    evidence.revenueAssessment !== "unknown" &&
+    evidence.sourcedSupport.size
+  ) {
+    observations.push({
+      rung: "r0",
+      kind: "source_supported_fact",
+      field: "revenue",
+      value: evidence.revenueAssessment,
+      confidence: null,
+      reasonCode: "source_supported_revenue",
+      explanation:
+        "Admitted support-role evidence establishes the annual-revenue assessment.",
+      sourceReferences: sourceReferences(evidence, ["size"]),
+    });
+  }
+  observations.push(...records.map((record) => record.observation));
+  const hasSupportedWebsiteContext = evidence.sourceEvidence.some(
+    (source) => source.stage === "website" && source.role === "support",
+  );
+  const modelProductFit = observationValue(records, "product_fit");
+  const modelManufacturerFit = observationValue(records, "manufacturer_fit");
+  const productFit: JevProductFit = hasSupportedProducts
+    ? "supported_product"
+    : evidence.websiteOffering === "capabilities_only" &&
+        hasSupportedWebsiteContext
+      ? "process_or_service"
+      : modelProductFit === "product"
+        ? "plausible_supplier"
+        : modelProductFit === "process"
+          ? "unknown"
+          : modelManufacturerFit === "plausible_manufacturer"
+            ? "plausible_supplier"
+            : "unknown";
+  const blocker = mandateBlocker(evidence);
+  const acquisitionReadiness: JevAcquisitionReadiness =
+    blocker !== null
+      ? "blocked"
+      : decision === "high_priority"
+        ? "ready"
+        : "needs_research";
+  const researchPriority: JevResearchPriority =
+    productFit === "supported_product"
+      ? 1
+      : productFit === "plausible_supplier"
+        ? 2
+        : 3;
+  const reasonCodes = new Set<string>();
+  if (blocker !== null) reasonCodes.add("source_backed_mandate_veto");
+  if (hasSupportedProducts) reasonCodes.add("supported_named_product");
+  if (productFit === "plausible_supplier")
+    reasonCodes.add("plausible_supplier_needs_corroboration");
+  if (productFit === "process_or_service")
+    reasonCodes.add("source_backed_process_or_service");
+  if (evidence.sourceResearchStatus === "unavailable")
+    reasonCodes.add("source_research_unavailable");
+  else if (evidence.sourceResearchStatus === "incomplete")
+    reasonCodes.add("source_research_incomplete");
+  if (evidence.evidenceConflicts.ownership)
+    reasonCodes.add("source_ownership_conflict");
+  if (evidence.evidenceConflicts.size)
+    reasonCodes.add("source_revenue_conflict");
+  if (evidence.evidenceConflicts.headquarters)
+    reasonCodes.add("source_headquarters_conflict");
+  if (observations.some((item) => item.kind === "heuristic_lead"))
+    reasonCodes.add("name_heuristic_unsubstantiated");
+  if (
+    observations.some(
+      (item) =>
+        item.kind === "model_hypothesis" &&
+        (item.reasonCode === "model_non_manufacturer_hypothesis" ||
+          item.reasonCode === "model_oversize_hypothesis" ||
+          item.reasonCode === "model_reject_hypothesis"),
+    )
+  ) {
+    reasonCodes.add("model_exclusion_unsubstantiated");
+  }
+  if (decision === "research")
+    reasonCodes.add("acquisition_facts_incomplete");
+
+  const gaps: JevResearchGap[] = [];
+  const fitGapPriority: JevResearchPriority =
+    productFit === "supported_product" ? 1 : 2;
+  if (evidence.identityStatus !== "verified") {
+    const refs = sourceReferences(evidence, ["domain"]);
+    gaps.push({
+      id: "identity.verification",
+      field: "identity",
+      question:
+        "Which official domain and legal entity unambiguously match this source signal's identifiers and location?",
+      priority: fitGapPriority,
+      reason:
+        evidence.identityStatus === "ambiguous"
+          ? "Available identity evidence is conflicting or ambiguous."
+          : "No source-supported company identity has been established.",
+      supportingSources: refs,
+      conflictingSources:
+        evidence.identityStatus === "ambiguous" ? refs : [],
+    });
+  }
+  if (!hasSupportedProducts) {
+    gaps.push({
+      id: "product_fit.named_products",
+      field: "productFit",
+      question:
+        "What named physical products, part numbers, catalogs, or company-held approvals does this company manufacture?",
+      priority: 1,
+      reason:
+        productFit === "process_or_service"
+          ? "Retrieved company evidence shows capabilities or services, but no named manufactured product."
+          : "Product fit is plausible or unknown but lacks source-backed named products.",
+      supportingSources: sourceReferences(evidence, ["website"]),
+      conflictingSources: [],
+    });
+  }
+  const hqCountry = evidence.headquarters.country?.trim().toUpperCase() ?? "";
+  const supportedUsHeadquarters =
+    evidence.headquarters.status === "supported" &&
+    hasSourcedSupport(evidence, "hq") &&
+    ["US", "USA", "UNITED STATES", "UNITED STATES OF AMERICA"].includes(
+      hqCountry,
+    );
+  if (
+    !supportedUsHeadquarters &&
+    !blocker?.startsWith("headquarters:")
+  ) {
+    const refs = sourceReferences(evidence, ["hq"]);
+    gaps.push({
+      id: "headquarters.us_location",
+      field: "headquarters",
+      question:
+        "What source explicitly identifies the company's current headquarters, and is that headquarters in the United States?",
+      priority: fitGapPriority,
+      reason:
+        evidence.headquarters.status === "conflicting"
+          ? "Headquarters sources conflict."
+          : "A source address or US facility is not headquarters proof.",
+      supportingSources: evidence.evidenceConflicts.headquarters ? [] : refs,
+      conflictingSources: evidence.evidenceConflicts.headquarters ? refs : [],
+    });
+  }
+  if (
+    evidence.ownershipStatus !== "independent" &&
+    !blocker?.startsWith("ownership:")
+  ) {
+    const refs = sourceReferences(evidence, ["ownership"]);
+    gaps.push({
+      id: "ownership.current_control",
+      field: "ownership",
+      question:
+        "Who currently controls the company, and is it independently actionable rather than public, strategic-owned, or private-equity-owned?",
+      priority: fitGapPriority,
+      reason: evidence.evidenceConflicts.ownership
+        ? "Current ownership sources conflict."
+        : "No source-supported current independent ownership conclusion is available.",
+      supportingSources: evidence.evidenceConflicts.ownership ? [] : refs,
+      conflictingSources: evidence.evidenceConflicts.ownership ? refs : [],
+    });
+  }
+  if (
+    evidence.revenueAssessment !== "under_50m" &&
+    !blocker?.startsWith("revenue:")
+  ) {
+    const refs = sourceReferences(evidence, ["size"]);
+    gaps.push({
+      id: "revenue.annual_below_50m",
+      field: "revenue",
+      question:
+        "What attributable evidence establishes current annual revenue below $50 million, or establishes that it exceeds the mandate?",
+      priority: fitGapPriority,
+      reason: evidence.evidenceConflicts.size
+        ? "Current annual-revenue sources conflict."
+        : "Employee count, facility area, award value, and acquisition value do not establish annual revenue.",
+      supportingSources: evidence.evidenceConflicts.size ? [] : refs,
+      conflictingSources: evidence.evidenceConflicts.size ? refs : [],
+    });
+  }
+  if (!evidence.sourceEvidence.some((source) => source.role === "support")) {
+    gaps.push({
+      id: "source_coverage.primary_documents",
+      field: "sourceCoverage",
+      question:
+        "Which attributable primary or first-party documents can answer the open identity, product, ownership, headquarters, and revenue questions?",
+      priority: researchPriority,
+      reason:
+        "Screening used unverified source or intake context and model hypotheses without claiming researched source coverage.",
+      supportingSources: [],
+      conflictingSources: [],
+    });
+  }
+  if (evidence.sourceResearchStatus === "unavailable") {
+    gaps.push({
+      id: "source_access.resume",
+      field: "sourceAvailability",
+      question:
+        "Which deferred or unavailable research source should be retried next, and when is its recorded retry window?",
+      priority: researchPriority,
+      reason:
+        "Optional network research was unavailable; provisional screening proceeded without converting that access failure into negative product evidence.",
+      supportingSources: [],
+      conflictingSources: [],
+    });
+  }
+
+  const availabilityExplanation =
+    evidence.sourceResearchStatus === "unavailable"
+      ? " Optional source research is unavailable and remains resumable."
+      : evidence.sourceResearchStatus === "incomplete"
+        ? " Optional source research is incomplete."
+        : "";
+  const explanation =
+    (blocker !== null
+      ? `A source-backed mandate exclusion (${blocker}) blocks acquisition readiness; product fit is reported separately.`
+      : acquisitionReadiness === "ready"
+        ? `Sources identify named manufactured products (${namedProductClaim}) and support every acquisition-readiness guard; the disposition is ${decision}.`
+        : hasSupportedProducts
+          ? `Sources identify named manufactured products (${namedProductClaim}), while unanswered acquisition facts keep the disposition at ${decision}.`
+          : `Unverified source context and model signals support only provisional ${productFit.replaceAll(
+              "_",
+              " ",
+            )} triage; unanswered facts remain explicit research gaps.`) +
+    availabilityExplanation;
+  return {
+    version: JEV_TRIAGE_OUTPUT_VERSION,
+    decision,
+    confidence,
+    productFit,
+    acquisitionReadiness,
+    researchPriority,
+    reasonCodes: [...reasonCodes],
+    explanation,
+    observations,
+    gaps,
+  };
+}
+
+function completeLadder(
+  evidence: FaaEvidencePackage,
+  records: readonly JevLadderRungRecord[],
+  decision: EnsembleDecision,
+  confidence: number | null,
   exitRung: LadderExitRung,
   callCount: number,
 ): JevLadderEvaluation {
+  const triage = buildJevTriage(evidence, records, decision, confidence);
+  const terminalRecords = records.map((record) =>
+    record.terminal ? { ...record, triage } : record,
+  );
   const paidCosts = records
     .map((record) => record.costUsd)
     .filter((cost): cost is number => typeof cost === "number");
@@ -2243,7 +4542,8 @@ function completeLadder(
       paidCosts.length === 0
         ? null
         : paidCosts.reduce((total, cost) => total + cost, 0),
-    records,
+    triage,
+    records: terminalRecords,
   };
 }
 
@@ -2265,26 +4565,48 @@ export async function evaluateJevLadder(
     records.push({
       rung: "r0",
       promptVersion: JEV_LADDER_R0_PROMPT_VERSIONS["nonprofit-academic"],
-      decision: "reject",
-      confidence: 1,
+      decision: null,
+      confidence: null,
       costUsd: null,
-      reason: `jev-ladder-r0-nonprofit-academic:${nonprofit}`,
-      terminal: true,
+      reason: `jev-ladder-r0-nonprofit-academic:${nonprofit}:needs-source-proof`,
+      observation: {
+        rung: "r0",
+        kind: "heuristic_lead",
+        field: "entity_type",
+        value: nonprofit,
+        confidence: null,
+        reasonCode: "name_nonprofit_academic_lead",
+        explanation:
+          "A name token is a research lead, not proof that the entity is noncommercial or outside scope.",
+        sourceReferences: [sourceSignalReference(evidence)],
+      },
+      terminal: false,
+      triage: null,
     });
-    return completeLadder(records, "reject", 1, "r0-veto", callCount);
   }
   const government = matchGovernmentRecipientName(evidence.name);
   if (government !== null) {
     records.push({
       rung: "r0",
       promptVersion: JEV_LADDER_R0_PROMPT_VERSIONS["government-recipient"],
-      decision: "reject",
-      confidence: 1,
+      decision: null,
+      confidence: null,
       costUsd: null,
-      reason: `jev-ladder-r0-government-recipient:${government}`,
-      terminal: true,
+      reason: `jev-ladder-r0-government-recipient:${government}:needs-source-proof`,
+      observation: {
+        rung: "r0",
+        kind: "heuristic_lead",
+        field: "entity_type",
+        value: government,
+        confidence: null,
+        reasonCode: "name_government_recipient_lead",
+        explanation:
+          "A recipient-name pattern is a research lead, not an affirmed government-entity exclusion.",
+        sourceReferences: [sourceSignalReference(evidence)],
+      },
+      terminal: false,
+      triage: null,
     });
-    return completeLadder(records, "reject", 1, "r0-veto", callCount);
   }
   const personal = matchPersonalNameShape(evidence.name);
   if (personal !== null) {
@@ -2292,10 +4614,22 @@ export async function evaluateJevLadder(
       rung: "r0",
       promptVersion: JEV_LADDER_R0_PROMPT_VERSIONS["personal-name"],
       decision: null,
-      confidence: 0.5,
+      confidence: null,
       costUsd: null,
       reason: `jev-ladder-r0-personal-name:${personal}:needs-identity-check`,
+      observation: {
+        rung: "r0",
+        kind: "heuristic_lead",
+        field: "identity",
+        value: "person_shaped_name",
+        confidence: null,
+        reasonCode: "name_person_shape_lead",
+        explanation:
+          "The name shape requires identity research and is not a disposition.",
+        sourceReferences: [sourceSignalReference(evidence)],
+      },
       terminal: false,
+      triage: null,
     });
   }
   const singleToken = matchSingleTokenName(evidence.name);
@@ -2304,26 +4638,62 @@ export async function evaluateJevLadder(
       rung: "r0",
       promptVersion: JEV_LADDER_R0_PROMPT_VERSIONS["single-token"],
       decision: null,
-      confidence: 0.5,
+      confidence: null,
       costUsd: null,
       reason: `jev-ladder-r0-single-token:${singleToken}:needs-identity-check`,
+      observation: {
+        rung: "r0",
+        kind: "heuristic_lead",
+        field: "identity",
+        value: "opaque_single_token",
+        confidence: null,
+        reasonCode: "name_opaque_token_lead",
+        explanation:
+          "An opaque company name requires identity research and is not a disposition.",
+        sourceReferences: [sourceSignalReference(evidence)],
+      },
       terminal: false,
+      triage: null,
     });
   }
   const blocker = mandateBlocker(evidence);
   if (blocker !== null) {
+    const stage: TriageEvidenceStage = blocker.startsWith("ownership:")
+      ? "ownership"
+      : blocker.startsWith("headquarters:")
+        ? "hq"
+        : "size";
     records.push({
       rung: "r0",
       promptVersion: blocker.startsWith("ownership:")
         ? JEV_LADDER_R0_PROMPT_VERSIONS["ownership-veto"]
         : JEV_LADDER_R0_PROMPT_VERSIONS["mandate-veto"],
       decision: "reject",
-      confidence: 1,
+      confidence: null,
       costUsd: null,
       reason: `jev-ladder-r0-mandate-veto:${blocker}`,
+      observation: {
+        rung: "r0",
+        kind: "source_supported_fact",
+        field: "acquisition_readiness",
+        value: blocker,
+        confidence: null,
+        reasonCode: "source_backed_mandate_veto",
+        explanation:
+          "An admitted support-role source affirmatively establishes a mandate exclusion.",
+        sourceReferences: sourceReferences(evidence, [stage]),
+      },
       terminal: true,
+      triage: null,
     });
-    return completeLadder(records, "reject", 1, "r0-veto", callCount);
+    return completeLadder(
+      evidence,
+      records,
+      "reject",
+      null,
+      "r0-veto",
+      callCount,
+    );
   }
 
   const r1 = await call({
@@ -2334,27 +4704,46 @@ export async function evaluateJevLadder(
   });
   callCount += 1;
   const r1Noul = r1.answers["manufacturer"]?.noul;
-  if (typeof r1Noul === "number" && Number.isFinite(r1Noul) && r1Noul < 0.2) {
-    const confidence = 1 - r1Noul;
-    records.push({
-      rung: "r1",
-      promptVersion: JEV_LADDER_PROMPT_VERSIONS.r1,
-      decision: "reject",
-      confidence,
-      costUsd: r1.costUsd,
-      reason: "jev-ladder-r1-manufacturer",
-      terminal: true,
-    });
-    return completeLadder(records, "reject", confidence, "r1", callCount);
-  }
+  const r1Confidence = clampConfidence(r1Noul);
+  const r1HasSignal =
+    typeof r1Noul === "number" && Number.isFinite(r1Noul);
+  const r1RejectHypothesis = r1HasSignal && r1Noul < 0.2;
+  const r1Value = !r1HasSignal
+    ? "unknown"
+    : r1RejectHypothesis
+      ? "unlikely_manufacturer"
+      : "plausible_manufacturer";
   records.push({
     rung: "r1",
     promptVersion: JEV_LADDER_PROMPT_VERSIONS.r1,
     decision: null,
-    confidence: clampConfidence(r1Noul),
+    confidence: r1Confidence,
     costUsd: r1.costUsd,
-    reason: "jev-ladder-r1-manufacturer-pass",
+    reason: !r1HasSignal
+      ? "jev-ladder-r1-manufacturer-unknown"
+      : r1RejectHypothesis
+        ? "jev-ladder-r1-manufacturer-unsubstantiated"
+        : "jev-ladder-r1-manufacturer-plausible",
+    observation: {
+      rung: "r1",
+      kind: "model_hypothesis",
+      field: "manufacturer_fit",
+      value: r1Value,
+      confidence: r1Confidence,
+      reasonCode: !r1HasSignal
+        ? "model_manufacturer_fit_unknown"
+        : r1RejectHypothesis
+          ? "model_non_manufacturer_hypothesis"
+          : "model_manufacturer_hypothesis",
+      explanation: !r1HasSignal
+        ? "The model returned no finite manufacturer signal; fit remains unknown."
+        : r1RejectHypothesis
+          ? "The model's non-manufacturer estimate is an unsupported research lead and cannot affirm a hard reject."
+          : "The model considers a physical-product footprint plausible; this is not source proof.",
+      sourceReferences: [],
+    },
     terminal: false,
+    triage: null,
   });
 
   const r2 = await call({
@@ -2364,17 +4753,39 @@ export async function evaluateJevLadder(
     questions: { product_vs_process: JEV_PRODUCT_PROCESS_QUESTION },
   });
   callCount += 1;
+  const r2Answer = r2.answers["product_vs_process"];
+  const r2Choice =
+    r2Answer?.choice === "product" || r2Answer?.choice === "process"
+      ? r2Answer.choice
+      : "unknown";
   records.push({
     rung: "r2",
     promptVersion: JEV_LADDER_PROMPT_VERSIONS.r2,
     decision: null,
-    confidence: clampConfidence(r2.answers["product_vs_process"]?.confidence),
+    confidence: clampConfidence(r2Answer?.confidence),
     costUsd: r2.costUsd,
     reason:
-      r2.answers["product_vs_process"]?.choice === "process"
+      r2Choice === "process"
         ? "jev-ladder-r2-product-vs-process-continue"
         : "jev-ladder-r2-product-vs-process-pass",
+    observation: {
+      rung: "r2",
+      kind: "model_hypothesis",
+      field: "product_fit",
+      value: r2Choice,
+      confidence: clampConfidence(r2Answer?.confidence),
+      reasonCode:
+        r2Choice === "product"
+          ? "model_product_hypothesis"
+          : r2Choice === "process"
+            ? "model_process_hypothesis"
+            : "model_product_fit_unknown",
+      explanation:
+        "The product-versus-process classification is a model hypothesis; only admitted source evidence can establish named products.",
+      sourceReferences: [],
+    },
     terminal: false,
+    triage: null,
   });
 
   const r3 = await call({
@@ -2385,27 +4796,45 @@ export async function evaluateJevLadder(
   });
   callCount += 1;
   const r3Noul = r3.answers["oversize"]?.noul;
-  if (typeof r3Noul === "number" && Number.isFinite(r3Noul) && r3Noul >= 0.5) {
-    records.push({
-      rung: "r3",
-      promptVersion: JEV_LADDER_PROMPT_VERSIONS.r3,
-      decision: "reject",
-      confidence: r3Noul,
-      costUsd: r3.costUsd,
-      reason: "jev-ladder-r3-oversize",
-      terminal: true,
-    });
-    return completeLadder(records, "reject", r3Noul, "r3", callCount);
-  }
+  const r3Confidence = clampConfidence(r3Noul);
+  const r3HasSignal =
+    typeof r3Noul === "number" && Number.isFinite(r3Noul);
+  const r3RejectHypothesis = r3HasSignal && r3Noul >= 0.5;
   records.push({
     rung: "r3",
     promptVersion: JEV_LADDER_PROMPT_VERSIONS.r3,
     decision: null,
-    confidence:
-      typeof r3Noul === "number" && Number.isFinite(r3Noul) ? 1 - r3Noul : 0.5,
+    confidence: r3Confidence,
     costUsd: r3.costUsd,
-    reason: "jev-ladder-r3-oversize-pass",
+    reason: !r3HasSignal
+      ? "jev-ladder-r3-oversize-unknown"
+      : r3RejectHypothesis
+        ? "jev-ladder-r3-oversize-unsubstantiated"
+        : "jev-ladder-r3-oversize-not-indicated",
+    observation: {
+      rung: "r3",
+      kind: "model_hypothesis",
+      field: "scale",
+      value: !r3HasSignal
+        ? "unknown"
+        : r3RejectHypothesis
+          ? "likely_oversize"
+          : "oversize_not_indicated",
+      confidence: r3Confidence,
+      reasonCode: !r3HasSignal
+        ? "model_scale_unknown"
+        : r3RejectHypothesis
+          ? "model_oversize_hypothesis"
+          : "model_oversize_not_indicated",
+      explanation: !r3HasSignal
+        ? "The model returned no finite oversize signal; scale remains unknown."
+        : r3RejectHypothesis
+          ? "The model's oversize estimate is not revenue evidence and cannot affirm a hard reject."
+          : "The model did not identify oversize scale; this does not prove revenue below the mandate.",
+      sourceReferences: [],
+    },
     terminal: false,
+    triage: null,
   });
 
   const r4 = await call({
@@ -2421,23 +4850,54 @@ export async function evaluateJevLadder(
     throw new Error("JEv ladder returned no terminal disposition");
   }
   const decision =
-    modelDecision === "high_priority" && !hasActionableMandateEvidence(evidence)
-      ? "research"
-      : modelDecision;
+    modelDecision === "high_priority"
+      ? hasActionableMandateEvidence(evidence)
+        ? "high_priority"
+        : "research"
+      : modelDecision === "reject"
+        ? "research"
+        : modelDecision;
   const confidence = clampConfidence(answer?.confidence);
+  const reason =
+    modelDecision === "high_priority" && decision === "research"
+      ? "jev-ladder-r4-mandate-evidence-incomplete"
+      : modelDecision === "reject" && decision === "research"
+        ? "jev-ladder-r4-reject-unsubstantiated"
+        : "jev-ladder-r4-disposition";
   records.push({
     rung: "r4",
     promptVersion: JEV_LADDER_PROMPT_VERSIONS.r4,
     decision,
     confidence,
     costUsd: r4.costUsd,
-    reason:
-      modelDecision === "high_priority" && decision === "research"
-        ? "jev-ladder-r4-mandate-evidence-incomplete"
-        : "jev-ladder-r4-disposition",
+    reason,
+    observation: {
+      rung: "r4",
+      kind: "model_hypothesis",
+      field: "disposition",
+      value: modelDecision,
+      confidence,
+      reasonCode:
+        modelDecision === "reject"
+          ? "model_reject_hypothesis"
+          : "model_disposition_hypothesis",
+      explanation:
+        modelDecision === "reject"
+          ? "The model's reject recommendation lacks an affirmed source-backed veto and therefore routes to research."
+          : "The model disposition is retained as a model signal; source evidence independently controls readiness safeguards.",
+      sourceReferences: [],
+    },
     terminal: true,
+    triage: null,
   });
-  return completeLadder(records, decision, confidence, "r4", callCount);
+  return completeLadder(
+    evidence,
+    records,
+    decision,
+    confidence,
+    "r4",
+    callCount,
+  );
 }
 
 async function persistLadderEvaluation(
@@ -2484,6 +4944,7 @@ async function persistLadderEvaluation(
 export interface JevReviewOptions {
   readonly limit?: number;
   readonly concurrency?: number;
+  readonly sourceSignalIds?: readonly string[];
 }
 
 export interface JevReviewDependencies extends DailyModelBudgetDependencies {
@@ -2504,9 +4965,6 @@ export interface JevReviewSummary {
   readonly exits: Record<LadderExitRung, number>;
 }
 
-function ladderExits(): Record<LadderExitRung, number> {
-  return { "r0-veto": 0, r1: 0, r3: 0, r4: 0 };
-}
 
 async function loadSignalReviewRow(
   db: Database,
@@ -2532,6 +4990,27 @@ function sourceRevisionFromRow(row: SourceSignalRowLike): number {
   return revision as number;
 }
 
+function sourceResearchStatusFromClaim(
+  claim: SignalReviewClaim,
+): FaaEvidencePackage["sourceResearchStatus"] {
+  const outcomeStatus =
+    claim.lastResearchOutcome === null
+      ? null
+      : asText(claim.lastResearchOutcome["status"]);
+  if (outcomeStatus === "completed") return "complete";
+  if (
+    outcomeStatus === "unavailable" ||
+    outcomeStatus === "deferred" ||
+    outcomeStatus === "budget_exhausted" ||
+    outcomeStatus === "quota_exhausted"
+  ) {
+    return "unavailable";
+  }
+  return Object.keys(claim.researchEvidence).length > 0
+    ? "complete"
+    : "incomplete";
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -2552,6 +5031,9 @@ export async function runJevReviews(
   const concurrency = Math.max(1, opts.concurrency ?? config.concurrency);
   await reconcileCurrentReviewInputs(db, {
     sourceLimit: Math.max(batchLimit, 250),
+    ...(opts.sourceSignalIds === undefined
+      ? {}
+      : { sourceSignalIds: opts.sourceSignalIds }),
     config,
   });
   const apiKey = deps.apiKey ?? process.env["OPENROUTER_API_KEY"] ?? "";
@@ -2572,13 +5054,16 @@ export async function runJevReviews(
   let errors = 0;
   let stale = 0;
   let deferred = 0;
-  const exits = ladderExits();
+  const exits: Record<LadderExitRung, number> = { "r0-veto": 0, r4: 0 };
   let claimed = 0;
   while (claimed < batchLimit) {
     const claims = await claimSignalReviews(db, {
       phase: "jev",
       limit: Math.min(concurrency, batchLimit - claimed),
       leaseSeconds: 600,
+      ...(opts.sourceSignalIds === undefined
+        ? {}
+        : { sourceSignalIds: opts.sourceSignalIds }),
     });
     if (claims.length === 0) break;
     claimed += claims.length;
@@ -2591,7 +5076,9 @@ export async function runJevReviews(
           errors += 1;
           return;
         }
-        const evidence = buildEvidencePackage(row, claim.researchEvidence);
+        const evidence = buildEvidencePackage(row, claim.researchEvidence, {
+          sourceResearchStatus: sourceResearchStatusFromClaim(claim),
+        });
         const manifest = buildFaaReviewInputManifest(
           evidence,
           config,
@@ -2646,6 +5133,7 @@ export async function runJevReviews(
         const currentEvidence = buildEvidencePackage(
           currentRow,
           claim.researchEvidence,
+          { sourceResearchStatus: sourceResearchStatusFromClaim(claim) },
         );
         const currentManifest = buildFaaReviewInputManifest(
           currentEvidence,
@@ -2685,13 +5173,10 @@ export async function runJevReviews(
           config.jevModel,
           terminalRecord.promptVersion,
         );
-        const auditFraction =
-          Number.parseInt(inputHash.slice(0, 8), 16) / 0x1_0000_0000;
-        const nextPhase =
-          evaluation.decision === "research" &&
-          auditFraction >= config.jevAuditSampleRate
-            ? "settled"
-            : "muse";
+        // Every exact terminal Jev triage remains pending for linked Muse
+        // review. Queue membership is not authorization to spend: cohort and
+        // resource gates control paid claims independently.
+        const nextPhase = "muse";
         const committed = await commitSignalReview(
           db,
           claim,
