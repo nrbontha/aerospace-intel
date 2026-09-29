@@ -24,6 +24,7 @@ import {
 } from "react";
 
 import { apiJson } from "@/components/csrf-client";
+import { InvestorPicks } from "@/components/investor-picks";
 import { InvestorRankingDisplay } from "@/components/investor-ranking";
 import type {
   JsonRecord,
@@ -162,6 +163,7 @@ export function SignalExplorer() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [autoRefreshPaused, setAutoRefreshPaused] = useState(false);
   const [lastSuccessfulRefresh, setLastSuccessfulRefresh] = useState<Date>();
+  const [picksRefreshToken, setPicksRefreshToken] = useState(0);
   const [error, setError] = useState<string>();
   const [downloadError, setDownloadError] = useState<string>();
   const [downloading, setDownloading] = useState(false);
@@ -169,6 +171,7 @@ export function SignalExplorer() {
   const activeRequestRef = useRef<AbortController | null>(null);
   const generationRef = useRef(0);
   const requestedDepthRef = useRef(PAGE_SIZE);
+  const hasLoadedInvestorPicksRef = useRef(false);
 
   useEffect(() => {
     setSearchDraft(q);
@@ -209,6 +212,11 @@ export function SignalExplorer() {
           setItems(page.items);
           setNextCursor(page.nextCursor);
           setLastSuccessfulRefresh(new Date());
+          if (hasLoadedInvestorPicksRef.current) {
+            setPicksRefreshToken((token) => token + 1);
+          } else {
+            hasLoadedInvestorPicksRef.current = true;
+          }
         })
         .catch((caught: unknown) => {
           if (
@@ -386,25 +394,32 @@ export function SignalExplorer() {
 
   if (loading && items.length === 0) {
     return (
-      <div className="admin-panel" role="status" aria-live="polite">
-        Loading investor research queue…
+      <div className="admin-stack" aria-busy>
+        <InvestorPicks refreshToken={picksRefreshToken} />
+        <div className="admin-panel" role="status" aria-live="polite">
+          Loading investor research queue…
+        </div>
       </div>
     );
   }
   if (error && items.length === 0) {
     return (
-      <EmptyState
-        title="Research queue unavailable"
-        description={<p>{error}</p>}
-        action={
-          <Button onClick={() => replaceItems(true)}>Try again</Button>
-        }
-      />
+      <div className="admin-stack">
+        <InvestorPicks refreshToken={picksRefreshToken} />
+        <EmptyState
+          title="Research queue unavailable"
+          description={<p>{error}</p>}
+          action={
+            <Button onClick={() => replaceItems(true)}>Try again</Button>
+          }
+        />
+      </div>
     );
   }
 
   return (
     <div className="admin-stack" aria-busy={busy}>
+      <InvestorPicks refreshToken={picksRefreshToken} />
       <section className="admin-panel admin-stack" aria-label="Queue controls">
         <form className="signal-queue-controls" onSubmit={submitSearch}>
           <div className="admin-field signal-queue-controls__search">

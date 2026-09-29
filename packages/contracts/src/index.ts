@@ -5,3 +5,4 @@ export * from "./schemas/agent-runtime.js";
 export * from "./schemas/source-signals.js";
 export * from "./schemas/faa-pma.js";
 export * from "./openapi.js";
+export * from "./investor-picks.js";
