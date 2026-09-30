@@ -5,6 +5,7 @@ import {
   investorPickCreateInputSchema,
   investorPickUpdateInputSchema,
   investorReferenceImportInputSchema,
+  investorReferenceSetDtoSchema,
 } from "@asi/contracts";
 import {
   parseInvestorPicksCliOptions,
@@ -44,10 +45,29 @@ describe("investor pick contracts", () => {
     expect(investorPickUpdateInputSchema.safeParse({}).success).toBe(false);
   });
 
-  it("limits immutable-set imports to Golden and Booie", () => {
+  it("accepts only the current Golden import set", () => {
+    expect(investorReferenceImportInputSchema.safeParse({ set: "golden" }).success).toBe(
+      true,
+    );
+    for (const set of ["booie", "all", "ma-pipeline-20260926"]) {
+      expect(investorReferenceImportInputSchema.safeParse({ set }).success).toBe(false);
+    }
+  });
+
+  it("exposes both immutable source snapshots as Golden metadata", () => {
+    const metadata = {
+      key: "golden",
+      label: "Golden",
+      snapshotKeys: ["golden-set-v01", "booie-original29-2026-09-09"],
+      available: true,
+      memberCount: 47,
+      importedMemberCount: 47,
+    };
+    expect(investorReferenceSetDtoSchema.safeParse(metadata).success).toBe(true);
     expect(
-      investorReferenceImportInputSchema.safeParse({
-        set: "ma-pipeline-20260926",
+      investorReferenceSetDtoSchema.safeParse({
+        ...metadata,
+        snapshotKey: "golden-set-v01",
       }).success,
     ).toBe(false);
   });
@@ -56,7 +76,7 @@ describe("investor pick contracts", () => {
 describe("investor picks import CLI guards", () => {
   const importArgs = [
     "--set",
-    "all",
+    "golden",
     "--expected-host",
     "db.example.test",
     "--expected-database",
@@ -72,11 +92,11 @@ describe("investor picks import CLI guards", () => {
     ).toThrow();
   });
 
-  it("rejects an unrelated historical set selector", () => {
+  it.each(["booie", "all"])("rejects retired %s set selector", (set) => {
     expect(() =>
       parseInvestorPicksCliOptions([
         "--set",
-        "original303",
+        set,
         "--expected-host",
         "db.example.test",
         "--expected-database",

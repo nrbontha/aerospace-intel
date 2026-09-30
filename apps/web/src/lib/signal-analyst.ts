@@ -161,6 +161,7 @@ export interface SignalAnalystCaseDto {
   readonly superseded: boolean;
   readonly memo: SignalAnalystMemo | null;
   readonly memoValid: boolean;
+  readonly memoEvidenceCurrent: boolean;
   readonly memoCurrent: boolean;
   readonly steps: readonly SignalAnalystStepDto[];
   readonly hasMoreSteps: boolean;
@@ -181,11 +182,14 @@ export interface SignalAnalystCaseDto {
 
 export interface SignalOverviewDto {
   readonly signal: SignalSourceDto;
+  readonly investorApproved: boolean;
   readonly review: SignalReviewDto | null;
   readonly currentTriage: SignalTriageEvaluationDto | null;
   readonly currentCase: SignalAnalystCaseDto["case"] | null;
   readonly currentCaseProofCurrent: boolean;
   readonly ranking: InvestorRanking;
+  readonly memoSummary: string | null;
+  readonly memoEvidenceCurrent: boolean;
   readonly memoCurrent: boolean;
 }
 
@@ -196,6 +200,7 @@ export interface SignalOverviewPageDto {
 
 export interface SignalDetailDto {
   readonly signal: SignalSourceDto;
+  readonly investorApproved: boolean;
   readonly review: SignalReviewDto | null;
   readonly currentTriage: SignalTriageEvaluationDto | null;
   readonly ranking: InvestorRanking;

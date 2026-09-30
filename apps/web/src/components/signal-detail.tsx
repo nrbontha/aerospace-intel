@@ -12,6 +12,7 @@ import {
 } from "react";
 
 import { apiJson } from "@/components/csrf-client";
+import { GoldenBadge } from "@/components/golden-badge";
 import { InvestorRankingDisplay } from "@/components/investor-ranking";
 import {
   isNavigableHttpUrl,
@@ -406,16 +407,17 @@ function MemoPanel({
   title: string;
 }) {
   const memo = analystCase.memo;
-  const applicableEvidence =
-    analystCase.current && memo?.inputHash === analystCase.case.inputHash
-      ? evidence
-      : [];
+  const applicableEvidence = analystCase.memoEvidenceCurrent ? evidence : [];
   return (
     <section className="admin-panel admin-stack">
       <div className="signal-section-heading">
         <h3>{title}</h3>
         <Badge tone={analystCase.memoCurrent ? "success" : "warning"}>
-          {analystCase.memoCurrent ? "current research memo" : "draft / historical"}
+          {analystCase.memoCurrent
+            ? "current research memo"
+            : analystCase.memoEvidenceCurrent
+              ? "provisional / not verified"
+              : "draft / historical"}
         </Badge>
       </div>
       <dl className="signal-facts">
@@ -533,6 +535,7 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
   const [error, setError] = useState<string>();
   const activeRequestRef = useRef<AbortController | null>(null);
   const generationRef = useRef(0);
+  const museResearchHashHandledForRef = useRef<string | null>(null);
 
   const load = useCallback(
     (showInitialLoading: boolean): AbortController | null => {
@@ -594,6 +597,7 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
     activeRequestRef.current?.abort();
     activeRequestRef.current = null;
     generationRef.current += 1;
+    museResearchHashHandledForRef.current = null;
     setDetail(undefined);
     const controller = load(true);
     return () => controller?.abort();
@@ -606,6 +610,30 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
     },
     [],
   );
+
+  useEffect(() => {
+    if (
+      detail?.signal.id !== id ||
+      window.location.hash !== "#muse-research" ||
+      museResearchHashHandledForRef.current === id
+    ) {
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      if (
+        window.location.hash !== "#muse-research" ||
+        museResearchHashHandledForRef.current === id
+      ) {
+        return;
+      }
+      const section = document.getElementById("muse-research");
+      if (section !== null) {
+        section.scrollIntoView({ block: "start" });
+        museResearchHashHandledForRef.current = id;
+      }
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [detail?.signal.id, id]);
 
   useEffect(() => {
     const refreshForVisibility = () => {
@@ -646,7 +674,7 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
     );
   }
 
-  const { signal, review, currentTriage, currentCase } = detail;
+  const { signal, investorApproved, review, currentTriage, currentCase } = detail;
   const research = recordValue(review?.researchEvidence) ?? {};
   const evidenceRevisionCurrent =
     review !== null && review.sourceRevision === signal.reviewRevision;
@@ -663,7 +691,9 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
         <p className="asi-page-kicker">
           <Link href="/signals">Investor research queue</Link> / Raw observation
         </p>
-        <h1 className="asi-page-title">{signal.rawName}</h1>
+        <h1 className="asi-page-title">
+          {signal.rawName} {investorApproved ? <GoldenBadge /> : null}
+        </h1>
         <p className="asi-page-description">
           Read-only pre-promotion analysis. Raw source identity and verified
           evidence remain separate; this record is not presented as a canonical
@@ -780,9 +810,11 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
             <LabeledValue label="Muse research memo">
               {currentCase?.memoCurrent
                 ? "Current research memo"
-                : currentCase?.memo
-                  ? "Draft or historical memo"
-                  : "Not available"}
+                : currentCase?.memoEvidenceCurrent
+                  ? "In progress — provisional / not verified"
+                  : currentCase?.memo
+                    ? "Draft or historical memo"
+                    : "Not available"}
             </LabeledValue>
             <LabeledValue label="Review stage">
               {review?.phase ?? "Not started"}
@@ -790,6 +822,26 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
           </dl>
         </section>
       </div>
+      <section
+        className="admin-stack"
+        id="muse-research"
+        aria-labelledby="current-research-heading"
+      >
+        <h2 id="current-research-heading">Persistent Muse research</h2>
+        {currentCase ? (
+          <MemoPanel
+            analystCase={currentCase}
+            evidence={evidence}
+            title="Current-policy case"
+          />
+        ) : (
+          <div className="admin-panel">
+            <p className="asi-page-description">
+              No source-revision and analyst-policy current case exists.
+            </p>
+          </div>
+        )}
+      </section>
 
       <div className="signal-card-grid">
         <section className="admin-panel admin-stack">
@@ -936,18 +988,6 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
         )}
       </section>
 
-      <section className="admin-stack" aria-labelledby="current-research-heading">
-        <h2 id="current-research-heading">Persistent Muse research</h2>
-        {currentCase ? (
-          <MemoPanel analystCase={currentCase} evidence={evidence} title="Current-policy case" />
-        ) : (
-          <div className="admin-panel">
-            <p className="asi-page-description">
-              No source-revision and analyst-policy current case exists.
-            </p>
-          </div>
-        )}
-      </section>
 
       <section className="admin-stack" aria-labelledby="history-heading">
         <h2 id="history-heading">Historical cases and drafts</h2>

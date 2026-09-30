@@ -10,6 +10,7 @@ import {
 } from "drizzle-orm";
 
 import type { Database } from "./client.js";
+import { investorApprovedSql } from "./investor-approval.js";
 import {
   faaEnsembleEvaluations,
   faaReviewModelUsage,
@@ -177,6 +178,7 @@ export interface SourceSignalAnalystOverview {
   currentTriage: FaaEnsembleEvaluation | null;
   currentCase: SignalAnalystCase | null;
   currentCaseProofCurrent: boolean;
+  investorApproved: boolean;
   ranking: InvestorRanking;
 }
 
@@ -1255,6 +1257,7 @@ export async function listSourceSignalAnalystOverviewsInSnapshot(
     ranking_score: number | null;
     ranking_bucket: number;
     ranking_sort_score: number;
+    investor_approved: boolean;
     ranking: InvestorRanking;
   };
   const pageResult =
@@ -1268,6 +1271,7 @@ export async function listSourceSignalAnalystOverviewsInSnapshot(
             ranked.ranking_score,
             ranked.ranking_bucket,
             ranked.ranking_sort_score,
+            ${investorApprovedSql(sql`ranked.signal_id`)} AS investor_approved,
             ranked.ranking
           FROM ranked
           WHERE ${where}
@@ -1287,6 +1291,7 @@ export async function listSourceSignalAnalystOverviewsInSnapshot(
             ranked.ranking_score,
             ranked.ranking_bucket,
             ranked.ranking_sort_score,
+            ${investorApprovedSql(sql`ranked.signal_id`)} AS investor_approved,
             ranked.ranking
           FROM ranked
           WHERE ${where}
@@ -1367,6 +1372,7 @@ export async function listSourceSignalAnalystOverviewsInSnapshot(
         currentTriage !== null &&
         review?.inputHash !== null &&
         currentCase.inputHash === review?.inputHash,
+      investorApproved: ranked.investor_approved === true,
       ranking: ranked.ranking,
     };
   });

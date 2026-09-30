@@ -6,7 +6,6 @@ import type {
   InvestorPicksPageDto,
   InvestorPickUpdateInput,
   InvestorReferenceImportResultDto,
-  InvestorReferenceSet,
 } from "@asi/contracts";
 import { Badge, Button, EmptyState, Input } from "@asi/ui";
 import Link from "next/link";
@@ -19,6 +18,8 @@ import {
 } from "react";
 
 import { apiJson } from "@/components/csrf-client";
+import { GoldenBadge } from "@/components/golden-badge";
+
 import type { SignalOverviewDto, SignalOverviewPageDto } from "@/lib/signal-analyst";
 
 const SOURCE_SEARCH_LIMIT = 25;
@@ -79,7 +80,10 @@ function ImportResult({
 }: Readonly<{ result: InvestorReferenceImportResultDto }>) {
   return (
     <p className="admin-feedback" data-tone="success" role="status">
-      {result.set === "golden" ? "Golden" : "Booie"} import completed: {result.memberCount} source members, {result.createdPicks} picks added, {result.createdSignals} unverified source observations added, {result.alreadyImported} already represented, and {result.inactivePreserved} archived picks preserved.
+      Golden import completed: {result.memberCount} source members,{" "}
+      {result.createdPicks} approvals added, {result.createdSignals} unverified
+      source observations added, {result.alreadyImported} already represented,
+      and {result.inactivePreserved} archived approvals preserved.
     </p>
   );
 }
@@ -156,7 +160,7 @@ export function InvestorPicksAdmin() {
         setLoadError(
           caught instanceof Error
             ? caught.message
-            : "Unable to load investor picks.",
+            : "Unable to load Golden approvals.",
         );
       } finally {
         if (
@@ -286,7 +290,7 @@ export function InvestorPicksAdmin() {
       setFeedback({
         tone: "error",
         message:
-          caught instanceof Error ? caught.message : "Unable to add investor pick.",
+          caught instanceof Error ? caught.message : "Unable to add Golden approval.",
       });
       return false;
     } finally {
@@ -301,7 +305,7 @@ export function InvestorPicksAdmin() {
     if (!selectedSource) {
       setFeedback({
         tone: "error",
-        message: "Select a source record before adding it to the shortlist.",
+        message: "Select a source record before adding it to Golden approvals.",
       });
       return;
     }
@@ -312,7 +316,7 @@ export function InvestorPicksAdmin() {
         sourceSignalId: selectedSource.signal.id,
         ...(existingNote.trim() === "" ? {} : { note: existingNote.trim() }),
       },
-      "Existing source record added to the investor shortlist.",
+      "Existing source record added to Golden approvals.",
     );
     if (created) setExistingNote("");
   }
@@ -331,7 +335,7 @@ export function InvestorPicksAdmin() {
         ...(manualDomain.trim() === "" ? {} : { domain: manualDomain.trim() }),
         ...(manualNote.trim() === "" ? {} : { note: manualNote.trim() }),
       },
-      "Manual candidate added to the investor shortlist.",
+      "Manual candidate added to Golden approvals.",
     );
     if (created) {
       setManualName("");
@@ -359,21 +363,21 @@ export function InvestorPicksAdmin() {
       setFeedback({
         tone: "error",
         message:
-          caught instanceof Error ? caught.message : "Unable to update investor pick.",
+          caught instanceof Error ? caught.message : "Unable to update Golden approval.",
       });
     } finally {
       finishMutation();
     }
   }
 
-  async function importReferenceSet(set: InvestorReferenceSet): Promise<void> {
-    if (!beginMutation(`import:${set}`)) return;
+  async function importGoldenCollection(): Promise<void> {
+    if (!beginMutation("import:golden")) return;
     setFeedback(undefined);
     setImportResult(undefined);
     try {
       const result = await apiJson<InvestorReferenceImportResultDto>(
         "/api/v1/investor-picks/import",
-        { method: "POST", body: JSON.stringify({ set }) },
+        { method: "POST", body: JSON.stringify({ set: "golden" }) },
       );
       setImportResult(result);
       await loadPicks(true);
@@ -383,7 +387,7 @@ export function InvestorPicksAdmin() {
         message:
           caught instanceof Error
             ? caught.message
-            : "Unable to import the stored reference set.",
+            : "Unable to import the stored Golden collection.",
       });
     } finally {
       finishMutation();
@@ -391,13 +395,13 @@ export function InvestorPicksAdmin() {
   }
 
   if (loading && !page) {
-    return <section className="admin-panel" role="status">Loading investor picks…</section>;
+    return <section className="admin-panel" role="status">Loading Golden approvals…</section>;
   }
 
   if (!page && loadError) {
     return (
       <EmptyState
-        title="Investor picks unavailable"
+        title="Golden approvals unavailable"
         description={<p>{loadError}</p>}
         action={<Button onClick={() => void loadPicks()}>Try again</Button>}
       />
@@ -406,11 +410,14 @@ export function InvestorPicksAdmin() {
 
   if (!page || !page.canManage) {
     return (
-      <section className="admin-panel" aria-labelledby="investor-picks-access-heading">
-        <h2 id="investor-picks-access-heading">Investor pick management</h2>
+      <section
+        className="admin-panel"
+        aria-labelledby="investor-picks-access-heading"
+      >
+        <h2 id="investor-picks-access-heading">Golden approval management</h2>
         <p className="asi-page-description">
-          Investor pick management requires administrator access. This account can
-          view the active shortlist from the investor research queue.
+          Golden approval management requires administrator access. This account
+          can view the investor research queue.
         </p>
         {loadError ? <p className="admin-feedback" data-tone="error" role="alert">{loadError}</p> : null}
         <Link href="/signals">View investor research queue</Link>
@@ -418,11 +425,15 @@ export function InvestorPicksAdmin() {
     );
   }
 
+  const goldenReferenceSet = page.referenceSets.find(
+    (set) => set.key === "golden",
+  );
+
   return (
     <div className="admin-stack" aria-busy={loading || pendingAction !== undefined}>
       {loadError ? (
-        <div className="investor-picks__error" role="alert">
-          <span>{loadError} Existing picks remain visible.</span>
+        <div className="admin-error" role="alert">
+          <span>{loadError} Existing approvals remain visible.</span>
           <Button
             disabled={loading || pendingAction !== undefined}
             onClick={() => void loadPicks()}
@@ -440,54 +451,67 @@ export function InvestorPicksAdmin() {
       ) : null}
       {importResult ? <ImportResult result={importResult} /> : null}
 
-      <section className="admin-panel" aria-labelledby="reference-import-heading">
+      <section className="admin-panel" aria-labelledby="golden-import-heading">
         <div className="admin-panel__header">
           <div>
-            <h2 id="reference-import-heading">Import stored reference sets</h2>
+            <h2 id="golden-import-heading">Golden approval collection</h2>
             <p>
-              Imports are explicit and preserve archived selections and administrator notes. They do not alter research scores, qualification, or source history.
+              Import the combined stored Golden collection. Imports preserve
+              archived approvals and administrator notes without changing
+              research scores, scientific qualification, or source history.
             </p>
           </div>
         </div>
-        <div className="investor-picks-admin__reference-sets">
-          {page.referenceSets.map((set) => (
-            <article className="investor-picks-admin__reference-set" key={set.key}>
-              <div>
-                <h3>{set.label}</h3>
-                <p>
-                  {set.available
-                    ? `${set.memberCount} stored members; ${set.importedMemberCount} member ${set.importedMemberCount === 1 ? "row" : "rows"} currently represented.`
-                    : "The stored reference snapshot is unavailable, so it cannot be imported."}
+        {goldenReferenceSet ? (
+          <article className="investor-picks-admin__reference-set">
+            <div>
+              <h3>{goldenReferenceSet.label}</h3>
+              <p>
+                {goldenReferenceSet.available
+                  ? `${goldenReferenceSet.memberCount} stored members; ${goldenReferenceSet.importedMemberCount} member ${goldenReferenceSet.importedMemberCount === 1 ? "row" : "rows"} currently represented.`
+                  : "The stored Golden snapshots are unavailable, so the collection cannot be imported."}
+              </p>
+              <details className="investor-picks-admin__provenance">
+                <summary>Advanced provenance</summary>
+                <p className="admin-user-meta">
+                  Historical source snapshots:{" "}
+                  {goldenReferenceSet.snapshotKeys.join(", ")}
                 </p>
-                <p className="admin-user-meta">Snapshot key: {set.snapshotKey}</p>
-              </div>
-              <Button
-                disabled={
-                  !set.available ||
-                  loading ||
-                  pendingAction !== undefined
-                }
-                isLoading={pendingAction === `import:${set.key}`}
-                onClick={() => void importReferenceSet(set.key)}
-                variant="secondary"
-              >
-                Import {set.label}
-              </Button>
-            </article>
-          ))}
-        </div>
-        {page.referenceSets.length === 0 ? (
-          <p>No stored Golden or Booie reference-set metadata is available.</p>
-        ) : null}
+                <p className="admin-user-meta">
+                  Snapshot labels record reference input lineage; they do not
+                  independently qualify a company.
+                </p>
+              </details>
+            </div>
+            <Button
+              disabled={
+                !goldenReferenceSet.available ||
+                loading ||
+                pendingAction !== undefined
+              }
+              isLoading={pendingAction === "import:golden"}
+              onClick={() => void importGoldenCollection()}
+              variant="secondary"
+            >
+              Import Golden collection
+            </Button>
+          </article>
+        ) : (
+          <p>No stored Golden collection metadata is available.</p>
+        )}
       </section>
 
       <div className="admin-grid">
         <section className="admin-panel" aria-labelledby="existing-source-heading">
           <div className="admin-panel__header">
             <div>
-              <h2 id="existing-source-heading">Add an existing source record</h2>
-              <p>Select a real raw source observation. This does not create a canonical company or change its research state.</p>
-            </div>
+              <h2 id="existing-source-heading">Add an existing source approval</h2>
+              <p>
+                Select a real raw source observation to approve it for investors.
+                This does not create a canonical company or change its research
+                state.
+              </p>
+          </div>
           </div>
           <form className="admin-stack" onSubmit={searchExistingSources}>
             <label className="admin-field" htmlFor="investor-source-search">
@@ -571,7 +595,7 @@ export function InvestorPicksAdmin() {
                 isLoading={pendingAction === "create"}
                 type="submit"
               >
-                Add selected source
+                Add selected source approval
               </Button>
               {selectedSource ? <span>Selected: {sourceLabel(selectedSource)}</span> : null}
             </div>
@@ -581,7 +605,7 @@ export function InvestorPicksAdmin() {
         <section className="admin-panel" aria-labelledby="manual-candidate-heading">
           <div className="admin-panel__header">
             <div>
-              <h2 id="manual-candidate-heading">Add a manual candidate</h2>
+              <h2 id="manual-candidate-heading">Add a manual approval</h2>
               <p>
                 Use this when no appropriate source observation can be selected.
                 A safely matching existing identity may be reused; otherwise this
@@ -627,7 +651,7 @@ export function InvestorPicksAdmin() {
                 isLoading={pendingAction === "create"}
                 type="submit"
               >
-                Add manual candidate
+                Add manual approval
               </Button>
             </div>
           </form>
@@ -637,8 +661,11 @@ export function InvestorPicksAdmin() {
       <section className="admin-panel" aria-labelledby="current-picks-heading">
         <div className="admin-panel__header">
           <div>
-            <h2 id="current-picks-heading">Managed investor picks</h2>
-            <p>{page.total} active and archived selections. Archive removes a pick from the investor queue without deleting its provenance.</p>
+            <h2 id="current-picks-heading">Managed Golden approvals</h2>
+            <p>
+              {page.total} active and archived approvals. Archiving removes
+              investor approval without deleting its provenance.
+            </p>
           </div>
           <Button
             disabled={loading || pendingAction !== undefined}
@@ -649,7 +676,7 @@ export function InvestorPicksAdmin() {
             Refresh
           </Button>
         </div>
-        {page.items.length === 0 ? <p>No investor picks have been added.</p> : null}
+        {page.items.length === 0 ? <p>No Golden approvals have been added.</p> : null}
         <div className="investor-picks-admin__list">
           {page.items.map((pick) => (
             <AdminPickCard
@@ -691,14 +718,35 @@ function AdminPickCard({
     <article className="investor-picks-admin__pick" data-active={pick.active}>
       <div className="investor-picks-admin__pick-header">
         <div>
-          <h3><Link href={`/signals/${pick.sourceSignalId}`}>{pick.name}</Link></h3>
+          <h3>
+            <Link href={`/signals/${pick.sourceSignalId}`}>{pick.name}</Link>
+          </h3>
           <p className="admin-user-meta">{identityDescription(pick)}</p>
-          <p className="admin-user-meta">{provenance(pick)}</p>
+          <details className="investor-picks-admin__provenance">
+            <summary>Advanced provenance</summary>
+            <p className="admin-user-meta">{provenance(pick)}</p>
+            <p className="admin-user-meta">
+              Historical source labels explain how this approval was entered;
+              they are not scientific qualification.
+            </p>
+          </details>
         </div>
         <div className="investor-picks-admin__pick-status">
-          <Badge tone={pick.active ? "success" : "neutral"}>{pick.active ? "Active" : "Archived"}</Badge>
-          <span>{pick.researchScore === null ? "Score unknown / unscored" : `Research score ${pick.researchScore}`}</span>
-          <span>{pick.readiness.replaceAll("_", " ")} · Jev {pick.jevCurrent ? "current" : "not current"}</span>
+          {pick.active ? <GoldenBadge /> : <Badge tone="neutral">Archived</Badge>}
+          <span>
+            {pick.active
+              ? "Active investor approval"
+              : "Archived: not currently investor approved"}
+          </span>
+          <span>
+            {pick.researchScore === null
+              ? "Scientific score unknown / unscored"
+              : `Scientific score ${pick.researchScore}`}
+          </span>
+          <span>
+            {pick.readiness.replaceAll("_", " ")} · Jev{" "}
+            {pick.jevCurrent ? "current" : "not current"}
+          </span>
           <span>Muse: {pick.museStatus ?? "no recorded current status"}</span>
         </div>
       </div>
@@ -709,7 +757,7 @@ function AdminPickCard({
           void onUpdate(
             pick.id,
             { note: note.trim() },
-            "Investor pick note saved.",
+            "Investor approval note saved.",
           );
         }}
       >
@@ -742,14 +790,14 @@ function AdminPickCard({
                 pick.id,
                 { active: !pick.active },
                 pick.active
-                  ? "Investor pick archived. Its provenance and note were retained."
-                  : "Investor pick restored to the active shortlist.",
+                  ? "Investor approval archived. Its provenance and note were retained."
+                  : "Investor approval restored to the active Golden collection.",
               )
             }
             size="small"
             variant={pick.active ? "danger" : "primary"}
           >
-            {pick.active ? "Archive pick" : "Restore pick"}
+            {pick.active ? "Archive approval" : "Restore approval"}
           </Button>
         </div>
       </form>

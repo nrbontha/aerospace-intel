@@ -2370,8 +2370,8 @@ export const sourceSignals = pgTable(
 );
 
 /**
- * Admin curation overlay. It references raw source observations but never
- * participates in qualification, scoring, source history, or provider work.
+ * Admin approval overlay. Active approvals suppress further Muse research but
+ * never change scientific qualification, scoring, or source history.
  */
 export const investorPicks = pgTable(
   "investor_picks",

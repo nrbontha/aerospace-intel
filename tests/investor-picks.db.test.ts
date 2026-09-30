@@ -300,7 +300,7 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       }
     }, 120_000);
 
-    it("imports every stored member, retains overlap provenance, and is idempotent", async () => {
+    it("imports both historical snapshots as one Golden collection and is idempotent", async () => {
       const snapshots = await createReferenceSnapshots();
       const overlapSignal = await createVerifiedSignal({
         rawName: "Overlap Aerospace",
@@ -334,23 +334,9 @@ describe.skipIf(!DB_TESTS_ENABLED)(
         }),
       ).resolves.toEqual({
         set: "golden",
-        memberCount: 2,
+        memberCount: 3,
         createdPicks: 2,
         createdSignals: 1,
-        alreadyImported: 0,
-        inactivePreserved: 0,
-      });
-      await expect(
-        importInvestorReferenceSet(getDatabase(), {
-          set: "booie",
-          actor: SYSTEM_ACTOR,
-          expectedReviewInputContract: EXPECTED_REVIEW_CONTRACT,
-        }),
-      ).resolves.toEqual({
-        set: "booie",
-        memberCount: 1,
-        createdPicks: 0,
-        createdSignals: 0,
         alreadyImported: 0,
         inactivePreserved: 0,
       });
@@ -361,10 +347,10 @@ describe.skipIf(!DB_TESTS_ENABLED)(
           expectedReviewInputContract: EXPECTED_REVIEW_CONTRACT,
         }),
       ).resolves.toMatchObject({
-        memberCount: 2,
+        memberCount: 3,
         createdPicks: 0,
         createdSignals: 0,
-        alreadyImported: 2,
+        alreadyImported: 3,
       });
 
       const page = await listInvestorPicks(getDatabase(), {
@@ -381,10 +367,64 @@ describe.skipIf(!DB_TESTS_ENABLED)(
         expect.objectContaining({ kind: "booie", memberId: booieOverlap, sourceRow: 5 }),
       ]);
       expect(page.referenceSets).toEqual([
-        expect.objectContaining({ key: "golden", memberCount: 2, importedMemberCount: 2 }),
-        expect.objectContaining({ key: "booie", memberCount: 1, importedMemberCount: 1 }),
+        expect.objectContaining({
+          key: "golden",
+          snapshotKeys: ["golden-set-v01", "booie-original29-2026-09-09"],
+          memberCount: 3,
+          importedMemberCount: 3,
+        }),
       ]);
+      expect(
+        await getDatabase()
+          .select({ count: sql<number>`count(*)::int` })
+          .from(sourceSignals),
+      ).toEqual([{ count: 2 }]);
     });
+
+    it.each(["missing", "inactive"] as const)(
+      "does not partially import when a source snapshot is %s",
+      async (state) => {
+        const snapshots = await createReferenceSnapshots();
+        await addReferenceMember({
+          snapshotId: snapshots.goldenId,
+          rawName: "Unavailable Source Aerospace",
+          domain: "unavailable-source.example",
+          sourceRow: 1,
+        });
+        if (state === "missing") {
+          await getDatabase()
+            .delete(knownUniverseSnapshots)
+            .where(eq(knownUniverseSnapshots.id, snapshots.booieId));
+        } else {
+          await getDatabase()
+            .update(knownUniverseSnapshots)
+            .set({ active: false })
+            .where(eq(knownUniverseSnapshots.id, snapshots.booieId));
+        }
+
+        await expect(
+          importInvestorReferenceSet(getDatabase(), {
+            set: "golden",
+            actor: SYSTEM_ACTOR,
+            expectedReviewInputContract: EXPECTED_REVIEW_CONTRACT,
+          }),
+        ).rejects.toMatchObject({ code: "reference_unavailable" });
+        const writes = await Promise.all([
+          getDatabase().select({ count: sql<number>`count(*)::int` }).from(sourceSignals),
+          getDatabase().select({ count: sql<number>`count(*)::int` }).from(investorPicks),
+          getDatabase()
+            .select({ count: sql<number>`count(*)::int` })
+            .from(investorPickOrigins),
+          getDatabase().select({ count: sql<number>`count(*)::int` }).from(auditEvents),
+        ]);
+        expect(writes).toEqual([
+          [{ count: 0 }],
+          [{ count: 0 }],
+          [{ count: 0 }],
+          [{ count: 0 }],
+        ]);
+      },
+    );
 
     it.each([
       {
@@ -657,7 +697,7 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       const pending: Promise<unknown>[] = [];
       try {
         await blocker.query("SELECT pg_advisory_lock(hashtext($1))", [
-          "golden-set-v01",
+          "investor-picks:golden",
         ]);
         const first = Promise.allSettled([importInvestorReferenceSet(getDatabase(), {
           set: "golden",
@@ -674,7 +714,7 @@ describe.skipIf(!DB_TESTS_ENABLED)(
         pending.push(second);
         await waitForAdvisoryWaiters(blocker, 2);
         await blocker.query("SELECT pg_advisory_unlock(hashtext($1))", [
-          "golden-set-v01",
+          "investor-picks:golden",
         ]);
         const results = (await Promise.all([first, second])).flat().map((result) => {
           if (result.status === "rejected") throw result.reason;
@@ -684,7 +724,7 @@ describe.skipIf(!DB_TESTS_ENABLED)(
         expect(results.reduce((sum, result) => sum + result.alreadyImported, 0)).toBe(1);
       } finally {
         await blocker.query("SELECT pg_advisory_unlock(hashtext($1))", [
-          "golden-set-v01",
+          "investor-picks:golden",
         ]);
         await Promise.allSettled(pending);
         await blocker.end();
@@ -696,7 +736,7 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       ).toEqual([{ count: 1 }]);
     });
 
-    it("keeps one source pick while Golden, Booie, and manual provenance overlap", async () => {
+    it("keeps one source pick when Golden import and manual provenance overlap", async () => {
       const snapshots = await createReferenceSnapshots();
       const sourceSignalId = await createVerifiedSignal({
         rawName: "Cross Set Aerospace",
@@ -717,11 +757,6 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       });
       await importInvestorReferenceSet(getDatabase(), {
         set: "golden",
-        actor: SYSTEM_ACTOR,
-        expectedReviewInputContract: EXPECTED_REVIEW_CONTRACT,
-      });
-      await importInvestorReferenceSet(getDatabase(), {
-        set: "booie",
         actor: SYSTEM_ACTOR,
         expectedReviewInputContract: EXPECTED_REVIEW_CONTRACT,
       });

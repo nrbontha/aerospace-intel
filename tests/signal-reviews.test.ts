@@ -297,40 +297,90 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       ).resolves.toEqual([]);
     });
 
-    it("orders due Muse claims by current terminal triage priority only", async () => {
+    it("claims current Muse work in canonical score order rather than Jev tier order", async () => {
       const labels = ["low", "high", "stale", "future"] as const;
       const ids = Object.fromEntries(
         await Promise.all(
           labels.map(async (label) => [label, await createSignal(`priority-${label}`)]),
         ),
       ) as Record<(typeof labels)[number], string>;
+      const expectedReviewInputContract = currentFaaReviewInputContract(
+        resolveEnsembleConfig({}),
+      );
+      const fullEvidence = {
+        identityStatus: "verified",
+        namedProductProofs: [{ quote: "Named aerospace component" }],
+        headquarters: { status: "supported", country: "US" },
+        ownershipStatus: "independent",
+        revenueAssessment: "under_50m",
+        sourcedSupport: {
+          identity: true,
+          product: true,
+          ownership: true,
+          size: true,
+          headquarters: true,
+        },
+      };
+      const unknownEvidence = {
+        identityStatus: "not_found",
+        namedProductProofs: [],
+        headquarters: { status: "unknown", country: null },
+        ownershipStatus: "unknown",
+        revenueAssessment: "unknown",
+        sourcedSupport: {
+          identity: false,
+          product: false,
+          ownership: false,
+          size: false,
+          headquarters: false,
+        },
+      };
       const now = Date.now();
-      for (const [label, priority] of [
-        ["low", 3],
-        ["high", 1],
+      for (const [label, researchPriority] of [
+        ["low", 1],
+        ["high", 3],
         ["stale", 1],
         ["future", 1],
       ] as const) {
-        await ensureSignalReviewState(getDatabase(), ids[label], "muse");
-        const inputHash = hashSignalReviewInput({ label, current: true });
+        const evidence = label === "high" || label === "future"
+          ? fullEvidence
+          : unknownEvidence;
+        const inputManifest = {
+          ...expectedReviewInputContract,
+          sourceRevision: 0,
+          evidence,
+        };
+        const inputHash = hashSignalReviewInput(inputManifest);
         const evaluationInputHash =
           label === "stale"
-            ? hashSignalReviewInput({ label, current: false })
+            ? hashSignalReviewInput({ label, stale: true })
             : inputHash;
         const evaluationId = randomUUID();
+        await ensureSignalReviewState(getDatabase(), ids[label], "muse");
         await getDatabase().insert(faaEnsembleEvaluations).values({
           id: evaluationId,
           signalId: ids[label],
-          modelId: "jev-priority-test",
+          modelId: expectedReviewInputContract.policy.jevModel,
           promptVersion: "jev-priority-test-v1",
           inputHash: evaluationInputHash,
+          inputManifest,
           parsed: {
             version: "jev-triage-v1",
-            decision: "research",
+            decision: label === "high" || label === "future" ? "high_priority" : "research",
             confidence: 70,
-            researchPriority: priority,
+            productFit:
+              label === "high" || label === "future"
+                ? "supported_product"
+                : "plausible_supplier",
+            acquisitionReadiness:
+              label === "high" || label === "future" ? "ready" : "needs_research",
+            researchPriority,
+            reasonCodes: [],
+            explanation: "canonical Muse ordering fixture",
+            observations: [],
+            gaps: [],
           },
-          decision: "research",
+          decision: label === "high" || label === "future" ? "high_priority" : "research",
           confidence: 70,
         });
         await getDatabase()
@@ -338,11 +388,12 @@ describe.skipIf(!DB_TESTS_ENABLED)(
           .set({
             phase: "muse",
             inputHash,
+            inputManifest,
             jevEvaluationId: evaluationId,
             nextAttemptAt:
               label === "future"
                 ? new Date(now + 60_000)
-                : new Date(now - (label === "high" ? 1_000 : 5_000)),
+                : new Date(now - (label === "low" ? 5_000 : 1_000)),
           })
           .where(eq(signalReviewState.signalId, ids[label]));
       }
@@ -350,11 +401,11 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       const claims = await claimSignalReviews(getDatabase(), {
         phase: "muse",
         limit: 4,
+        expectedReviewInputContract,
       });
       expect(claims.map((claim) => claim.signalId)).toEqual([
         ids.high,
         ids.low,
-        ids.stale,
       ]);
     });
 
