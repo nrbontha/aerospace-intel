@@ -24,6 +24,7 @@ import {
   getDatabase,
   hashSignalReviewInput,
   insertFaaReviewModelUsageReceipt,
+  isSourceSignalInvestorApproved,
   publishSignalAnalystEvidence,
   readCurrentSignalAnalystCase,
   readResearchProviderBudgetScope,
@@ -2330,6 +2331,46 @@ function knownAnalystUrls(
   });
 }
 
+function redundantHomepageRequestError(
+  request: AnalystResourceRequest,
+  observations: readonly RetainedAnalystObservation[],
+): string | null {
+  if (request.tool !== "public_page") return null;
+  const requested = new URL(request.url);
+  if (
+    requested.pathname !== "/" ||
+    requested.search !== "" ||
+    requested.hash !== ""
+  ) {
+    return null;
+  }
+  const retainedHomepages = observations.flatMap(({ observation }) =>
+    observation.tool !== "public_page"
+      ? []
+      : observation.sourceReferences.flatMap((source) => {
+          const location = source.finalUrl ?? source.locator;
+          try {
+            const retained = new URL(location);
+            return retained.pathname === "/" &&
+              retained.search === "" &&
+              retained.hash === ""
+              ? [retained]
+              : [];
+          } catch {
+            return [];
+          }
+        }),
+  );
+  return retainedHomepages.some(
+    (retained) =>
+      retained.protocol === requested.protocol &&
+      retained.hostname.toLowerCase() === requested.hostname.toLowerCase() &&
+      retained.port === requested.port,
+  )
+    ? "public_page homepage is already retained; choose a material unresolved gap"
+    : null;
+}
+
 function requestApprovalError(
   request: AnalystResourceRequest,
   tools: readonly AnalystResourceTool[],
@@ -2733,6 +2774,7 @@ export async function runMuseReviews(
     return { ...summary, deferred: 1 };
   }
   const config = deps.config ?? resolveEnsembleConfig();
+  const reviewInputContract = currentFaaReviewInputContract(config);
   const batchLimit = Math.max(1, opts.limit ?? 120);
   const concurrency = Math.max(1, opts.concurrency ?? config.concurrency);
   const requestedLimits = normalizedAnalystLimits(opts.limits);
@@ -2762,6 +2804,47 @@ export async function runMuseReviews(
         ? {}
         : { exaApiKey: process.env["EXA_API_KEY"]! }),
     });
+  const deferIfInvestorApproved = async (
+    claim: SignalReviewClaim,
+    caseState?: {
+      readonly caseId: string;
+      readonly checkpoint: SignalAnalystCheckpoint;
+      readonly inputHash: string;
+      readonly buildMemo?: () => SignalReviewJson;
+    },
+  ): Promise<boolean> => {
+    if (!(await isSourceSignalInvestorApproved(db, claim.signalId))) {
+      return false;
+    }
+    const reason = "Investor-approved target is excluded from further Muse research";
+    if (caseState !== undefined) {
+      const saved = await checkpointSignalAnalystCase(
+        db,
+        claim,
+        caseState.caseId,
+        {
+          checkpoint: caseState.checkpoint as unknown as SignalReviewJson,
+          status: "deferred",
+          inputHash: caseState.inputHash,
+          nextAttemptAt: new Date(clock().getTime() + SIGNAL_ANALYST_DEFER_MS),
+          stopReason: reason,
+          ...(caseState.buildMemo === undefined
+            ? {}
+            : { memo: caseState.buildMemo() }),
+        },
+      );
+      if (!saved.accepted) {
+        summary.stale += 1;
+        return true;
+      }
+    }
+    if (await deferSignalReview(db, claim, reason)) {
+      summary.deferred += 1;
+    } else {
+      summary.stale += 1;
+    }
+    return true;
+  };
   let claimed = 0;
   while (claimed < batchLimit) {
     const claims = await claimSignalReviews(db, {
@@ -2769,11 +2852,13 @@ export async function runMuseReviews(
       limit: Math.min(concurrency, batchLimit - claimed),
       leaseSeconds: 600,
       sourceSignalIds,
+      expectedReviewInputContract: reviewInputContract,
     });
     if (claims.length === 0) break;
     claimed += claims.length;
     await runWithConcurrency(claims, concurrency, async (claim) => {
       try {
+        if (await deferIfInvestorApproved(claim)) return;
         let caseScope = await readResearchProviderBudgetScope(db, scopeId, clock());
         const accessProblem = scopeProblem(mode, caseScope, claim.signalId);
         if (accessProblem !== null || caseScope === null) {
@@ -2837,7 +2922,7 @@ export async function runMuseReviews(
           return;
         }
         let view = await readCurrentSignalAnalystCase(db, claim.signalId, {
-          expectedReviewInputContract: currentFaaReviewInputContract(config),
+          expectedReviewInputContract: reviewInputContract,
           stepLimit: 100,
         });
         if (view === null || view.case.id !== ensured.value.id) {
@@ -2845,6 +2930,38 @@ export async function runMuseReviews(
           return;
         }
         const analystCaseId = view.case.id;
+        const limits = signalAnalystLimitsSchema.parse(view.case.limits);
+        let checkpoint = mergeAnalystGaps(
+          signalAnalystCheckpointSchema.parse(view.case.checkpoint),
+          currentGaps,
+        );
+        let deferredGroundedMemo: SignalReviewJson | undefined;
+        const buildDeferredGroundedMemo = (): SignalReviewJson => {
+          if (deferredGroundedMemo !== undefined) return deferredGroundedMemo;
+          deferredGroundedMemo =
+            buildGroundedSignalAnalystMemo({
+              inputHash,
+              createdAt: clock(),
+              summary:
+                "Research is still in progress. This provisional draft lists only admitted evidence and unresolved material questions.",
+              gaps: checkpoint.gapCatalog,
+              currentGapIds: new Set(currentGaps.map((gap) => gap.id)),
+              factsByField: groundedAnalystFacts(evidence, research),
+              unresolvedQuestions: currentGaps.map((gap) => gap.question),
+              nextActions: [],
+            }) as unknown as SignalReviewJson;
+          return deferredGroundedMemo;
+        };
+        if (
+          await deferIfInvestorApproved(claim, {
+            caseId: view.case.id,
+            checkpoint,
+            inputHash,
+            buildMemo: buildDeferredGroundedMemo,
+          })
+        ) {
+          return;
+        }
         if (view.case.status === "exhausted") {
           const settled = await commitSignalReview(
             db,
@@ -2855,11 +2972,6 @@ export async function runMuseReviews(
           if (!settled.accepted) summary.stale += 1;
           return;
         }
-        const limits = signalAnalystLimitsSchema.parse(view.case.limits);
-        let checkpoint = mergeAnalystGaps(
-          signalAnalystCheckpointSchema.parse(view.case.checkpoint),
-          currentGaps,
-        );
         const capability = capabilityHash(mode, caseScope);
         const initialTools = availableTools(mode, caseScope, clock());
         const blockedTool = checkpoint.pendingAction?.request.tool;
@@ -2877,7 +2989,7 @@ export async function runMuseReviews(
             inputHash,
             nextAttemptAt: new Date(clock().getTime() + SIGNAL_ANALYST_DEFER_MS),
             stopReason: checkpoint.blockedCapability.reason,
-            memo: view.case.memo,
+            memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
           });
           await deferSignalReview(db, claim, checkpoint.blockedCapability.reason);
           summary.deferred += 1;
@@ -2886,6 +2998,16 @@ export async function runMuseReviews(
         const completeBoundedEpisodeWithoutVerification = async (
           reason: string,
         ): Promise<void> => {
+          if (
+            await deferIfInvestorApproved(claim, {
+              caseId: analystCaseId,
+              checkpoint,
+              inputHash,
+              buildMemo: buildDeferredGroundedMemo,
+            })
+          ) {
+            return;
+          }
           const memo = buildGroundedSignalAnalystMemo({
             inputHash,
             createdAt: clock(),
@@ -2950,7 +3072,7 @@ export async function runMuseReviews(
         checkpoint = { ...checkpoint, blockedCapability: null };
         for (;;) {
           view = await readCurrentSignalAnalystCase(db, claim.signalId, {
-            expectedReviewInputContract: currentFaaReviewInputContract(config),
+            expectedReviewInputContract: reviewInputContract,
             stepLimit: 100,
           });
           if (view === null || view.case.id !== ensured.value.id) {
@@ -2970,6 +3092,16 @@ export async function runMuseReviews(
             modelCount + 1 >= limits.maxModelCalls ||
             resourceCount >= limits.maxResourceActions ||
             activeMs >= limits.maxActiveWorkMs;
+          if (
+            await deferIfInvestorApproved(claim, {
+              caseId: view.case.id,
+              checkpoint,
+              inputHash,
+              buildMemo: buildDeferredGroundedMemo,
+            })
+          ) {
+            return;
+          }
 
           if (checkpoint.pendingAction !== null) {
             const pending = checkpoint.pendingAction;
@@ -3050,6 +3182,7 @@ export async function runMuseReviews(
                     clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
                   ),
                   stopReason: reason,
+                  memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
                 });
                 await deferSignalReview(db, claim, reason);
                 summary.deferred += 1;
@@ -3073,6 +3206,7 @@ export async function runMuseReviews(
                     clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
                   ),
                   stopReason: reason,
+                  memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
                 });
                 await deferSignalReview(db, claim, reason);
                 summary.deferred += 1;
@@ -3081,12 +3215,24 @@ export async function runMuseReviews(
             }
             const approval =
               knownCompleted === undefined && !requiresReclaim
-                ? requestApprovalError(
+                ? (requestApprovalError(
                     pending.request,
                     tools,
                     knownAnalystUrls(evidence, observations),
-                  )
+                  ) ?? redundantHomepageRequestError(pending.request, observations))
                 : null;
+            if (
+              knownCompleted === undefined &&
+              !requiresReclaim &&
+              (await deferIfInvestorApproved(claim, {
+                caseId: view.case.id,
+                checkpoint,
+                inputHash,
+                buildMemo: buildDeferredGroundedMemo,
+              }))
+            ) {
+              return;
+            }
             const begun =
               knownCompleted === undefined
                 ? await beginSignalAnalystStep(db, claim, view.case.id, {
@@ -3119,6 +3265,7 @@ export async function runMuseReviews(
                 inputHash,
                 nextAttemptAt: new Date(clock().getTime() + SIGNAL_ANALYST_DEFER_MS),
                 stopReason: "Interrupted resource action has an unknown outcome",
+                memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
               });
               await deferSignalReview(
                 db,
@@ -3129,7 +3276,18 @@ export async function runMuseReviews(
               return;
             }
             if (begun.value.outcome === "active") {
-              await deferSignalReview(db, claim, "Resource action remains active");
+              const reason = "Resource action remains active";
+              await checkpointSignalAnalystCase(db, claim, view.case.id, {
+                checkpoint: checkpoint as unknown as SignalReviewJson,
+                status: "deferred",
+                inputHash,
+                nextAttemptAt: new Date(
+                  clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
+                ),
+                stopReason: reason,
+                memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
+              });
+              await deferSignalReview(db, claim, reason);
               summary.deferred += 1;
               return;
             }
@@ -3225,6 +3383,7 @@ export async function runMuseReviews(
                     clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
                   ),
                   stopReason: observation.accessLimit ?? "Provider quota deferred",
+                  memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
                 });
                 await deferSignalReview(
                   db,
@@ -3245,6 +3404,7 @@ export async function runMuseReviews(
                   clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
                 ),
                 stopReason: reason,
+                memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
               });
               await deferSignalReview(db, claim, reason);
               summary.deferred += 1;
@@ -3342,6 +3502,7 @@ export async function runMuseReviews(
                   clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
                 ),
                 stopReason: liveProblem,
+                memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
               });
               await deferSignalReview(
                 db,
@@ -3367,6 +3528,8 @@ export async function runMuseReviews(
               company: evidence,
               triage: jev.parsed,
               gaps: checkpoint.gapCatalog,
+              admittedFacts: groundedAnalystFacts(evidence, research),
+              unresolvedGaps: currentGaps,
               availableTools: liveTools,
               observations,
               remainingModelCalls: Math.max(
@@ -3467,6 +3630,18 @@ export async function runMuseReviews(
             );
             return;
           }
+          if (
+            knownModelResult === undefined &&
+            !modelRequiresReclaim &&
+            (await deferIfInvestorApproved(claim, {
+              caseId: view.case.id,
+              checkpoint,
+              inputHash,
+              buildMemo: buildDeferredGroundedMemo,
+            }))
+          ) {
+            return;
+          }
           const begun =
             knownModelResult === undefined
               ? await beginSignalAnalystStep(db, claim, view.case.id, {
@@ -3524,6 +3699,16 @@ export async function runMuseReviews(
                 costKnown: false,
                 costUsd: null,
               });
+              await checkpointSignalAnalystCase(db, claim, view.case.id, {
+                checkpoint: checkpoint as unknown as SignalReviewJson,
+                status: "deferred",
+                inputHash,
+                nextAttemptAt: new Date(
+                  clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
+                ),
+                stopReason: errorMessage(error),
+                memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
+              });
               throw error;
             }
             await sleep(config.requestDelayMs);
@@ -3563,6 +3748,7 @@ export async function runMuseReviews(
                     clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
                   ),
                   stopReason: errorMessage(modelResult.error),
+                  memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
                 });
                 await deferSignalReview(db, claim, modelResult.error);
                 summary.deferred += 1;
@@ -3584,13 +3770,35 @@ export async function runMuseReviews(
             finalCallCostUsd = modelResult.result.costUsd;
             finalReturnedModel = modelResult.result.returnedModel;
           } else {
-            await deferSignalReview(db, claim, "Analyst model action is unresolved");
+            const reason = "Analyst model action is unresolved";
+            await checkpointSignalAnalystCase(db, claim, view.case.id, {
+              checkpoint: checkpoint as unknown as SignalReviewJson,
+              status: "deferred",
+              inputHash,
+              nextAttemptAt: new Date(
+                clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
+              ),
+              stopReason: reason,
+              memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
+            });
+            await deferSignalReview(db, claim, reason);
             summary.deferred += 1;
             return;
           }
           caseScope = await readResearchProviderBudgetScope(db, scopeId, clock());
           if (caseScope === null) {
-            await deferSignalReview(db, claim, "Analyst scope unavailable");
+            const reason = "Analyst scope unavailable";
+            await checkpointSignalAnalystCase(db, claim, view.case.id, {
+              checkpoint: checkpoint as unknown as SignalReviewJson,
+              status: "deferred",
+              inputHash,
+              nextAttemptAt: new Date(
+                clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
+              ),
+              stopReason: reason,
+              memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
+            });
+            await deferSignalReview(db, claim, reason);
             summary.deferred += 1;
             return;
           }
@@ -3605,7 +3813,7 @@ export async function runMuseReviews(
               db,
               claim.signalId,
               {
-                expectedReviewInputContract: currentFaaReviewInputContract(config),
+                expectedReviewInputContract: reviewInputContract,
                 stepLimit: 100,
               },
             );
@@ -3655,16 +3863,18 @@ export async function runMuseReviews(
                   clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
                 ),
                 stopReason: reason,
+                memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
               });
               await deferSignalReview(db, claim, reason);
               summary.deferred += 1;
               return;
             }
-            const approval = requestApprovalError(
-              turn.request,
-              liveTools,
-              knownAnalystUrls(evidence, observations),
-            );
+            const approval =
+              requestApprovalError(
+                turn.request,
+                liveTools,
+                knownAnalystUrls(evidence, observations),
+              ) ?? redundantHomepageRequestError(turn.request, observations);
             checkpoint = {
               ...checkpoint,
               pendingAction: approval === null ? pendingAction : null,
@@ -3688,6 +3898,16 @@ export async function runMuseReviews(
               return;
             }
             continue;
+          }
+          if (
+            await deferIfInvestorApproved(claim, {
+              caseId: view.case.id,
+              checkpoint,
+              inputHash,
+              buildMemo: buildDeferredGroundedMemo,
+            })
+          ) {
+            return;
           }
 
           const memo = buildGroundedSignalAnalystMemo({
@@ -3729,7 +3949,7 @@ export async function runMuseReviews(
               inputHash,
               nextAttemptAt: new Date(clock().getTime() + SIGNAL_ANALYST_DEFER_MS),
               stopReason: reason,
-              memo: memo as unknown as SignalReviewJson,
+              memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
             });
             await deferSignalReview(db, claim, reason);
             summary.deferred += 1;

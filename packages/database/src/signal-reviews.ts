@@ -3,8 +3,9 @@ import { createHash } from "node:crypto";
 import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 
 import type { Database } from "./client.js";
+import { investorApprovedSql } from "./investor-approval.js";
+import { investorRankingSql } from "./investor-ranking.js";
 import {
-  faaEnsembleEvaluations,
   signalReviewState,
   sourceSignalEvidenceLinks,
   sourceSignals,
@@ -38,6 +39,11 @@ export interface ClaimSignalReviewsOptions {
   limit: number;
   leaseSeconds?: number;
   sourceSignalIds?: readonly string[];
+  /**
+   * Required only for Muse: seals claims to the current review/policy proof
+   * before applying canonical investor ranking.
+   */
+  expectedReviewInputContract?: ExpectedFaaReviewInputContract;
 }
 
 export interface BootstrapSignalReviewStatesOptions {
@@ -455,8 +461,9 @@ export async function lockCurrentSignalReviewSource(
 }
 
 /**
- * Atomically lease due work. Expired leases are reclaimable; SKIP LOCKED lets
- * multiple workers claim disjoint FIFO slices without blocking one another.
+ * Atomically lease due work. Non-Muse phases preserve FIFO semantics; Muse
+ * ranks the full sealed eligible cohort before limiting. Expired leases are
+ * reclaimable, and SKIP LOCKED lets workers claim disjoint slices.
  */
 export async function claimSignalReviews(
   db: Database,
@@ -470,6 +477,14 @@ export async function claimSignalReviews(
     !Number.isFinite(options.leaseSeconds)
   ) {
     throw new TypeError("leaseSeconds must be finite");
+  }
+  if (
+    options.phase === "muse" &&
+    options.expectedReviewInputContract === undefined
+  ) {
+    throw new TypeError(
+      "expectedReviewInputContract is required for Muse review claims",
+    );
   }
   const limit = Math.min(Math.max(1, Math.trunc(options.limit)), 500);
   const leaseSeconds = Math.min(
@@ -501,60 +516,92 @@ export async function claimSignalReviews(
       : inArray(signalReviewState.signalId, options.sourceSignalIds);
 
   return db.transaction(async (tx) => {
-    const priorityOrder = sql<number>`
-      CASE
-        WHEN ${options.phase} = 'muse'
-          AND ${faaEnsembleEvaluations.parsed}->>'version' = 'jev-triage-v1'
-          AND ${faaEnsembleEvaluations.parsed}->>'researchPriority' = '1'
-          THEN 1
-        WHEN ${options.phase} = 'muse'
-          AND ${faaEnsembleEvaluations.parsed}->>'version' = 'jev-triage-v1'
-          AND ${faaEnsembleEvaluations.parsed}->>'researchPriority' = '2'
-          THEN 2
-        WHEN ${options.phase} = 'muse'
-          AND ${faaEnsembleEvaluations.parsed}->>'version' = 'jev-triage-v1'
-          AND ${faaEnsembleEvaluations.parsed}->>'researchPriority' = '3'
-          THEN 3
-        ELSE 4
-      END
-    `;
-    const due = await tx
-      .select({ signalId: signalReviewState.signalId })
-      .from(signalReviewState)
-      .innerJoin(
-        sourceSignals,
-        and(
-          eq(sourceSignals.id, signalReviewState.signalId),
-          eq(sourceSignals.reviewRevision, signalReviewState.sourceRevision),
-        ),
-      )
-      .leftJoin(
-        faaEnsembleEvaluations,
-        and(
-          eq(faaEnsembleEvaluations.id, signalReviewState.jevEvaluationId),
-          eq(faaEnsembleEvaluations.signalId, signalReviewState.signalId),
-          sql`${faaEnsembleEvaluations.inputHash} IS NOT DISTINCT FROM ${signalReviewState.inputHash}`,
-        ),
-      )
-      .where(
-        and(
-          eligiblePhase,
-          sourceFilter,
-          sql`${signalReviewState.nextAttemptAt} <= clock_timestamp()`,
-          or(
-            isNull(signalReviewState.leaseExpiresAt),
-            sql`${signalReviewState.leaseExpiresAt} <= clock_timestamp()`,
+    let due: { signalId: string }[];
+    if (options.phase === "muse") {
+      const expected = options.expectedReviewInputContract;
+      if (expected === undefined) {
+        throw new Error("Muse claim input contract was not validated");
+      }
+      const canonicalRanking = investorRankingSql({
+        expectedReviewInputContract: expected,
+        ...(options.sourceSignalIds === undefined
+          ? {}
+          : { sourceSignalIds: options.sourceSignalIds }),
+      });
+      const museSourceFilter =
+        options.sourceSignalIds === undefined
+          ? sql`TRUE`
+          : inArray(sql`state.signal_id`, options.sourceSignalIds);
+      const ranked = await tx.execute<{ signal_id: string }>(sql`
+        WITH ranked AS MATERIALIZED (${canonicalRanking}),
+        due AS (
+          SELECT state.signal_id
+          FROM signal_review_state state
+          JOIN source_signals source
+            ON source.id = state.signal_id
+            AND source.review_revision = state.source_revision
+          JOIN ranked
+            ON ranked.signal_id = state.signal_id
+          WHERE state.phase = 'muse'
+            AND state.next_attempt_at <= clock_timestamp()
+            AND (
+              state.lease_expires_at IS NULL
+              OR state.lease_expires_at <= clock_timestamp()
+            )
+            AND ranked.ranking_status = 'ranked'
+            AND ranked.ranking_score IS NOT NULL
+            AND NOT ${investorApprovedSql(sql`state.signal_id`)}
+            AND NOT EXISTS (
+              SELECT 1
+              FROM signal_analyst_cases current_case
+              WHERE current_case.signal_id = state.signal_id
+                AND current_case.source_revision = source.review_revision
+                AND current_case.policy_version = ${expected.policy.analyst}
+                AND current_case.input_hash = state.input_hash
+                AND current_case.status IN ('completed', 'exhausted')
+            )
+            AND ${museSourceFilter}
+          ORDER BY
+            ranked.ranking_score DESC,
+            state.next_attempt_at ASC,
+            state.created_at ASC,
+            state.signal_id ASC
+          LIMIT ${limit}
+          FOR UPDATE OF state SKIP LOCKED
+        )
+        SELECT signal_id FROM due
+      `);
+      due = ranked.rows.map((row) => ({ signalId: row.signal_id }));
+    } else {
+      due = await tx
+        .select({ signalId: signalReviewState.signalId })
+        .from(signalReviewState)
+        .innerJoin(
+          sourceSignals,
+          and(
+            eq(sourceSignals.id, signalReviewState.signalId),
+            eq(sourceSignals.reviewRevision, signalReviewState.sourceRevision),
           ),
-        ),
-      )
-      .orderBy(
-        priorityOrder,
-        asc(signalReviewState.nextAttemptAt),
-        asc(signalReviewState.createdAt),
-        asc(signalReviewState.signalId),
-      )
-      .limit(limit)
-      .for("update", { of: signalReviewState, skipLocked: true });
+        )
+        .where(
+          and(
+            eligiblePhase,
+            sourceFilter,
+            sql`${signalReviewState.nextAttemptAt} <= clock_timestamp()`,
+            or(
+              isNull(signalReviewState.leaseExpiresAt),
+              sql`${signalReviewState.leaseExpiresAt} <= clock_timestamp()`,
+            ),
+          ),
+        )
+        .orderBy(
+          asc(signalReviewState.nextAttemptAt),
+          asc(signalReviewState.createdAt),
+          asc(signalReviewState.signalId),
+        )
+        .limit(limit)
+        .for("update", { of: signalReviewState, skipLocked: true });
+    }
     if (due.length === 0) return [];
 
     const rows = await tx

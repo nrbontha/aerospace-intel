@@ -882,13 +882,46 @@ a:hover {
   margin: 0;
 }
 
-.investor-picks {
-  display: grid;
-  gap: var(--asi-space-8);
+.admin-error {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--asi-space-3);
+  padding: var(--asi-space-4);
+  border: var(--asi-border-width) solid var(--asi-danger);
+  border-radius: var(--asi-radius-sm);
+  background: var(--asi-danger-soft);
+  color: var(--asi-text);
 }
 
-.investor-picks__header,
-.investor-pick-card__header,
+.golden-approval-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--asi-space-2) var(--asi-space-4);
+  border: var(--asi-border-width) solid oklch(48% 0.1 88);
+  border-radius: var(--asi-radius-sm);
+  background: oklch(94% 0.06 88);
+  color: oklch(30% 0.065 88);
+  font: var(--asi-semibold) var(--asi-text-xs) / var(--asi-leading-tight)
+    var(--asi-font-sans);
+  white-space: nowrap;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-asi-theme="light"]) .golden-approval-badge {
+    border-color: oklch(75% 0.1 88);
+    background: oklch(32% 0.06 88);
+    color: oklch(89% 0.06 88);
+  }
+}
+
+[data-asi-theme="dark"] .golden-approval-badge {
+  border-color: oklch(75% 0.1 88);
+  background: oklch(32% 0.06 88);
+  color: oklch(89% 0.06 88);
+}
+
 .investor-picks-admin__pick-header,
 .investor-picks-admin__reference-set {
   display: flex;
@@ -898,45 +931,21 @@ a:hover {
   gap: var(--asi-space-6);
 }
 
-.investor-picks__header h2,
-.investor-pick-card h3,
 .investor-picks-admin__reference-set h3,
 .investor-picks-admin__pick h3 {
   margin: 0;
 }
 
-.investor-picks__header p,
 .investor-picks-admin__reference-set p,
 .investor-picks-admin__pick p {
   margin-block: var(--asi-space-2) 0;
 }
 
-.investor-picks__manage-link {
-  flex: none;
-  font-weight: var(--asi-semibold);
-}
-
-.investor-picks__set-status {
-  display: grid;
-  gap: var(--asi-space-2);
-  padding: var(--asi-space-6);
-  border-inline-start: var(--asi-space-1) solid var(--asi-border-strong);
-  background: var(--asi-surface-muted);
-  color: var(--asi-text-muted);
-  font-size: var(--asi-text-sm);
-}
-
-.investor-picks__grid,
 .investor-picks-admin__list {
   display: grid;
   gap: var(--asi-space-6);
 }
 
-.investor-picks__grid {
-  grid-template-columns: repeat(auto-fit, minmax(min(20rem, 100%), 1fr));
-}
-
-.investor-pick-card,
 .investor-picks-admin__reference-set,
 .investor-picks-admin__pick {
   min-inline-size: 0;
@@ -946,79 +955,28 @@ a:hover {
   background: var(--asi-surface-muted);
 }
 
-.investor-pick-card {
-  display: grid;
-  gap: var(--asi-space-4);
-  overflow-wrap: anywhere;
+.investor-picks-admin__reference-set {
+  align-items: center;
 }
 
-.investor-pick-card__identity,
-.investor-pick-card__provenance,
-.investor-pick-card__note,
-.investor-pick-card__research,
-.investor-picks__actions,
-.investor-picks__error,
-.investor-picks-admin__pick-status {
-  color: var(--asi-text-muted);
-  font-size: var(--asi-text-sm);
-}
-
-.investor-pick-card__identity,
-.investor-pick-card__provenance,
-.investor-pick-card__note {
-  margin: 0;
-}
-
-.investor-pick-card__score {
-  max-inline-size: 12rem;
-  color: var(--asi-text);
-  font-size: var(--asi-text-sm);
-  text-align: end;
-}
-
-.investor-pick-card__badges,
-.investor-picks__actions,
-.investor-picks__error,
 .investor-picks-admin__pick-status {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--asi-space-3);
+  color: var(--asi-text-muted);
+  font-size: var(--asi-text-sm);
 }
 
-.investor-pick-card__research {
-  display: grid;
-  gap: var(--asi-space-2);
+.investor-picks-admin__provenance {
+  margin-block-start: var(--asi-space-4);
 }
 
-.investor-pick-card__note {
-  padding: var(--asi-space-4);
-  border-inline-start: var(--asi-space-1) solid var(--asi-border-strong);
-  background: var(--asi-bg);
-  white-space: pre-wrap;
-}
-
-.investor-picks__actions,
-.investor-picks__error {
-  justify-content: space-between;
-}
-
-.investor-picks__error {
-  padding: var(--asi-space-4);
-  border: var(--asi-border-width) solid var(--asi-danger);
-  border-radius: var(--asi-radius-sm);
-  background: var(--asi-danger-soft);
-  color: var(--asi-text);
-}
-
-.investor-picks-admin__reference-sets {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(18rem, 100%), 1fr));
-  gap: var(--asi-space-6);
-}
-
-.investor-picks-admin__reference-set {
-  align-items: center;
+.investor-picks-admin__provenance summary {
+  cursor: pointer;
+  color: var(--asi-text-muted);
+  font-size: var(--asi-text-sm);
+  font-weight: var(--asi-semibold);
 }
 
 .investor-picks-admin__full-width {
@@ -1087,28 +1045,22 @@ a:hover {
 }
 
 @media (max-width: 48rem) {
-  .investor-picks__header,
-  .investor-pick-card__header,
   .investor-picks-admin__pick-header,
   .investor-picks-admin__reference-set {
     display: grid;
   }
 
-  .investor-picks__manage-link,
-  .investor-pick-card__score,
   .investor-picks-admin__pick-status {
     max-inline-size: none;
     justify-items: start;
     text-align: start;
   }
 
-  .investor-picks__actions,
-  .investor-picks__error {
+  .admin-error {
     align-items: stretch;
   }
 
-  .investor-picks__actions .asi-button,
-  .investor-picks__error .asi-button,
+  .admin-error .asi-button,
   .investor-picks-admin__reference-set .asi-button {
     inline-size: 100%;
   }

@@ -2,7 +2,7 @@ import { z } from "zod";
 
 import { instantSchema, uuidSchema } from "./schemas.js";
 
-export const investorReferenceSetValues = ["golden", "booie"] as const;
+export const investorReferenceSetValues = ["golden"] as const;
 export const investorPickOriginKindValues = [
   "manual",
   "golden",
@@ -53,7 +53,7 @@ export const investorPickDtoSchema = z.strictObject({
 export const investorReferenceSetDtoSchema = z.strictObject({
   key: investorReferenceSetSchema,
   label: z.string(),
-  snapshotKey: z.string(),
+  snapshotKeys: z.array(z.string()).min(1).readonly(),
   available: z.boolean(),
   memberCount: z.number().int().min(0),
   importedMemberCount: z.number().int().min(0),

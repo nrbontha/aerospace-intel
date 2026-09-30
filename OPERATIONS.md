@@ -138,13 +138,13 @@ The automatic path is raw source → cheap Jev triage → mode/cohort-gated pers
 - Manual populate/promote/export callers must supply `currentFaaReviewInputContract()`. Exports are read-only and label missing/incompatible current policy rather than triggering paid review.
 - Live ensemble CLI work uses durable claims. Legacy status/source/sample/known-name/failed-only selectors are dry-run-only; they cannot bypass the claim lifecycle.
 - `/signals`, `/signals/[id]` and their authenticated `/api/v1/signals` read APIs expose raw/unpromoted signals, current Jev fit/readiness/priority/gaps, case history, citations, action attempts and access limits. CSV omits full raw payloads; explicit JSON and the detail view retain raw observations. Neither export initiates research or promotion.
-- Resource permission is separate from model spending: `free_only` permits bounded public-page and already-imported primary-record research but still incurs Muse model costs. It does not authorize Exa, private portals or paid/licensed sources. `disabled` leaves cheap Jev progress independent of Muse.
+- Resource permission is separate from model spending: `free_only` permits bounded public-page and already-imported primary-record research but still incurs Muse model costs. It does not authorize Exa, private portals or paid/licensed sources. `disabled` starts no FAA scheduler stages, including Jev, Muse, evidence refresh and promotion.
 - An exhausted analyst episode may settle with an unresolved memo and no Muse evaluation/result. Count these bounded unverified holds separately from current verified finals. A completed tool request, model turn or terminal Jev triage is not completed acquisition diligence.
 - The host enforces cumulative persisted limits and reserves the last model slot for finalization. Resuming the same case does not replenish limits or repeat recorded successful requests. Late recorded results remain reusable only under the appropriate input identity; uncertain interrupted calls remain explicitly uncertain.
 
 ### Investor ranking and live queue
 
-Authenticated sign-in defaults to `/signals`, the read-only investor research queue. `/feed` retains the reviewed-target workflow. Existing viewer accounts can browse signal detail and download exports; research mutations still require a write-authorized role.
+Authenticated sign-in defaults to `/signals`, the single investor-facing queue. Its normal table includes Golden approvals alongside other raw source observations; there is no separate Investor picks section. Reviewed targets and Universe are absent from left navigation, while `/feed`, `/universe` and their historical data remain available. Existing viewer accounts can browse signal detail and download exports; research mutations still require a write-authorized role.
 
 `investor-research-priority-v1` is an explainable **research-ordering score**, not investment quality, a probability, an acquisition verdict or human approval:
 
@@ -162,32 +162,59 @@ Missing or stale current Jev triage is **unscored**, not zero. A source-backed c
 
 Ranking and filters execute over the whole matching dataset before page limits, not just loaded rows. Default ordering is ranked research prospects, then unscored records, then exclusions, with exact database timestamps and source IDs resolving ties. Search, readiness filters and newest-first ordering are URL-addressable. Opaque cursors bind the scoring policy, sort and filter selection; clients must restart pagination when those change rather than reuse an old cursor. CSV and JSON exports use the same ordering over **all** matching records, irrespective of how many rows the browser has loaded.
 
-The queue loads 100 records at a time. Queue and detail views automatically refresh approximately every 30 seconds while visible, preserve loaded queue depth, and expose pause/resume and manual refresh controls. These are authenticated read requests: viewing, sorting, exporting or refreshing does not initiate paid research or promotion. Historical or input-mismatched results remain labeled separately from current evidence and research progress. Prior Booie, Golden or pipeline membership is provenance, not a score bonus or approval.
+The queue loads 100 records at a time. Queue and detail views automatically refresh approximately every 30 seconds while visible, preserve loaded queue depth, and expose pause/resume and manual refresh controls. These are authenticated read requests: viewing, sorting, exporting or refreshing does not initiate paid research or promotion. Historical or input-mismatched results remain labeled separately from current evidence and research progress. Historical membership is provenance, not a score bonus; the active approval overlay below determines the Golden badge.
 
-**Admin-managed Investor picks** appear above the scientific queue, initially
-showing six picks with an option to expand the complete active shortlist.
-Admins curate them at `/admin/investor-picks`; Viewers can read active picks
-but cannot create, edit, archive, restore, import or inspect archived picks.
-Every mutation requires an authenticated admin and CSRF protection and records
-an audit event. Archiving hides a pick without deleting its provenance or note.
+**Golden** is the single investor-approved collection and gold-colored badge.
+An active `investor_picks` row supplies approval; archiving removes approval
+without deleting the raw source, note, original membership or history. The same
+approval projection drives queue/detail badges and Muse exclusions. It matches
+the directly selected source, the same non-null canonical company, or exact
+normalized legal name plus the same nonempty normalized domain. Name-only,
+domain-only and fuzzy matches cannot confer approval; ambiguous URL forms fail
+closed. Approval is an investor preference, not a verified identity, scientific
+qualification, acquisition verdict or extra research-score points.
 
-The import buttons use the already-stored `golden-set-v01` (18 members) and
-`booie-original29-2026-09-09` (29 members) snapshots. Booie is not the separate
-303-member historical pipeline. Counts describe reference members, not unique
-verified companies. Reimport retains the original member association, notes
-and archived state; restoring an archived pick is an explicit admin action.
+Admins manage the collection at `/admin/investor-picks`, linked as **Golden
+approvals** under Admin. Viewers cannot create, edit, archive, restore, import or
+inspect archived approval records. Mutations require an authenticated admin,
+CSRF protection and an audit event.
+
+The one Golden import atomically reads both existing immutable snapshots:
+`golden-set-v01` (18 members) and `booie-original29-2026-09-09` (29 members).
+Both must be active and present before any import writes occur. The 303-member
+historical pipeline remains separate provenance, not another approval set.
+Counts describe reference members, not unique verified companies. Original
+snapshot/member IDs, origin kinds, labels and rows remain available under
+Advanced provenance. Reimport preserves existing associations, notes and
+archive state; restoration is an explicit admin action.
+
+The current import API accepts only `set: "golden"`; reference metadata exposes
+`snapshotKeys` instead of `snapshotKey`. Separate `booie` and CLI `all` selectors
+are retired. Historical per-origin `snapshotKey` and `booie` lineage are retained.
 An existing source is associated automatically only when its normalized name
-and current source-verified domain uniquely match. Otherwise the import
-creates an unverified raw candidate, not a canonical company.
+and current source-verified domain uniquely match. Otherwise import creates an
+unverified raw candidate, not a canonical company. Admins can also approve an
+existing source or add a name with an optional candidate domain and note.
 
-Admins may also select an existing source record or add a name with an optional
-candidate domain and note. A pick is a curation preference, never a score bonus,
-identity assertion, acquisition approval or promotion. Its score and readiness
-retain scientific-queue precedence: current source-backed exclusions override
-model labels, unsupported model-only rejections remain research prospects,
-and stale or missing current triage is unknown/unscored. Curation does not
-schedule providers, expand a paid cohort, change research history or replenish
-any budget.
+Muse claims require the current review-input contract and rank the full sealed,
+eligible cohort by the canonical research score before limiting the batch.
+Active approvals, stale/unscored/excluded records and current completed or
+exhausted cases are skipped. Due times, allowlists, stable tie-breakers and
+`SKIP LOCKED` leases remain enforced. Approval is checked again before new
+dispatch: an approval arriving mid-episode pauses further research without
+discarding already observed results, charges, pending actions or case limits.
+Curation never expands a paid cohort, resets a budget or rewrites scientific
+history.
+
+Muse works from existing cited facts and unresolved material questions,
+including disconfirming ownership and size evidence. Current-input pauses
+persist grounded provisional memos without pretending to complete verification.
+Queue summaries and detail answers show these as **In progress / provisional**,
+with source links and unresolved questions. `memoEvidenceCurrent` requires a
+valid memo schema, current source/policy/Jev proof and the matching input hash;
+`memoCurrent` additionally requires a completed case. Stale drafts do not link
+their answers to current evidence. A memo alone never earns final-verification
+ranking points or acquisition readiness.
 
 The equivalent guarded import CLI loads no dotenv file. Run it only inside the
 intended environment, with its explicit `DATABASE_URL` and current review
@@ -195,7 +222,7 @@ model/policy configuration already set:
 
 ```sh
 node --import tsx scripts/investor-picks.mts \
-  --set all \
+  --set golden \
   --expected-host postgres.railway.internal \
   --expected-database railway \
   --apply
@@ -458,7 +485,7 @@ Monitor phase counts and due/leased rows, retrieval failures, same-input Jev/Mus
 
 Validation separates sourced historical golden references, synthetic controls, and the repeatedly tuned investor sample. `scripts/jev-ladder-bakeoff.mts` uses the production ladder and fact extractor, but supplied reference domains are an explicit identity premise. It does not prove identity discovery, persistence, Muse, promotion, or current acquisition truth. Report false promotions, false rejects, abstentions, coverage and errors; zero false promotions with zero decisive coverage is not a passing quality result. The frozen old autoresearch harness belongs to its old segment and must not be used to claim comparable new metrics.
 
-Prior-list membership is provenance, not approval. Sources include the original golden workbook, preliminary pipeline workbook, sampled priorities, and investor feedback. A read-only production audit on 2026-09-28 also found the existing `ma-pipeline-20260926` snapshot: 303 recorded members, created before this repair. Its original input file is not present locally, but its persisted membership rows are available. The separate 36-name fixture remains a sample, not a substitute for that snapshot. Exports name the matching snapshot and row/hash provenance; “no match” means no match in available snapshots, not proven novelty.
+Historical list membership is provenance; current investor approval comes from the active Golden overlay described above. Sources include the original golden workbook, preliminary pipeline workbook, sampled priorities, and investor feedback. A read-only production audit on 2026-09-28 also found the existing `ma-pipeline-20260926` snapshot: 303 recorded members, created before this repair. Its original input file is not present locally, but its persisted membership rows are available. The separate 36-name fixture remains a sample, not a substitute for that snapshot. Exports name the matching snapshot and row/hash provenance; “no match” means no match in available snapshots, not proven novelty.
 
 For a coordinated policy cutover, quiesce old worker and web policy writers and verify a fresh backup before migrations and deployment. Run `npx tsx scripts/reconcile-stale-reviews.mts` with the deployment's database and model/policy environment to drain observable source-revision and input-contract changes without provider calls. Cheap intake may bootstrap eligible raw signals without doing paid discovery; an explicitly scoped run must retain its source allowlist. Reconciliation fails rather than claiming a complete drain if it cannot make progress or reaches its pass limit. Preserve primary source documents, historical evaluations, analyst action/cost history, human decisions and existing budget-scope identities.
 

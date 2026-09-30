@@ -28,14 +28,13 @@ type NavigationItem = Readonly<{
 
 const navigation: readonly NavigationItem[] = [
   { href: "/signals", label: "Investor queue" },
-  { href: "/feed", label: "Reviewed targets" },
   { href: "/research", label: "Research" },
-  { href: "/universe", label: "Universe" },
 ];
 
 const adminNavigation: readonly NavigationItem[] = [
   { href: "/experiments", label: "Experiments" },
   { href: "/imports", label: "Imports" },
+  { href: "/admin/investor-picks", label: "Golden approvals", adminOnly: true },
   { href: "/admin", label: "Users & access", adminOnly: true },
 ];
 

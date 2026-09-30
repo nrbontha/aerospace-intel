@@ -31,16 +31,32 @@ import type { ExpectedFaaReviewInputContract } from "./unified-targets/records.j
 
 const REFERENCE_SETS = {
   golden: {
-    snapshotKey: "golden-set-v01",
     label: "Golden",
-  },
-  booie: {
-    snapshotKey: "booie-original29-2026-09-09",
-    label: "Booie",
+    lockKey: "investor-picks:golden",
+    snapshots: [
+      {
+        snapshotKey: "golden-set-v01",
+        kind: "golden",
+        label: "Golden",
+      },
+      {
+        snapshotKey: "booie-original29-2026-09-09",
+        kind: "booie",
+        label: "Booie",
+      },
+    ],
   },
 } as const satisfies Record<
   InvestorReferenceSet,
-  { readonly snapshotKey: string; readonly label: string }
+  {
+    readonly label: string;
+    readonly lockKey: string;
+    readonly snapshots: readonly {
+      readonly snapshotKey: string;
+      readonly kind: "golden" | "booie";
+      readonly label: string;
+    }[];
+  }
 >;
 
 const OVERVIEW_BATCH_SIZE = 100;
@@ -286,11 +302,13 @@ async function hydratePicksInSnapshot(
 async function loadReferenceSetsInSnapshot(
   tx: SignalReviewTransaction,
 ): Promise<InvestorPicksPageDto["referenceSets"]> {
-  const keys = Object.values(REFERENCE_SETS).map(({ snapshotKey }) => snapshotKey);
+  const allSnapshotKeys = Object.values(REFERENCE_SETS).flatMap((set) =>
+    set.snapshots.map((snapshot) => snapshot.snapshotKey),
+  );
   const snapshots = await tx
     .select()
     .from(knownUniverseSnapshots)
-    .where(inArray(knownUniverseSnapshots.key, keys));
+    .where(inArray(knownUniverseSnapshots.key, allSnapshotKeys));
   const snapshotByKey = new Map(snapshots.map((snapshot) => [snapshot.key, snapshot]));
   const snapshotIds = snapshots.map((snapshot) => snapshot.id);
   const [memberCounts, importedOrigins] = await Promise.all([
@@ -327,15 +345,30 @@ async function loadReferenceSetsInSnapshot(
 
   return (Object.keys(REFERENCE_SETS) as InvestorReferenceSet[]).map((key) => {
     const config = referenceSet(key);
-    const snapshot = snapshotByKey.get(config.snapshotKey);
+    const sourceSnapshots = config.snapshots.map(({ snapshotKey }) =>
+      snapshotByKey.get(snapshotKey),
+    );
     return {
       key,
       label: config.label,
-      snapshotKey: config.snapshotKey,
-      available: snapshot?.active === true,
-      memberCount: snapshot === undefined ? 0 : (memberCountBySnapshot.get(snapshot.id) ?? 0),
-      importedMemberCount:
-        snapshot === undefined ? 0 : (importedBySnapshot.get(snapshot.id)?.size ?? 0),
+      snapshotKeys: config.snapshots.map((snapshot) => snapshot.snapshotKey),
+      available: sourceSnapshots.every((snapshot) => snapshot?.active === true),
+      memberCount: sourceSnapshots.reduce(
+        (count, snapshot) =>
+          count +
+          (snapshot === undefined
+            ? 0
+            : (memberCountBySnapshot.get(snapshot.id) ?? 0)),
+        0,
+      ),
+      importedMemberCount: sourceSnapshots.reduce(
+        (count, snapshot) =>
+          count +
+          (snapshot === undefined
+            ? 0
+            : (importedBySnapshot.get(snapshot.id)?.size ?? 0)),
+        0,
+      ),
     };
   });
 }
@@ -745,7 +778,7 @@ export async function importInvestorReferenceSet(
     expectedReviewInputContract: ExpectedFaaReviewInputContract;
   },
 ): Promise<InvestorReferenceImportResultDto> {
-  if (input.set !== "golden" && input.set !== "booie") {
+  if (input.set !== "golden") {
     throw invalidInput("unknown investor reference set");
   }
   if (input.expectedReviewInputContract === undefined) {
@@ -754,89 +787,106 @@ export async function importInvestorReferenceSet(
   const actor = asActor(input.actor);
   const config = referenceSet(input.set);
   return withMutationTransaction(db, async (tx) => {
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${config.snapshotKey}))`);
+    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${config.lockKey}))`);
+    const snapshotKeys = config.snapshots.map((snapshot) => snapshot.snapshotKey);
     const snapshots = await tx
       .select()
       .from(knownUniverseSnapshots)
-      .where(eq(knownUniverseSnapshots.key, config.snapshotKey))
-      .limit(1)
+      .where(inArray(knownUniverseSnapshots.key, snapshotKeys))
       .for("share");
-    const snapshot = snapshots[0];
-    if (snapshot === undefined || !snapshot.active) {
-      throw new InvestorPicksError(
-        "reference_unavailable",
-        `reference snapshot ${config.snapshotKey} is unavailable`,
-      );
-    }
+    const snapshotByKey = new Map(snapshots.map((snapshot) => [snapshot.key, snapshot]));
+    const references = config.snapshots.map((reference) => {
+      const snapshot = snapshotByKey.get(reference.snapshotKey);
+      if (snapshot === undefined || !snapshot.active) {
+        throw new InvestorPicksError(
+          "reference_unavailable",
+          `reference snapshot ${reference.snapshotKey} is unavailable`,
+        );
+      }
+      return { reference, snapshot };
+    });
+    const snapshotIds = references.map(({ snapshot }) => snapshot.id);
     const members = await tx
       .select()
       .from(knownUniverseMembers)
-      .where(eq(knownUniverseMembers.snapshotId, snapshot.id))
-      .orderBy(asc(knownUniverseMembers.sourceRow), asc(knownUniverseMembers.id));
+      .where(inArray(knownUniverseMembers.snapshotId, snapshotIds))
+      .orderBy(
+        asc(knownUniverseMembers.snapshotId),
+        asc(knownUniverseMembers.sourceRow),
+        asc(knownUniverseMembers.id),
+      );
+    const membersBySnapshot = new Map<string, (typeof members)[number][]>();
+    for (const member of members) {
+      const group = membersBySnapshot.get(member.snapshotId) ?? [];
+      group.push(member);
+      membersBySnapshot.set(member.snapshotId, group);
+    }
 
     let createdPicks = 0;
     let createdSignals = 0;
     let alreadyImported = 0;
     let inactivePreserved = 0;
-    for (const member of members) {
-      const existingOrigin = await tx
-        .select({ investorPickId: investorPickOrigins.investorPickId })
-        .from(investorPickOrigins)
-        .where(eq(investorPickOrigins.memberId, member.id))
-        .limit(1);
-      if (existingOrigin[0] !== undefined) {
-        const existingPick = await tx
-          .select({ active: investorPicks.active })
-          .from(investorPicks)
-          .where(eq(investorPicks.id, existingOrigin[0].investorPickId))
-          .limit(1)
-          .for("update");
-        if (existingPick[0] === undefined) {
-          throw new Error(`investor origin ${member.id} no longer has a pick`);
+    for (const { reference, snapshot } of references) {
+      for (const member of membersBySnapshot.get(snapshot.id) ?? []) {
+        const existingOrigin = await tx
+          .select({ investorPickId: investorPickOrigins.investorPickId })
+          .from(investorPickOrigins)
+          .where(eq(investorPickOrigins.memberId, member.id))
+          .limit(1);
+        if (existingOrigin[0] !== undefined) {
+          const existingPick = await tx
+            .select({ active: investorPicks.active })
+            .from(investorPicks)
+            .where(eq(investorPicks.id, existingOrigin[0].investorPickId))
+            .limit(1)
+            .for("update");
+          if (existingPick[0] === undefined) {
+            throw new Error(`investor origin ${member.id} no longer has a pick`);
+          }
+          alreadyImported++;
+          if (!existingPick[0].active) inactivePreserved++;
+          continue;
         }
-        alreadyImported++;
-        if (!existingPick[0].active) inactivePreserved++;
-        continue;
+        const name = member.normalizedName ?? normalizeLegalName(member.rawName);
+        const domain = normalizeDomain(member.normalizedDomain ?? member.rawDomain ?? "");
+        const matchedSourceSignalId = await findCurrentRawSignalByIdentity(tx, {
+          name,
+          domain,
+          expectedReviewInputContract: input.expectedReviewInputContract,
+        });
+        const candidate =
+          matchedSourceSignalId === null
+            ? await ensureUnverifiedCandidate(tx, {
+                name,
+                rawName: member.rawName,
+                domain,
+                scope: member.id,
+                expectedReviewInputContract: input.expectedReviewInputContract,
+              })
+            : null;
+        const sourceSignalId = matchedSourceSignalId ?? candidate?.signal.id;
+        if (sourceSignalId === undefined) {
+          throw new Error(`reference member ${member.id} was not associated to a source signal`);
+        }
+        if (candidate?.created === true) createdSignals++;
+        const pick = await ensurePick(tx, { sourceSignalId, restore: false });
+        if (pick.created) createdPicks++;
+        if (pick.inactivePreserved) inactivePreserved++;
+        const origin = await tx
+          .insert(investorPickOrigins)
+          .values({
+            investorPickId: pick.pick.id,
+            kind: reference.kind,
+            label: reference.label,
+            snapshotId: snapshot.id,
+            snapshotKey: snapshot.key,
+            memberId: member.id,
+            sourceRow: member.sourceRow,
+          })
+          .onConflictDoNothing()
+          .returning({ id: investorPickOrigins.id });
+        if (origin[0] === undefined) alreadyImported++;
       }
-      const name = member.normalizedName ?? normalizeLegalName(member.rawName);
-      const domain = normalizeDomain(member.normalizedDomain ?? member.rawDomain ?? "");
-      const matchedSourceSignalId = await findCurrentRawSignalByIdentity(tx, {
-        name,
-        domain,
-        expectedReviewInputContract: input.expectedReviewInputContract,
-      });
-      const candidate =
-        matchedSourceSignalId === null
-          ? await ensureUnverifiedCandidate(tx, {
-              name,
-              rawName: member.rawName,
-              domain,
-              scope: member.id,
-              expectedReviewInputContract: input.expectedReviewInputContract,
-            })
-          : null;
-      const sourceSignalId = matchedSourceSignalId ?? candidate?.signal.id;
-      if (sourceSignalId === undefined) {
-        throw new Error(`reference member ${member.id} was not associated to a source signal`);
-      }
-      if (candidate?.created === true) createdSignals++;
-      const pick = await ensurePick(tx, { sourceSignalId, restore: false });
-      if (pick.created) createdPicks++;
-      if (pick.inactivePreserved) inactivePreserved++;
-      const origin = await tx
-        .insert(investorPickOrigins)
-        .values({
-          investorPickId: pick.pick.id,
-          kind: input.set,
-          label: config.label,
-          snapshotId: snapshot.id,
-          snapshotKey: snapshot.key,
-          memberId: member.id,
-          sourceRow: member.sourceRow,
-        })
-        .onConflictDoNothing()
-        .returning({ id: investorPickOrigins.id });
-      if (origin[0] === undefined) alreadyImported++;
     }
     const result = {
       set: input.set,
@@ -851,7 +901,7 @@ export async function importInvestorReferenceSet(
       action: "investor_pick.import_reference_set",
       entityId: null,
       after: result,
-      metadata: { snapshotKey: config.snapshotKey },
+      metadata: { snapshotKeys },
     });
     return result;
   });

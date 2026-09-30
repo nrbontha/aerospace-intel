@@ -27,6 +27,7 @@ import {
 } from "../packages/database/src/provider-accounting.js";
 import {
   faaEnsembleResults,
+  investorPicks,
   signalReviewState,
   sourceSignals,
 } from "../packages/database/src/schema.js";
@@ -48,7 +49,10 @@ import {
   type JevLadderCaller,
   type SignalAnalystLimits,
 } from "../packages/research/src/faa-ensemble/runner.js";
-import type { SignalAnalystTurn } from "../packages/research/src/faa-ensemble/analyst-protocol.js";
+import {
+  signalAnalystMemoSchema,
+  type SignalAnalystTurn,
+} from "../packages/research/src/faa-ensemble/analyst-protocol.js";
 import {
   OpenRouterClientError,
   type OpenRouterAttemptTelemetry,
@@ -393,6 +397,13 @@ async function createScope(signalId: string, label: string): Promise<string> {
   return id;
 }
 
+async function approveInvestor(signalId: string): Promise<void> {
+  await getDatabase().insert(investorPicks).values({
+    sourceSignalId: signalId,
+    active: true,
+  });
+}
+
 async function currentReviewState(signalId: string) {
   const [state] = await getDatabase()
     .select()
@@ -600,6 +611,172 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       expect(
         view.steps.filter((step) => step.kind.startsWith("resource:")),
       ).toHaveLength(0);
+    });
+
+    it("does not dispatch new Muse work for an investor-approved target", async () => {
+      const signalId = await createRawSignal("investor-approved");
+      await runJev(signalId);
+      const scopeId = await createScope(signalId, "investor-approved");
+      await approveInvestor(signalId);
+      let modelCalls = 0;
+
+      const summary = await runMuseReviews(
+        getDatabase(),
+        museOptions(scopeId),
+        museDependencies(async () => {
+          modelCalls += 1;
+          return {
+            turn: finalTurn(),
+            returnedModel: config.modelA,
+            costUsd: 0.125,
+          };
+        }, unusedResourceExecutor),
+      );
+
+      expect(summary).toMatchObject({
+        verified: 0,
+        deferred: 0,
+        errors: 0,
+        stale: 0,
+      });
+      expect(modelCalls).toBe(0);
+      expect(await readCurrentSignalAnalystCase(getDatabase(), signalId, {
+        expectedReviewInputContract,
+      })).toBeNull();
+    });
+
+    it("stops an approved Muse episode without discarding its recorded model cost", async () => {
+      const signalId = await createRawSignal("approved-mid-episode");
+      await runJev(signalId);
+      const scopeId = await createScope(signalId, "approved-mid-episode");
+      const request: AnalystResourceRequest = {
+        tool: "primary_records",
+        identity: { legalName: "Signal Analyst approved-mid-episode" },
+        excludeSignalId: signalId,
+      };
+      let modelCalls = 0;
+      let resourceCalls = 0;
+      const resourceExecutor: AnalystResourceExecutor = {
+        execute: async () => {
+          resourceCalls += 1;
+          throw new Error("approved Muse target must not dispatch a resource");
+        },
+      };
+      const dependencies = museDependencies(async () => {
+        modelCalls += 1;
+        await approveInvestor(signalId);
+        return {
+          turn: actionTurn(request),
+          returnedModel: config.modelA,
+          costUsd: 0.125,
+        };
+      }, resourceExecutor);
+
+      const stopped = await runMuseReviews(
+        getDatabase(),
+        museOptions(scopeId),
+        dependencies,
+      );
+
+      expect(stopped).toMatchObject({
+        verified: 0,
+        deferred: 1,
+        errors: 0,
+        stale: 0,
+      });
+      expect(modelCalls).toBe(1);
+      expect(resourceCalls).toBe(0);
+      const view = await currentCase(signalId);
+      expect(view.case.status).toBe("deferred");
+      expect(view.steps.filter((step) => step.kind === "planner")).toHaveLength(
+        1,
+      );
+      expect(view.steps.filter((step) => step.kind === "final_verifier")).toHaveLength(
+        0,
+      );
+      expect(view.modelSpend).toEqual({
+        knownActualCostUsd: "0.125",
+        receiptCount: 1,
+        unknownReceiptCount: 0,
+      });
+      expect((await currentReviewState(signalId)).phase).toBe("muse");
+
+      await forceReviewDue(signalId);
+      const resumed = await runMuseReviews(
+        getDatabase(),
+        museOptions(scopeId),
+        dependencies,
+      );
+      expect(resumed).toMatchObject({
+        verified: 0,
+        deferred: 0,
+        errors: 0,
+        stale: 0,
+      });
+      expect(modelCalls).toBe(1);
+      expect(resourceCalls).toBe(0);
+    });
+
+    it("does not dispatch a second retained homepage variant", async () => {
+      const signalId = await createRawSignal("retained-homepage");
+      await runJev(signalId);
+      const scopeId = await createScope(signalId, "retained-homepage");
+      const firstRequest: AnalystResourceRequest = {
+        tool: "public_page",
+        url: "https://candidate.example/",
+      };
+      const repeatedHomepage: AnalystResourceRequest = {
+        tool: "public_page",
+        url: "https://candidate.example",
+      };
+      let modelCalls = 0;
+      let resourceCalls = 0;
+      const resourceExecutor: AnalystResourceExecutor = {
+        execute: async (context, request) => {
+          resourceCalls += 1;
+          if (request.tool !== "public_page") {
+            throw new Error("unexpected controlled resource request");
+          }
+          return {
+            ...successfulPublicPageObservation(
+              request,
+              context,
+              "The homepage was already retained for this episode.",
+            ),
+            supportRole: "checked_only",
+          };
+        },
+      };
+
+      const summary = await runMuseReviews(
+        getDatabase(),
+        museOptions(scopeId, {
+          maxModelCalls: 3,
+          maxResourceActions: 3,
+          maxActiveWorkMs: 30_000,
+        }),
+        museDependencies(async () => {
+          modelCalls += 1;
+          return {
+            turn:
+              modelCalls === 1
+                ? actionTurn(firstRequest)
+                : modelCalls === 2
+                  ? actionTurn(repeatedHomepage)
+                  : finalTurn(),
+            returnedModel: config.modelA,
+            costUsd: 0,
+          };
+        }, resourceExecutor),
+      );
+
+      expect(summary).toMatchObject({
+        verified: 1,
+        evidenceRequeued: 0,
+        errors: 0,
+      });
+      expect(modelCalls).toBe(3);
+      expect(resourceCalls).toBe(1);
     });
 
     it("promotes only jointly retained publisher and location proof across Muse admissions", async () => {
@@ -1328,6 +1505,14 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       expect(
         view.steps.find((step) => step.kind === "resource:exa_search"),
       ).toMatchObject({ status: "quota_deferred" });
+      const draft = signalAnalystMemoSchema.parse(view.case.memo);
+      expect(draft.inputHash).toBe(view.case.inputHash);
+      expect(
+        draft.answers.every(
+          (answer) =>
+            answer.status !== "answered" || answer.evidenceIds.length > 0,
+        ),
+      ).toBe(true);
 
       await forceReviewDue(signalId);
       const blocked = await runMuseReviews(
@@ -1339,6 +1524,9 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       expect(modelCalls).toBe(1);
       expect(resourceCalls).toBe(1);
       view = await currentCase(signalId);
+      expect(signalAnalystMemoSchema.parse(view.case.memo).inputHash).toBe(
+        view.case.inputHash,
+      );
       expect(
         (
           view.case.checkpoint["pendingAction"] as

@@ -77,15 +77,15 @@ function serializeTriageEvaluation(
 function serializeCaseView(view: SignalAnalystCaseView): SignalAnalystCaseDto {
   const parsedMemo = signalAnalystMemoSchema.safeParse(view.case.memo);
   const memo = parsedMemo.success ? parsedMemo.data : null;
+  const memoEvidenceCurrent =
+    view.current && memo !== null && memo.inputHash === view.case.inputHash;
   const memoCurrent =
-    view.current &&
-    view.case.status === "completed" &&
-    memo !== null &&
-    memo.inputHash === view.case.inputHash;
+    memoEvidenceCurrent && view.case.status === "completed";
   return jsonValue({
     ...view,
     memo,
     memoValid: parsedMemo.success,
+    memoEvidenceCurrent,
     memoCurrent,
   }) as SignalAnalystCaseDto;
 }
@@ -113,7 +113,13 @@ export async function listSignalAnalystOverviews(input: {
       const parsedMemo = signalAnalystMemoSchema.safeParse(item.currentCase?.memo);
       return {
         ...item,
+        investorApproved: item.investorApproved,
         currentTriage: serializeTriageEvaluation(item.currentTriage),
+        memoSummary: parsedMemo.success ? parsedMemo.data.summary.text : null,
+        memoEvidenceCurrent:
+          item.currentCaseProofCurrent &&
+          parsedMemo.success &&
+          parsedMemo.data.inputHash === item.currentCase?.inputHash,
         memoCurrent:
           item.currentCaseProofCurrent &&
           item.currentCase?.status === "completed" &&
@@ -154,6 +160,7 @@ export async function readSignalAnalystDetail(
       ]);
 
       return jsonValue({
+        investorApproved: selected.investorApproved,
         signal: selected.signal,
         review: selected.review,
         currentTriage: serializeTriageEvaluation(selected.currentTriage),

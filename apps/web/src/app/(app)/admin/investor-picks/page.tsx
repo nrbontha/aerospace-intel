@@ -3,9 +3,9 @@ import type { Metadata } from "next";
 import { InvestorPicksAdmin } from "@/components/investor-picks-admin";
 
 export const metadata: Metadata = {
-  title: "Investor picks | ASI",
+  title: "Golden approvals | ASI",
   description:
-    "Administrator-managed investor shortlist with stored Golden, Booie, and manual provenance.",
+    "Manage the single investor-approved Golden collection while preserving original source provenance.",
 };
 
 export default function InvestorPicksAdminPage() {
@@ -13,11 +13,11 @@ export default function InvestorPicksAdminPage() {
     <>
       <header className="asi-page-header">
         <p className="asi-page-kicker">Administration</p>
-        <h1 className="asi-page-title">Investor picks</h1>
+        <h1 className="asi-page-title">Golden approvals</h1>
         <p className="asi-page-description">
-          Curate a preference shortlist above the unchanged evidence-ranked
-          research queue. Picks retain their source provenance and never change
-          research scores or verified identity.
+          Manage investor approvals shown by the gold Golden badge in the Investor
+          queue. Approval retains original provenance and does not change research
+          scores, verified identity, or acquisition qualification.
         </p>
       </header>
       <InvestorPicksAdmin />

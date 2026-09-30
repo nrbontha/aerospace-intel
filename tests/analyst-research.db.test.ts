@@ -126,6 +126,25 @@ async function dropScratchDatabase(
 async function createMuseSignal(label: string): Promise<string> {
   const id = randomUUID();
   const db = getDatabase();
+  const inputManifest = {
+    version: EXPECTED_REVIEW_CONTRACT.version,
+    sourceRevision: 0,
+    policy: EXPECTED_REVIEW_CONTRACT.policy,
+    evidence: {
+      identityStatus: "not_found",
+      namedProductProofs: [],
+      headquarters: { status: "unknown", country: null },
+      ownershipStatus: "unknown",
+      revenueAssessment: "unknown",
+      sourcedSupport: {
+        identity: false,
+        product: false,
+        ownership: false,
+        size: false,
+        headquarters: false,
+      },
+    },
+  };
   await db.insert(sourceSignals).values({
     id,
     sourceKey: "faa_pma_database",
@@ -133,15 +152,40 @@ async function createMuseSignal(label: string): Promise<string> {
     sourceFingerprint: `analyst-research:${label}:${id}`,
     rawName: `Analyst Research ${label}`,
   });
+  const [jevEvaluation] = await db
+    .insert(faaEnsembleEvaluations)
+    .values({
+      signalId: id,
+      modelId: EXPECTED_REVIEW_CONTRACT.policy.jevModel,
+      promptVersion: "analyst-research-fixture-jev-v1",
+      inputHash: INPUT_HASH,
+      inputManifest,
+      rawResponse: "{}",
+      parsed: {
+        version: "jev-triage-v1",
+        decision: "research",
+        confidence: null,
+        productFit: "plausible_supplier",
+        acquisitionReadiness: "needs_research",
+        researchPriority: 2,
+        reasonCodes: [],
+        explanation: "Muse claim fixture",
+        observations: [],
+        gaps: [],
+      },
+      decision: "research",
+      error: null,
+    })
+    .returning({ id: faaEnsembleEvaluations.id });
+  if (jevEvaluation === undefined) {
+    throw new Error("expected Muse fixture Jev evaluation");
+  }
   await db.insert(signalReviewState).values({
     signalId: id,
     phase: "muse",
     inputHash: INPUT_HASH,
-    inputManifest: {
-      version: EXPECTED_REVIEW_CONTRACT.version,
-      sourceRevision: 0,
-      policy: EXPECTED_REVIEW_CONTRACT.policy,
-    },
+    inputManifest,
+    jevEvaluationId: jevEvaluation.id,
     nextAttemptAt: new Date(0),
   });
   return id;
@@ -442,6 +486,7 @@ async function claimMuse(): Promise<SignalReviewClaim> {
     phase: "muse",
     limit: 1,
     leaseSeconds: 60,
+    expectedReviewInputContract: EXPECTED_REVIEW_CONTRACT,
   });
   if (claims[0] === undefined) throw new Error("expected one Muse claim");
   return claims[0];
@@ -1731,11 +1776,9 @@ describe.skipIf(!DB_TESTS_ENABLED)(
         stepLimit: 2,
       });
       expect(current).toMatchObject({
-        current: false,
         episodeCurrent: true,
         superseded: false,
         hasMoreSteps: true,
-        currentTriage: null,
       });
       expect(current?.steps.map((step) => step.sequence)).toEqual([3, 2]);
       expect(current?.providerUsage).toHaveLength(1);

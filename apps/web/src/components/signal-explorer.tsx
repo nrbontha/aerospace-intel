@@ -24,7 +24,7 @@ import {
 } from "react";
 
 import { apiJson } from "@/components/csrf-client";
-import { InvestorPicks } from "@/components/investor-picks";
+import { GoldenBadge } from "@/components/golden-badge";
 import { InvestorRankingDisplay } from "@/components/investor-ranking";
 import type {
   JsonRecord,
@@ -77,6 +77,14 @@ function dueText(value: string | null | undefined): string {
   if (!value) return "No retry scheduled";
   const parsed = new Date(value);
   return Number.isNaN(parsed.valueOf()) ? value : parsed.toLocaleString();
+}
+
+function conciseMuseSummary(value: string | null | undefined): string | null {
+  if (value === null || value === undefined || value === "") return null;
+  const maxLength = 280;
+  return value.length <= maxLength
+    ? value
+    : `${value.slice(0, maxLength - 1)}…`;
 }
 
 function overviewUrl(
@@ -163,7 +171,6 @@ export function SignalExplorer() {
   const [loadingMore, setLoadingMore] = useState(false);
   const [autoRefreshPaused, setAutoRefreshPaused] = useState(false);
   const [lastSuccessfulRefresh, setLastSuccessfulRefresh] = useState<Date>();
-  const [picksRefreshToken, setPicksRefreshToken] = useState(0);
   const [error, setError] = useState<string>();
   const [downloadError, setDownloadError] = useState<string>();
   const [downloading, setDownloading] = useState(false);
@@ -171,7 +178,6 @@ export function SignalExplorer() {
   const activeRequestRef = useRef<AbortController | null>(null);
   const generationRef = useRef(0);
   const requestedDepthRef = useRef(PAGE_SIZE);
-  const hasLoadedInvestorPicksRef = useRef(false);
 
   useEffect(() => {
     setSearchDraft(q);
@@ -212,11 +218,6 @@ export function SignalExplorer() {
           setItems(page.items);
           setNextCursor(page.nextCursor);
           setLastSuccessfulRefresh(new Date());
-          if (hasLoadedInvestorPicksRef.current) {
-            setPicksRefreshToken((token) => token + 1);
-          } else {
-            hasLoadedInvestorPicksRef.current = true;
-          }
         })
         .catch((caught: unknown) => {
           if (
@@ -395,7 +396,6 @@ export function SignalExplorer() {
   if (loading && items.length === 0) {
     return (
       <div className="admin-stack" aria-busy>
-        <InvestorPicks refreshToken={picksRefreshToken} />
         <div className="admin-panel" role="status" aria-live="polite">
           Loading investor research queue…
         </div>
@@ -405,7 +405,6 @@ export function SignalExplorer() {
   if (error && items.length === 0) {
     return (
       <div className="admin-stack">
-        <InvestorPicks refreshToken={picksRefreshToken} />
         <EmptyState
           title="Research queue unavailable"
           description={<p>{error}</p>}
@@ -419,7 +418,6 @@ export function SignalExplorer() {
 
   return (
     <div className="admin-stack" aria-busy={busy}>
-      <InvestorPicks refreshToken={picksRefreshToken} />
       <section className="admin-panel admin-stack" aria-label="Queue controls">
         <form className="signal-queue-controls" onSubmit={submitSearch}>
           <div className="admin-field signal-queue-controls__search">
@@ -597,6 +595,9 @@ export function SignalExplorer() {
             <TableBody>
               {items.map((item) => {
                 const triage = item.currentTriage?.parsed;
+                const museSummary = item.memoEvidenceCurrent
+                  ? conciseMuseSummary(item.memoSummary)
+                  : null;
                 return (
                   <TableRow key={item.signal.id}>
                     <TableCell>
@@ -606,6 +607,7 @@ export function SignalExplorer() {
                       <Link href={`/signals/${item.signal.id}`}>
                         {item.signal.rawName}
                       </Link>
+                      {item.investorApproved ? <GoldenBadge /> : null}
                       <span className="signal-table__meta">
                         {item.signal.rawDomain ?? "Domain unknown"}
                       </span>
@@ -653,12 +655,33 @@ export function SignalExplorer() {
                               } · ${
                                 item.memoCurrent
                                   ? "current research memo"
-                                  : item.currentCase.memo
-                                    ? "draft / historical memo"
-                                    : "no memo"
+                                  : item.memoEvidenceCurrent
+                                    ? "Muse research · In progress"
+                                    : item.currentCase.memo
+                                      ? "draft / historical memo"
+                                      : "no memo"
                               }`
                             : "no current-policy case"}
                         </span>
+                        {museSummary ? (
+                          <span>
+                            <strong>
+                              {item.memoCurrent
+                                ? "Muse findings"
+                                : "Provisional findings"}
+                              :
+                            </strong>{" "}
+                            {museSummary}{" "}
+                            <Link href={`/signals/${item.signal.id}#muse-research`}>
+                              View sourced findings
+                            </Link>
+                          </span>
+                        ) : item.currentCase?.memo ? (
+                          <span>
+                            <strong>Muse findings:</strong> Draft or historical
+                            memo — open research record.
+                          </span>
+                        ) : null}
                         <span>Review stage: {item.review?.phase ?? "not started"}</span>
                         <span>
                           Score updated: {formatTime(item.ranking.updatedAt)}

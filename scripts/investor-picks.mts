@@ -12,15 +12,16 @@ import { currentFaaReviewInputContract } from "@asi/research";
 
 const USAGE = `Usage:
   DATABASE_URL=postgresql://... npx tsx scripts/investor-picks.mts \\
-    --set golden|booie|all --expected-host <host> \\
+    --set golden --expected-host <host> \\
     --expected-database <database> --apply
 
-Imports only the stored Golden18 and/or Booie29 immutable reference sets.
-The command never loads local environment files. --apply, destination host, and
-destination database are all required before it opens a database connection.`;
+Atomically imports the stored Golden collection from the immutable Golden18 and
+Booie29 reference snapshots. The command never loads local environment files.
+--apply, destination host, and destination database are all required before it
+opens a database connection.`;
 
 export interface InvestorPicksCliOptions {
-  readonly set: InvestorReferenceSet | "all";
+  readonly set: InvestorReferenceSet;
   readonly expectedHost: string;
   readonly expectedDatabase: string;
 }
@@ -47,8 +48,8 @@ export function parseInvestorPicksCliOptions(
   }
 
   const set = parsed.values.set?.trim();
-  if (set !== "golden" && set !== "booie" && set !== "all") {
-    throw new Error("--set must be golden, booie, or all");
+  if (set !== "golden") {
+    throw new Error("--set must be golden");
   }
 
   const expectedHost = parsed.values["expected-host"]?.trim();
@@ -120,17 +121,13 @@ async function main(): Promise<void> {
     options.expectedDatabase,
   );
 
-  const sets: readonly InvestorReferenceSet[] =
-    options.set === "all" ? ["golden", "booie"] : [options.set];
   try {
-    for (const set of sets) {
-      const result = await importInvestorReferenceSet(getDatabase(), {
-        set,
-        actor: { kind: "system", label: "investor-picks-cli" },
-        expectedReviewInputContract: currentFaaReviewInputContract(),
-      });
-      process.stdout.write(`${JSON.stringify(result)}\n`);
-    }
+    const result = await importInvestorReferenceSet(getDatabase(), {
+      set: options.set,
+      actor: { kind: "system", label: "investor-picks-cli" },
+      expectedReviewInputContract: currentFaaReviewInputContract(),
+    });
+    process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally {
     await closeDatabase();
   }
