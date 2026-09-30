@@ -16,13 +16,19 @@ import { Pool } from "pg";
 import { closeDatabase as closePackageDatabase } from "@asi/database";
 import { closeDatabase, getDatabase } from "../packages/database/src/client.js";
 import {
+  beginSignalAnalystStep,
+  checkpointSignalAnalystCase,
+  ensureSignalAnalystCase,
+  finishSignalAnalystStep,
   readCurrentSignalAnalystCase,
   readSignalAnalystCaseHistory,
 } from "../packages/database/src/analyst-research.js";
 import { runMigrations } from "../packages/database/src/migrate.js";
+import { claimSignalReviews } from "../packages/database/src/signal-reviews.js";
 import {
   createResearchProviderBudgetScope,
   reserveResearchProviderUsage,
+  setResearchProviderBudgetPermit,
   settleResearchProviderUsage,
 } from "../packages/database/src/provider-accounting.js";
 import {
@@ -39,6 +45,7 @@ import {
   type AnalystResourceRequest,
 } from "../packages/research/src/analyst-resources.js";
 import {
+  FAA_ANALYST_POLICY_VERSION,
   currentFaaReviewInputContract,
   reconcileCurrentReviewInputs,
   resolveEnsembleConfig,
@@ -53,6 +60,7 @@ import {
   signalAnalystMemoSchema,
   type SignalAnalystTurn,
 } from "../packages/research/src/faa-ensemble/analyst-protocol.js";
+import { OpenRouterBudgetDeferredError } from "../packages/research/src/openrouter-budget.js";
 import {
   OpenRouterClientError,
   type OpenRouterAttemptTelemetry,
@@ -612,6 +620,93 @@ describe.skipIf(!DB_TESTS_ENABLED)(
         view.steps.filter((step) => step.kind.startsWith("resource:")),
       ).toHaveLength(0);
     });
+    it("completes a valid research final with gaps when paid discovery is unavailable", async () => {
+      const signalId = await createRawSignal("free-final-with-gaps");
+      await runJev(signalId);
+      const scopeId = await createScope(signalId, "free-final-with-gaps");
+      let modelCalls = 0;
+
+      const summary = await runMuseReviews(
+        getDatabase(),
+        {
+          ...museOptions(scopeId),
+          analystMode: "free_only",
+        },
+        museDependencies(async () => {
+          modelCalls += 1;
+          return {
+            turn: finalTurn("Available research is complete; gaps remain explicit."),
+            returnedModel: config.modelA,
+            costUsd: 0,
+          };
+        }, unusedResourceExecutor),
+      );
+
+      expect(summary).toMatchObject({ verified: 1, deferred: 0, errors: 0 });
+      expect(modelCalls).toBe(1);
+      const view = await currentCase(signalId);
+      expect(view.case.status).toBe("completed");
+      expect(signalAnalystMemoSchema.parse(view.case.memo).answers).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ status: "unresolved" }),
+        ]),
+      );
+    });
+
+    it("exhausts bounded work instead of re-deferring an unchanged unavailable paid action", async () => {
+      const signalId = await createRawSignal("exhausted-paid-action");
+      await runJev(signalId);
+      const scopeId = await createScope(signalId, "exhausted-paid-action");
+      const freeRequest: AnalystResourceRequest = {
+        tool: "primary_records",
+        identity: { legalName: "Signal Analyst exhausted-paid-action" },
+        excludeSignalId: signalId,
+      };
+      const paidRequest: AnalystResourceRequest = {
+        tool: "exa_search",
+        query: "Signal Analyst exhausted-paid-action ownership",
+      };
+      let modelCalls = 0;
+      let resourceCalls = 0;
+      const dependencies = museDependencies(
+        async () => {
+          modelCalls += 1;
+          return {
+            turn:
+              modelCalls === 1
+                ? actionTurn(freeRequest)
+                : actionTurn(paidRequest),
+            returnedModel: config.modelA,
+            costUsd: 0,
+          };
+        },
+        {
+          execute: async (context, request) => {
+            resourceCalls += 1;
+            if (request.tool !== "primary_records") {
+              throw new Error("unavailable paid action must not dispatch");
+            }
+            return unresolvedPrimaryObservation(request, context);
+          },
+        },
+      );
+      const options = {
+        ...museOptions(scopeId, {
+          maxModelCalls: 3,
+          maxResourceActions: 1,
+          maxActiveWorkMs: 30_000,
+        }),
+        analystMode: "free_only" as const,
+      };
+
+      const exhausted = await runMuseReviews(getDatabase(), options, dependencies);
+      expect(exhausted).toMatchObject({ deferred: 0, verified: 0, errors: 0 });
+      expect(modelCalls).toBe(2);
+      expect(resourceCalls).toBe(1);
+      expect((await currentCase(signalId)).case.status).toBe("exhausted");
+      expect((await currentReviewState(signalId)).phase).toBe("settled");
+    });
+
 
     it("does not dispatch new Muse work for an investor-approved target", async () => {
       const signalId = await createRawSignal("investor-approved");
@@ -1318,6 +1413,667 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       expect(Number(view.modelSpend.knownActualCostUsd)).toBe(0.25);
     });
 
+    it("keeps an unchanged model hold dormant despite active Exa and resumes on model capability recovery", async () => {
+      const signalId = await createRawSignal("model-capability-hold");
+      await runJev(signalId);
+      const scopeId = await createScope(signalId, "model-capability-hold");
+      let dailyCap = 100;
+      let modelCalls = 0;
+      const now = new Date("2099-04-05T10:00:00.000Z");
+      const dependencies = {
+        ...museDependencies(
+          async (): Promise<AnalystModelCallResult> => {
+            modelCalls += 1;
+            if (modelCalls === 1) throw billedError("quota_exhausted", 0);
+            return {
+              turn: finalTurn("Model capability resumed without replaying the hold."),
+              returnedModel: config.modelA,
+              costUsd: 0,
+            };
+          },
+          unusedResourceExecutor,
+          () => now,
+        ),
+        dailyBudgetCapUsd: () => dailyCap,
+      };
+      const options = museOptions(scopeId, {
+        maxModelCalls: 2,
+        maxResourceActions: 1,
+        maxActiveWorkMs: 30_000,
+      });
+
+      const held = await runMuseReviews(getDatabase(), options, dependencies);
+      expect(held).toMatchObject({ deferred: 1, verified: 0, errors: 0 });
+      expect(modelCalls).toBe(1);
+      let view = await currentCase(signalId);
+      expect(view.case.status).toBe("deferred");
+      expect(view.work).toMatchObject({ modelAttemptCount: 1 });
+      expect(view.case.checkpoint).toMatchObject({
+        blockedCapability: { kind: "model" },
+      });
+      expect(
+        (
+          view.case.checkpoint["blockedCapability"] as
+            | { admission?: unknown }
+            | null
+        )?.admission,
+      ).toBeUndefined();
+      const heldCheckpoint = view.case.checkpoint;
+      const heldMemo = view.case.memo;
+      const heldUpdatedAt = view.case.updatedAt;
+      const heldStepIds = view.steps.map((step) => step.id);
+
+      const unchanged = await runMuseReviews(getDatabase(), options, dependencies);
+      expect(unchanged).toMatchObject({
+        deferred: 0,
+        verified: 0,
+        errors: 0,
+        stale: 0,
+      });
+      expect(modelCalls).toBe(1);
+      view = await currentCase(signalId);
+      expect(view.case.checkpoint).toEqual(heldCheckpoint);
+      expect(view.case.memo).toEqual(heldMemo);
+      expect(view.case.updatedAt).toEqual(heldUpdatedAt);
+      expect(view.steps.map((step) => step.id)).toEqual(heldStepIds);
+      expect(view.work).toMatchObject({ modelAttemptCount: 1 });
+
+      dailyCap = 101;
+      const resumed = await runMuseReviews(getDatabase(), options, dependencies);
+      expect(resumed).toMatchObject({ deferred: 0, verified: 1, errors: 0 });
+      expect(modelCalls).toBe(2);
+      view = await currentCase(signalId);
+      expect(view.case.status).toBe("completed");
+      expect(view.work).toMatchObject({ modelAttemptCount: 2 });
+    });
+
+    it("resumes an attributable model admission when its OpenRouter permit is released", async () => {
+      const signalId = await createRawSignal("model-permit-recovery");
+      await runJev(signalId);
+      const exaScopeId = await createScope(signalId, "model-permit-recovery");
+      const modelScopeId = `signal-analyst-engine:model-permit:${randomUUID()}`;
+      await createResearchProviderBudgetScope(getDatabase(), {
+        id: modelScopeId,
+        provider: "openrouter",
+        startsAt: new Date("2000-01-01T00:00:00.000Z"),
+        totalCapUsd: "1",
+        permitStatus: "paused",
+        allowlistedSourceSignalIds: [signalId],
+      });
+      const now = new Date("2099-04-05T10:00:00.000Z");
+      let modelCalls = 0;
+      const options = museOptions(exaScopeId, {
+        maxModelCalls: 2,
+        maxResourceActions: 1,
+        maxActiveWorkMs: 30_000,
+      });
+      const dependencies = museDependencies(
+        async (): Promise<AnalystModelCallResult> => {
+          modelCalls += 1;
+          if (modelCalls === 1) {
+            throw new OpenRouterBudgetDeferredError(
+              "scope_paused",
+              null,
+              {},
+              {
+                budgetScopeId: modelScopeId,
+                estimatedCostUsd: "0.106",
+                dailyCapUsd: "10",
+              },
+            );
+          }
+          return {
+            turn: finalTurn("The attributable model permit was released."),
+            returnedModel: config.modelA,
+            costUsd: 0,
+          };
+        },
+        unusedResourceExecutor,
+        () => now,
+      );
+
+      const held = await runMuseReviews(getDatabase(), options, dependencies);
+      expect(held).toMatchObject({ deferred: 1, verified: 0, errors: 0 });
+      expect(modelCalls).toBe(1);
+      let view = await currentCase(signalId);
+      expect(view.case.status).toBe("deferred");
+      expect(view.modelSpend).toEqual({
+        knownActualCostUsd: "0",
+        receiptCount: 0,
+        unknownReceiptCount: 0,
+      });
+      expect(
+        view.steps.find((step) => step.kind === "planner"),
+      ).toMatchObject({
+        status: "quota_deferred",
+        modelUsageReceiptId: null,
+        costKnown: false,
+        costUsd: null,
+      });
+      expect(view.case.checkpoint).toMatchObject({
+        blockedCapability: {
+          kind: "model",
+          admission: {
+            budgetScopeId: modelScopeId,
+            estimatedCostUsd: "0.106",
+            dailyCapUsd: "10",
+          },
+        },
+      });
+
+      await setResearchProviderBudgetPermit(getDatabase(), modelScopeId, {
+        status: "active",
+        observedAt: new Date("2099-04-05T10:01:00.000Z"),
+      });
+      const resumed = await runMuseReviews(getDatabase(), options, dependencies);
+      expect(resumed).toMatchObject({ deferred: 0, verified: 1, errors: 0 });
+      expect(modelCalls).toBe(2);
+      view = await currentCase(signalId);
+      expect(view.case.status).toBe("completed");
+    });
+
+    it("resumes a retained paid action when normal mode and scope recovery make it available", async () => {
+      const signalId = await createRawSignal("mode-scope-capability-recovery");
+      await runJev(signalId);
+      const heldScopeId = await createScope(
+        signalId,
+        "mode-scope-capability-held",
+      );
+      const resumedScopeId = await createScope(
+        signalId,
+        "mode-scope-capability-resumed",
+      );
+      const request = {
+        tool: "exa_search" as const,
+        query: "Signal Analyst mode-scope-capability-recovery ownership",
+      };
+      let modelCalls = 0;
+      let resourceCalls = 0;
+      const dependencies = museDependencies(
+        async (): Promise<AnalystModelCallResult> => {
+          modelCalls += 1;
+          return {
+            turn:
+              modelCalls === 1
+                ? actionTurn(request)
+                : finalTurn("Mode and scope recovery resumed the pending action."),
+            returnedModel: config.modelA,
+            costUsd: 0,
+          };
+        },
+        {
+          execute: async (context, actualRequest) => {
+            resourceCalls += 1;
+            if (
+              actualRequest.tool !== "exa_search" ||
+              actualRequest.query !== request.query
+            ) {
+              throw new Error("unexpected mode/scope recovered request");
+            }
+            return successfulSearchObservation(actualRequest, context);
+          },
+        },
+      );
+      const limits = {
+        maxModelCalls: 3,
+        maxResourceActions: 2,
+        maxActiveWorkMs: 30_000,
+      };
+
+      const held = await runMuseReviews(
+        getDatabase(),
+        { ...museOptions(heldScopeId, limits), analystMode: "free_only" },
+        dependencies,
+      );
+      expect(held).toMatchObject({ deferred: 1, verified: 0, errors: 0 });
+      expect(modelCalls).toBe(1);
+      expect(resourceCalls).toBe(0);
+      let view = await currentCase(signalId);
+      expect(view.case.status).toBe("deferred");
+      expect(
+        (
+          view.case.checkpoint["pendingAction"] as
+            | { request?: unknown }
+            | undefined
+        )?.request,
+      ).toEqual(request);
+
+      const resumed = await runMuseReviews(
+        getDatabase(),
+        museOptions(resumedScopeId, limits),
+        dependencies,
+      );
+      expect(resumed).toMatchObject({ deferred: 0, verified: 1, errors: 0 });
+      expect(modelCalls).toBe(2);
+      expect(resourceCalls).toBe(1);
+      view = await currentCase(signalId);
+      expect(view.case.status).toBe("completed");
+    });
+
+    it("resumes a paused pending Exa action through its resource capability only", async () => {
+      const signalId = await createRawSignal("resource-capability-recovery");
+      await runJev(signalId);
+      const scopeId = await createScope(signalId, "resource-capability-recovery");
+      const request = {
+        tool: "exa_search" as const,
+        query: "Signal Analyst resource-capability-recovery ownership",
+      };
+      const now = new Date("2099-04-05T10:00:00.000Z");
+      let modelCalls = 0;
+      let resourceCalls = 0;
+      const dependencies = museDependencies(
+        async (): Promise<AnalystModelCallResult> => {
+          modelCalls += 1;
+          if (modelCalls === 1) {
+            await setResearchProviderBudgetPermit(getDatabase(), scopeId, {
+              status: "paused",
+              observedAt: now,
+            });
+            return {
+              turn: actionTurn(request),
+              returnedModel: config.modelA,
+              costUsd: 0,
+            };
+          }
+          return {
+            turn: finalTurn("The retained Exa action resumed after permit recovery."),
+            returnedModel: config.modelA,
+            costUsd: 0,
+          };
+        },
+        {
+          execute: async (context, actualRequest) => {
+            resourceCalls += 1;
+            if (
+              actualRequest.tool !== "exa_search" ||
+              actualRequest.query !== request.query
+            ) {
+              throw new Error("unexpected recovered resource request");
+            }
+            return successfulSearchObservation(actualRequest, context);
+          },
+        },
+        () => now,
+      );
+      const options = museOptions(scopeId, {
+        maxModelCalls: 3,
+        maxResourceActions: 2,
+        maxActiveWorkMs: 30_000,
+      });
+
+      const held = await runMuseReviews(getDatabase(), options, dependencies);
+      expect(held).toMatchObject({ deferred: 1, verified: 0, errors: 0 });
+      expect(modelCalls).toBe(1);
+      expect(resourceCalls).toBe(0);
+      let view = await currentCase(signalId);
+      expect(view.case.status).toBe("deferred");
+      expect(view.work).toMatchObject({
+        modelAttemptCount: 1,
+        resourceAttemptCount: 0,
+      });
+      expect(
+        (
+          view.case.checkpoint["pendingAction"] as
+            | { request?: unknown }
+            | undefined
+        )?.request,
+      ).toEqual(request);
+
+      await setResearchProviderBudgetPermit(getDatabase(), scopeId, {
+        status: "active",
+        observedAt: new Date("2099-04-05T10:01:00.000Z"),
+      });
+      const resumed = await runMuseReviews(getDatabase(), options, dependencies);
+      expect(resumed).toMatchObject({ deferred: 0, verified: 1, errors: 0 });
+      expect(modelCalls).toBe(2);
+      expect(resourceCalls).toBe(1);
+      view = await currentCase(signalId);
+      expect(view.case.status).toBe("completed");
+      expect(view.work).toMatchObject({
+        modelAttemptCount: 2,
+        resourceAttemptCount: 1,
+      });
+    });
+
+    it("finishes a bounded episode even when its scope pauses after the final model opportunity", async () => {
+      const signalId = await createRawSignal("paused-terminal-bound");
+      await runJev(signalId);
+      const scopeId = await createScope(signalId, "paused-terminal-bound");
+      const now = new Date("2099-04-05T10:00:00.000Z");
+      let modelCalls = 0;
+      const summary = await runMuseReviews(
+        getDatabase(),
+        museOptions(scopeId, {
+          maxModelCalls: 1,
+          maxResourceActions: 1,
+          maxActiveWorkMs: 30_000,
+        }),
+        museDependencies(
+          async (): Promise<AnalystModelCallResult> => {
+            modelCalls += 1;
+            await setResearchProviderBudgetPermit(getDatabase(), scopeId, {
+              status: "paused",
+              observedAt: now,
+            });
+            return {
+              turn: actionTurn({
+                tool: "exa_search",
+                query: "Signal Analyst paused-terminal-bound ownership",
+              }),
+              returnedModel: config.modelA,
+              costUsd: 0,
+            };
+          },
+          unusedResourceExecutor,
+          () => now,
+        ),
+      );
+
+      expect(summary).toMatchObject({ deferred: 0, verified: 0, errors: 0 });
+      expect(modelCalls).toBe(1);
+      expect((await currentCase(signalId)).case.status).toBe("exhausted");
+      expect((await currentReviewState(signalId)).phase).toBe("settled");
+    });
+
+    it("uses case-wide work and retained observations beyond the visible journal slice", async () => {
+      const signalId = await createRawSignal("journal-beyond-visible-slice");
+      await runJev(signalId);
+      const scopeId = await createScope(signalId, "journal-beyond-visible-slice");
+      const limits = {
+        maxModelCalls: 2,
+        maxResourceActions: 3,
+        maxActiveWorkMs: 30_000,
+      };
+      const claims = await claimSignalReviews(getDatabase(), {
+        phase: "muse",
+        limit: 1,
+        sourceSignalIds: [signalId],
+        expectedReviewInputContract,
+      });
+      const claim = claims[0];
+      if (claim === undefined) throw new Error("expected fixture Muse claim");
+      const ensured = await ensureSignalAnalystCase(getDatabase(), claim, {
+        policyVersion: FAA_ANALYST_POLICY_VERSION,
+        inputHash: claim.inputHash!,
+        limits,
+        initialCheckpoint: {
+          version: "signal-analyst-checkpoint-v1",
+          gapCatalog: [],
+          pendingAction: null,
+          pendingModelTurn: null,
+          processedObservationStepIds: [],
+          accessLimits: [],
+          lastAnalysisSummary: null,
+          blockedCapability: null,
+        },
+      });
+      if (!ensured.accepted) throw new Error("expected fixture analyst case");
+      const analystCase = ensured.value;
+      const plannerHash = createHash("sha256")
+        .update("journal-beyond-visible-planner")
+        .digest("hex");
+      const planner = await beginSignalAnalystStep(
+        getDatabase(),
+        claim,
+        analystCase.id,
+        {
+          kind: "planner",
+          request: { inputHash: claim.inputHash!, promptVersion: "fixture-v1" },
+          requestHash: plannerHash,
+        },
+      );
+      if (!planner.accepted || planner.value.outcome !== "started") {
+        throw new Error("expected completed fixture planner");
+      }
+      const retainedRequest = {
+        tool: "exa_search" as const,
+        query: "Signal Analyst journal-beyond-visible-slice ownership",
+      };
+      await finishSignalAnalystStep(getDatabase(), planner.value.step.id, {
+        status: "completed",
+        response: actionTurn(retainedRequest),
+        costKnown: false,
+      });
+      const retained = await beginSignalAnalystStep(
+        getDatabase(),
+        claim,
+        analystCase.id,
+        {
+          kind: "resource:exa_search",
+          request: retainedRequest,
+          requestHash: analystResourceRequestHash(retainedRequest),
+        },
+      );
+      if (!retained.accepted || retained.value.outcome !== "started") {
+        throw new Error("expected in-progress retained paid action");
+      }
+      const reservation = await reserveResearchProviderUsage(getDatabase(), {
+        provider: "exa",
+        operation: "search",
+        sourceSignalId: signalId,
+        analystStepId: retained.value.step.id,
+        budgetScopeId: scopeId,
+        analystRequestHash: analystResourceRequestHash(retainedRequest),
+        requestHash: createHash("sha256")
+          .update("journal-beyond-visible-provider")
+          .digest("hex"),
+        estimatedCostUsd: "0.1",
+        dailyCapUsd: "10",
+        now: new Date("2099-04-05T10:00:00.000Z"),
+      });
+      if (reservation.outcome !== "reserved") {
+        throw new Error("expected retained paid reservation");
+      }
+      await settleResearchProviderUsage(getDatabase(), reservation.reservation.id, {
+        status: "succeeded",
+        actualCostUsd: "0.1",
+        observedAt: new Date("2099-04-05T10:00:01.000Z"),
+      });
+      await finishSignalAnalystStep(getDatabase(), retained.value.step.id, {
+        status: "completed",
+        response: {
+          ...successfulSearchObservation(retainedRequest, {
+            sourceSignalId: signalId,
+            analystStepId: retained.value.step.id,
+          }),
+          providerReceiptId: reservation.reservation.id,
+          providerCostUsd: "0.1",
+          providerCostKnown: true,
+        },
+        costKnown: true,
+        costUsd: "0.1",
+      });
+      const checkpointed = await checkpointSignalAnalystCase(
+        getDatabase(),
+        claim,
+        analystCase.id,
+        {
+          checkpoint: {
+            version: "signal-analyst-checkpoint-v1",
+            gapCatalog: [],
+            pendingAction: {
+              plannerStepId: planner.value.step.id,
+              purpose: "Reuse the retained paid result.",
+              gapIds: ["identity"],
+              request: retainedRequest,
+            },
+            pendingModelTurn: null,
+            processedObservationStepIds: [],
+            accessLimits: [],
+            lastAnalysisSummary: null,
+            blockedCapability: null,
+          },
+          status: "active",
+          inputHash: claim.inputHash!,
+        },
+      );
+      if (!checkpointed.accepted) throw new Error("expected saved pending action");
+      const lateRequest = {
+        tool: "primary_records" as const,
+        identity: { legalName: "Signal Analyst journal late result" },
+        excludeSignalId: signalId,
+      };
+      const late = await beginSignalAnalystStep(
+        getDatabase(),
+        claim,
+        analystCase.id,
+        {
+          kind: "resource:primary_records",
+          request: lateRequest,
+          requestHash: analystResourceRequestHash(lateRequest),
+        },
+      );
+      if (!late.accepted || late.value.outcome !== "started") {
+        throw new Error("expected fixture late action");
+      }
+      await getDatabase()
+        .update(signalReviewState)
+        .set({ leaseExpiresAt: EPOCH })
+        .where(eq(signalReviewState.signalId, signalId));
+      const replacementClaims = await claimSignalReviews(getDatabase(), {
+        phase: "muse",
+        limit: 1,
+        sourceSignalIds: [signalId],
+        expectedReviewInputContract,
+      });
+      const replacement = replacementClaims[0];
+      if (replacement === undefined) throw new Error("expected replacement fixture claim");
+      const interrupted = await beginSignalAnalystStep(
+        getDatabase(),
+        replacement,
+        analystCase.id,
+        {
+          kind: "resource:primary_records",
+          request: lateRequest,
+          requestHash: analystResourceRequestHash(lateRequest),
+        },
+      );
+      if (!interrupted.accepted || interrupted.value.outcome !== "interrupted") {
+        throw new Error("expected interrupted fixture action");
+      }
+      const lateFinished = await finishSignalAnalystStep(
+        getDatabase(),
+        late.value.step.id,
+        {
+          status: "completed",
+          response: unresolvedPrimaryObservation(lateRequest, {
+            sourceSignalId: signalId,
+            analystStepId: late.value.step.id,
+          }),
+          costKnown: false,
+        },
+      );
+      expect(lateFinished).toMatchObject({
+        outcome: "late_recorded",
+        step: { status: "late_result", observedStatus: "completed" },
+      });
+      await getDatabase().execute(sql`
+        UPDATE signal_analyst_steps
+        SET started_at = ${new Date("2000-01-01T00:00:00.000Z")},
+            finished_at = ${new Date("2000-01-01T00:00:02.000Z")},
+            late_observed_at = ${new Date("2000-01-01T00:00:07.000Z")}
+        WHERE id = ${late.value.step.id}::uuid
+      `);
+      for (let index = 0; index < 101; index += 1) {
+        const requestHash = createHash("sha256")
+          .update(`journal-beyond-visible-quota-${index}`)
+          .digest("hex");
+        const quota = await beginSignalAnalystStep(
+          getDatabase(),
+          replacement,
+          analystCase.id,
+          {
+            kind: "resource:exa_search",
+            request: { index },
+            requestHash,
+          },
+        );
+        if (!quota.accepted || quota.value.outcome !== "started") {
+          throw new Error("expected fixture quota journal step");
+        }
+        await finishSignalAnalystStep(getDatabase(), quota.value.step.id, {
+          status: "quota_deferred",
+          response: {},
+          costKnown: false,
+        });
+      }
+      await getDatabase()
+        .update(signalReviewState)
+        .set({ leaseExpiresAt: EPOCH })
+        .where(eq(signalReviewState.signalId, signalId));
+
+      let view = await currentCase(signalId);
+      expect(view.hasMoreSteps).toBe(true);
+      expect(view.steps).toHaveLength(100);
+      expect(view.steps.every((step) => step.status === "quota_deferred")).toBe(
+        true,
+      );
+      expect(view.executionSteps).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            id: retained.value.step.id,
+            requestHash: analystResourceRequestHash(retainedRequest),
+            status: "completed",
+          }),
+          expect.objectContaining({
+            id: late.value.step.id,
+            status: "late_result",
+            observedStatus: "completed",
+          }),
+        ]),
+      );
+      expect(view.work).toMatchObject({
+        modelAttemptCount: 1,
+        resourceAttemptCount: 2,
+      });
+      expect(view.providerSpend).toEqual({
+        knownActualCostUsd: "0.1",
+        unknownEstimatedCostUsd: "0",
+        receiptCount: 1,
+        unknownReceiptCount: 0,
+      });
+      expect(view.work.activeWorkMs).toBeGreaterThanOrEqual(2_000);
+      expect(view.work.activeWorkMs).toBeLessThan(15_000);
+
+      let modelCalls = 0;
+      let resourceCalls = 0;
+      const resumed = await runMuseReviews(
+        getDatabase(),
+        museOptions(scopeId, limits),
+        museDependencies(
+          async (): Promise<AnalystModelCallResult> => {
+            modelCalls += 1;
+            return {
+              turn: finalTurn("Retained journal observations were reused."),
+              returnedModel: config.modelA,
+              costUsd: 0,
+            };
+          },
+          {
+            execute: async () => {
+              resourceCalls += 1;
+              throw new Error("retained resource request must not redispatch");
+            },
+          },
+        ),
+      );
+      expect(resumed).toMatchObject({ verified: 1, deferred: 0, errors: 0 });
+      expect(modelCalls).toBe(1);
+      expect(resourceCalls).toBe(0);
+      view = await currentCase(signalId);
+      expect(view.case.status).toBe("completed");
+      expect(view.work).toMatchObject({
+        modelAttemptCount: 2,
+        resourceAttemptCount: 2,
+      });
+      expect(
+        view.executionSteps.find((step) => step.id === retained.value.step.id),
+      ).toMatchObject({
+        requestHash: analystResourceRequestHash(retainedRequest),
+        status: "completed",
+      });
+    });
+
     it("reuses paid planner and verifier results recorded after lease loss", async () => {
       const signalId = await createRawSignal("late-model-reuse");
       await runJev(signalId);
@@ -1513,6 +2269,10 @@ describe.skipIf(!DB_TESTS_ENABLED)(
             answer.status !== "answered" || answer.evidenceIds.length > 0,
         ),
       ).toBe(true);
+      expect(view.case.nextAttemptAt).toEqual(retryAt);
+      const blockedMemo = view.case.memo;
+      const blockedCaseUpdatedAt = view.case.updatedAt;
+
 
       await forceReviewDue(signalId);
       const blocked = await runMuseReviews(
@@ -1536,6 +2296,8 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       expect(view.steps.filter((step) => step.kind === "planner")).toHaveLength(
         1,
       );
+      expect(view.case.memo).toEqual(blockedMemo);
+      expect(view.case.updatedAt).toEqual(blockedCaseUpdatedAt);
 
       now = new Date("2099-04-05T11:00:01.000Z");
       await forceReviewDue(signalId);
@@ -1558,6 +2320,63 @@ describe.skipIf(!DB_TESTS_ENABLED)(
           .map((step) => step.status),
       ).toEqual(["completed", "quota_deferred"]);
     });
+    it("holds a budget-deferred model turn until its actual daily reset", async () => {
+      const signalId = await createRawSignal("daily-budget-retry");
+      await runJev(signalId);
+      const scopeId = await createScope(signalId, "daily-budget-retry");
+      let now = new Date("2099-04-05T23:30:00.000Z");
+      const retryAt = new Date("2099-04-06T00:00:00.000Z");
+      let dailyBudgetExhausted = true;
+      let modelCalls = 0;
+      const dependencies = {
+        ...museDependencies(async () => {
+          modelCalls += 1;
+          return {
+            turn: finalTurn("The deferred model turn resumed after daily reset."),
+            returnedModel: config.modelA,
+            costUsd: 0,
+          };
+        }, unusedResourceExecutor, () => now),
+        getDailySpendUsd: async () => (dailyBudgetExhausted ? 5 : 0),
+        dailyBudgetCapUsd: () => 5,
+      };
+      const options = museOptions(scopeId, {
+        maxModelCalls: 3,
+        maxResourceActions: 1,
+        maxActiveWorkMs: 30_000,
+      });
+
+      const deferred = await runMuseReviews(getDatabase(), options, dependencies);
+      expect(deferred).toMatchObject({ deferred: 1, verified: 0, errors: 0 });
+      expect(modelCalls).toBe(0);
+      let view = await currentCase(signalId);
+      expect(view.case.status).toBe("deferred");
+      expect(view.case.nextAttemptAt).toEqual(retryAt);
+      expect((await currentReviewState(signalId)).nextAttemptAt).toEqual(retryAt);
+      expect(view.steps.filter((step) => step.kind === "planner")).toHaveLength(1);
+
+      const deferredMemo = view.case.memo;
+      const deferredUpdatedAt = view.case.updatedAt;
+      await forceReviewDue(signalId);
+      const unchanged = await runMuseReviews(getDatabase(), options, dependencies);
+      expect(unchanged).toMatchObject({ deferred: 1, verified: 0, errors: 0 });
+      expect(modelCalls).toBe(0);
+      view = await currentCase(signalId);
+      expect(view.case.memo).toEqual(deferredMemo);
+      expect(view.case.updatedAt).toEqual(deferredUpdatedAt);
+      expect((await currentReviewState(signalId)).nextAttemptAt).toEqual(retryAt);
+
+      dailyBudgetExhausted = false;
+      now = new Date("2099-04-06T00:00:01.000Z");
+      await forceReviewDue(signalId);
+      const resumed = await runMuseReviews(getDatabase(), options, dependencies);
+      expect(resumed).toMatchObject({ verified: 1, deferred: 0, errors: 0 });
+      expect(modelCalls).toBe(1);
+      view = await currentCase(signalId);
+      expect(view.case.status).toBe("completed");
+      expect(view.steps.filter((step) => step.kind === "planner")).toHaveLength(2);
+    });
+
 
     it("requeues admitted evidence through fresh Jev proof before allowing a final", async () => {
       const uei = "TESTUEI12345";

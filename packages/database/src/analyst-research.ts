@@ -59,6 +59,12 @@ export interface EnsureSignalAnalystCaseInput {
   inputHash: string;
   limits: SignalReviewJson;
   initialCheckpoint: SignalReviewJson;
+  /**
+   * A deferred episode resumes only after its caller has established that a
+   * useful capability is available. Defaulting to false prevents a polling
+   * claim from relabelling a blocked episode as active.
+   */
+  resumeDeferred?: boolean;
 }
 
 export interface BeginSignalAnalystStepInput {
@@ -146,6 +152,12 @@ export interface SignalAnalystModelSpend {
   receiptCount: number;
   unknownReceiptCount: number;
 }
+export interface SignalAnalystWorkAccounting {
+  modelAttemptCount: number;
+  resourceAttemptCount: number;
+  activeWorkMs: number;
+}
+
 
 export interface SignalAnalystCaseView {
   case: SignalAnalystCase;
@@ -155,6 +167,9 @@ export interface SignalAnalystCaseView {
   currentTriage: FaaEnsembleEvaluation | null;
   steps: SignalAnalystStep[];
   hasMoreSteps: boolean;
+  /** Bounded non-quota execution records retained for lifecycle decisions. */
+  executionSteps: SignalAnalystStep[];
+  work: SignalAnalystWorkAccounting;
   providerUsage: ResearchProviderUsageReceipt[];
   providerSpend: SignalAnalystProviderSpend;
   modelUsage: FaaReviewModelUsage[];
@@ -418,8 +433,8 @@ export async function ensureSignalAnalystCase(
       if (
         existing.status === "superseded" ||
         existing.status === "awaiting_review" ||
-        existing.status === "deferred" ||
-        existing.inputHash !== input.inputHash
+        existing.inputHash !== input.inputHash ||
+        (existing.status === "deferred" && input.resumeDeferred === true)
       ) {
         const resumed = await tx
           .update(signalAnalystCases)
@@ -895,6 +910,8 @@ async function readCaseSteps(
     SignalAnalystCaseView,
     | "steps"
     | "hasMoreSteps"
+    | "executionSteps"
+    | "work"
     | "providerUsage"
     | "providerSpend"
     | "modelUsage"
@@ -909,7 +926,13 @@ async function readCaseSteps(
     .limit(limit + 1);
   const steps = rows.slice(0, limit).map(asStep);
   const stepIds = steps.map((step) => step.id);
-  const [providerUsage, providerAccounting, visibleModelRows, modelAccounting] =
+  const [
+    providerUsage,
+    providerAccounting,
+    visibleModelRows,
+    modelAccounting,
+    workAccounting,
+  ] =
     await Promise.all([
       stepIds.length === 0
         ? Promise.resolve([] as ResearchProviderUsageReceipt[])
@@ -971,15 +994,113 @@ async function readCaseSteps(
             AS unknown_receipt_count
         FROM case_receipts
       `),
+      db.execute<{
+        model_attempt_count: number;
+        resource_attempt_count: number;
+        active_work_ms: string;
+      }>(sql`
+        SELECT
+          count(*) FILTER (
+            WHERE step.kind IN ('planner', 'final_verifier')
+              AND (
+                step.status <> 'quota_deferred'
+                OR step.model_usage_receipt_id IS NOT NULL
+              )
+          )::integer AS model_attempt_count,
+          count(*) FILTER (
+            WHERE step.kind LIKE 'resource:%'
+              AND (
+                step.status IN ('in_progress', 'interrupted')
+                OR (
+                  step.status IN ('quota_deferred', 'exhausted')
+                  AND step.response->>'providerReceiptId' IS NOT NULL
+                )
+                OR (
+                  step.status = 'late_result'
+                  AND (
+                    step.observed_status IS NULL
+                    OR step.observed_status NOT IN ('quota_deferred', 'exhausted')
+                    OR step.response->>'providerReceiptId' IS NOT NULL
+                  )
+                )
+                OR step.status NOT IN (
+                  'in_progress', 'interrupted', 'quota_deferred',
+                  'exhausted', 'late_result'
+                )
+              )
+          )::integer AS resource_attempt_count,
+          COALESCE(sum(
+            CASE
+              WHEN step.status = 'quota_deferred'
+                AND step.model_usage_receipt_id IS NULL
+                AND step.response->>'providerReceiptId' IS NULL THEN 0
+              WHEN step.status IN ('in_progress', 'interrupted', 'late_result')
+                THEN LEAST(
+                  GREATEST(
+                    0,
+                    extract(epoch FROM (
+                      COALESCE(
+                        step.finished_at,
+                        step.late_observed_at,
+                        clock_timestamp()
+                      ) - step.started_at
+                    )) * 1000
+                  ),
+                  CASE
+                    WHEN step.kind IN ('planner', 'final_verifier') THEN 60000
+                    WHEN step.kind = 'resource:primary_records' THEN 600000
+                    ELSE 15000
+                  END
+                )
+              ELSE GREATEST(
+                0,
+                extract(epoch FROM (
+                  COALESCE(step.finished_at, step.late_observed_at, clock_timestamp())
+                  - step.started_at
+                )) * 1000
+              )
+            END
+          ), 0)::bigint::text AS active_work_ms
+        FROM signal_analyst_steps step
+        WHERE step.case_id = ${caseId}::uuid
+      `),
     ]);
   const providerTotals = providerAccounting.rows[0];
   const modelTotals = modelAccounting.rows[0];
+  const workTotals = workAccounting.rows[0];
+  const executionRows = await db
+    .select()
+    .from(signalAnalystSteps)
+    .where(
+      and(
+        eq(signalAnalystSteps.caseId, caseId),
+        sql`
+          (
+            ${signalAnalystSteps.status} IN ('completed', 'interrupted', 'late_result')
+            OR ${signalAnalystSteps.modelUsageReceiptId} IS NOT NULL
+            OR (
+              ${signalAnalystSteps.kind} LIKE 'resource:%'
+              AND ${signalAnalystSteps.response}->>'providerReceiptId' IS NOT NULL
+            )
+          )
+        `,
+      ),
+    )
+    .orderBy(desc(signalAnalystSteps.sequence))
+    .limit(128);
+  const executionSteps = executionRows.map(asStep);
   const modelUsage = [
     ...new Map(visibleModelRows.map(({ usage }) => [usage.id, usage])).values(),
   ];
   return {
     steps,
     hasMoreSteps: rows.length > limit,
+    executionSteps,
+    work: {
+      modelAttemptCount: workTotals?.model_attempt_count ?? 0,
+      resourceAttemptCount: workTotals?.resource_attempt_count ?? 0,
+      activeWorkMs: Number(workTotals?.active_work_ms ?? "0"),
+    },
     providerUsage: providerUsage as ResearchProviderUsageReceipt[],
     providerSpend: {
       knownActualCostUsd: providerTotals?.known_actual_cost_usd ?? "0",

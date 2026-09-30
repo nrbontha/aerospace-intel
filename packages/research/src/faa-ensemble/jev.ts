@@ -12,6 +12,7 @@ import {
   executeAccountedOpenRouterRequest,
   openRouterBudgetScopeConfigured,
   openRouterFailureAccounting,
+  openRouterKeyFingerprint,
   type OpenRouterAccountingContext,
   type OpenRouterRequestAccounting,
 } from "../openrouter-budget.js";
@@ -122,6 +123,7 @@ export async function callJev(
           const accounted = await executeAccountedOpenRouterRequest(
             {
               context: opts!.accounting!,
+              providerKeyFingerprint: openRouterKeyFingerprint(apiKey),
               operation: "openrouter_jev_decision",
               requestBody: body,
               prompt: JSON.stringify({ state, questions }),

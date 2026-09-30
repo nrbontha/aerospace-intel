@@ -216,6 +216,28 @@ valid memo schema, current source/policy/Jev proof and the matching input hash;
 their answers to current evidence. A memo alone never earns final-verification
 ranking points or acquisition readiness.
 
+Muse episodes distinguish running work, a recorded blocker, a completed memo
+with unresolved/conflicted answers, and exhaustion without a valid final.
+Blocked cases retain their next action and cited draft; a quota pause is not
+completion. Case-wide model/resource attempts and active-work duration include
+retained observations beyond the displayed journal page. Waiting time does not
+consume active-work time, and retrying does not reset these limits. Repeated
+unchanged blockers do not append synthetic work or freshen ranking timestamps.
+Current eligible cases resume when the relevant model or resource capability
+changes, subject to the sealed cohort, lease, approval and current-input guards.
+
+Each signal detail includes its retained event timeline, including source
+ingestion, Jev/Muse evaluations, research episodes, journalled resource/model
+attempts and attributable provider receipts. The authenticated
+`GET /api/v1/signals/:id/timeline` endpoint defaults to 50 events per page,
+accepts `limit` from 1 to 100 and a source-bound opaque `after` cursor, and
+preserves PostgreSQL microsecond ordering. The UI loads older events explicitly;
+100 is a page bound, not a lifetime history cap. Shared charge receipts are shown
+once, while evaluation-level aggregate costs remain diagnostic rather than a
+second bill. Sources distinguish supporting evidence, discovery-only leads and
+failed checks. Credential-bearing locators are withheld and sensitive raw
+fields are redacted. A failed refresh preserves already loaded history.
+
 The equivalent guarded import CLI loads no dotenv file. Run it only inside the
 intended environment, with its explicit `DATABASE_URL` and current review
 model/policy configuration already set:
@@ -286,6 +308,24 @@ charge. Scoped OpenRouter reservations and their FAA usage projections share
 receipt IDs: use the provider ledger for scope exposure and the existing model
 usage ledgers for observed model spending; do not add both copies together.
 
+Migration `0018_openrouter_reconciliation.sql` adds nullable provider generation
+identity, API-key fingerprint, HTTP status and cost-verification time. It does
+not infer metadata for historical receipts or release their unknown-cost holds.
+New scoped calls retain available identity even when body reading fails.
+
+For an attributable receipt, the operator API
+`reconcileOpenRouterGenerationCost({ db, reservationId, apiKey })` from
+`@asi/research` retrieves that exact generation with the matching key. It accepts
+only identity-matched, exact provider-reported cost; decimal JSON tokens are
+parsed without binary floating-point rounding. Missing identifiers, key or
+identity disagreement, unavailable data and conflicting cost remain held.
+Aggregate account usage is not request-specific evidence. Verified settlement
+updates the provider, FAA and analyst-step mirrors atomically; replay converges
+late-written mirrors without changing the original verification time or issuing
+a new capacity wake. First settlement wakes only a current eligible model-blocked
+case whose recorded next reservation fits both the durable scope and shared
+UTC-day limits. Resource blockers are not model-budget blockers.
+
 ### Funded provider run staging
 
 Treat a funded run as an explicit paid cohort, not as “all available sources.” Build a private JSON file containing only the approved paid source-signal UUID array, retain the cohort name and selection rationale with the operating record, and keep private inputs out of this repository and image. `create` accepts either repeated `--source-signal-id` values or one `--source-signal-ids-file`, never both. The file form validates UUIDs and removes duplicate entries before the same immutable creation contract is applied. An omitted or empty paid list is an error; there is no implicit paid enrollment. A scope admits at most 50,000 explicit members and stores them in 1,000-row transactional chunks.
@@ -347,6 +387,15 @@ without a provider scope, subtract their evidenced known and unresolved
 exposure from the new model cap and retain the opening reconciliation privately.
 Do not copy old receipts or silently classify older, separately authorized
 experiments as part of a new run. A restart is not a new authorization.
+
+An explicitly authorized additional allowance is different from the remainder
+cutover above: create a separate paused scope for only the newly approved amount,
+retain the original scope and all its receipts/holds, and close the old permit
+before activating the new one. Preserve the approved source set unless expansion
+was separately authorized. Replacing a scope ID is never evidence of new funding.
+Set the shared OpenRouter daily admission guard with existing commitments in
+mind: closed scopes and unresolved prior reservations can still consume it.
+Raising that daily guard does not raise either immutable scope total.
 
 Before a code rollback, stop the worker and pause both scopes. Older images
 without this transport guard must not receive the funded model credential.

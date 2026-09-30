@@ -14,12 +14,12 @@ import {
 import { apiJson } from "@/components/csrf-client";
 import { GoldenBadge } from "@/components/golden-badge";
 import { InvestorRankingDisplay } from "@/components/investor-ranking";
+import { SignalTimeline } from "@/components/signal-timeline";
 import {
   isNavigableHttpUrl,
   type JevSourceReferenceDto,
   type JsonRecord,
   type SignalAnalystCaseDto,
-  type SignalAnalystStepDto,
   type SignalDetailDto,
 } from "@/lib/signal-analyst";
 
@@ -37,6 +37,8 @@ function textValue(value: unknown): string | null {
 
 function formatTime(value: string | null | undefined): string {
   if (!value) return "Not recorded";
+  if (value === "9999-12-31T23:59:59.999Z")
+    return "No automatic retry scheduled";
   const parsed = new Date(value);
   return Number.isNaN(parsed.valueOf()) ? value : parsed.toLocaleString();
 }
@@ -177,163 +179,6 @@ function MemoEvidence({ ids, evidence }: { ids: readonly string[]; evidence: rea
   );
 }
 
-function collectResourceReferences(
-  value: unknown,
-  depth = 0,
-  inheritedRole?: JevSourceReferenceDto["role"],
-): JevSourceReferenceDto[] {
-  if (depth > 5 || value === null || typeof value !== "object") return [];
-  if (Array.isArray(value)) {
-    return value.flatMap((item) =>
-      collectResourceReferences(item, depth + 1, inheritedRole),
-    );
-  }
-  const record = value as Record<string, unknown>;
-  const rawRole = textValue(record["supportRole"]);
-  const localRole: JevSourceReferenceDto["role"] =
-    rawRole === "discovery_only" ||
-    rawRole === "candidate_evidence" ||
-    rawRole === "checked_only"
-      ? rawRole
-      : inheritedRole;
-  const references = record["sourceReferences"];
-  const direct = Array.isArray(references)
-    ? references.flatMap((item) => {
-        const reference = recordValue(item);
-        const locator = textValue(reference?.["locator"]);
-        const finalUrl = textValue(reference?.["finalUrl"]);
-        const resourceUrl = finalUrl ?? locator;
-        if (reference === null || resourceUrl === null) return [];
-        const replayCaveat = textValue(reference["replayCaveat"]);
-        const contentSha256 = textValue(reference["contentSha256"]);
-        const role: JevSourceReferenceDto["role"] =
-          reference["representation"] === "checked_failure"
-            ? "checked_only"
-            : localRole;
-        return [
-          {
-            kind: "source_document" as const,
-            url: resourceUrl,
-            title:
-              textValue(reference["representation"]) ?? "Resource observation",
-            ...(replayCaveat === null ? {} : { caveat: replayCaveat }),
-            ...(contentSha256 === null ? {} : { contentSha256 }),
-            retrievedAt: textValue(reference["retrievedAt"]),
-            ...(role === undefined ? {} : { role }),
-          },
-        ];
-      })
-    : [];
-  return [
-    ...direct,
-    ...Object.entries(record).flatMap(([key, child]) =>
-      key === "sourceReferences"
-        ? []
-        : collectResourceReferences(child, depth + 1, localRole),
-    ),
-  ].slice(0, 100);
-}
-
-function findTextByKey(value: unknown, key: string, depth = 0): string | null {
-  if (depth > 5 || value === null || typeof value !== "object") return null;
-  if (Array.isArray(value)) {
-    for (const child of value) {
-      const found = findTextByKey(child, key, depth + 1);
-      if (found !== null) return found;
-    }
-    return null;
-  }
-  const record = value as Record<string, unknown>;
-  const direct = textValue(record[key]);
-  if (direct !== null) return direct;
-  for (const child of Object.values(record)) {
-    const found = findTextByKey(child, key, depth + 1);
-    if (found !== null) return found;
-  }
-  return null;
-}
-
-function findRecordByKey(
-  value: unknown,
-  key: string,
-  depth = 0,
-): JsonRecord | null {
-  if (depth > 5 || value === null || typeof value !== "object") return null;
-  if (Array.isArray(value)) {
-    for (const child of value) {
-      const found = findRecordByKey(child, key, depth + 1);
-      if (found !== null) return found;
-    }
-    return null;
-  }
-  const record = value as JsonRecord;
-  const direct = recordValue(record[key]);
-  if (direct !== null) return direct;
-  for (const child of Object.values(record)) {
-    const found = findRecordByKey(child, key, depth + 1);
-    if (found !== null) return found;
-  }
-  return null;
-}
-
-function ResearchStep({ step }: { step: SignalAnalystStepDto }) {
-  const references = collectResourceReferences(step.response);
-  const accessLimit = findTextByKey(step.response, "accessLimit");
-  const failureMessage = textValue(
-    findRecordByKey(step.response, "failure")?.["message"],
-  );
-  return (
-    <li className="signal-step">
-      <div className="signal-step__heading">
-        <strong>
-          #{step.sequence} {step.kind}
-        </strong>
-        <Badge>{step.status}</Badge>
-      </div>
-      <dl className="signal-facts signal-facts--compact">
-        <LabeledValue label="Started">{formatTime(step.startedAt)}</LabeledValue>
-        <LabeledValue label="Finished">{formatTime(step.finishedAt)}</LabeledValue>
-        <LabeledValue label="Cost">
-          {step.costKnown && step.costUsd !== null
-            ? `$${step.costUsd} known actual`
-            : "Unknown — no known actual charge was recorded"}
-        </LabeledValue>
-        <LabeledValue label="Request hash">
-          <code>{step.requestHash}</code>
-        </LabeledValue>
-      </dl>
-      {step.status === "late_result" ? (
-        <p className="admin-feedback" data-tone="error">
-          Late result observed {formatTime(step.lateObservedAt)}; retained as an
-          observation, not completed current work.
-        </p>
-      ) : null}
-      {accessLimit ? (
-        <p className="admin-feedback" data-tone="error">
-          Access limit: {accessLimit}
-        </p>
-      ) : null}
-      {step.error || failureMessage ? (
-        <p className="admin-feedback" data-tone="error">
-          {step.error ?? failureMessage}
-        </p>
-      ) : null}
-      <h4>Resource citations</h4>
-      <SourceReferences references={references} />
-      <details>
-        <summary>Request and retained observation</summary>
-        <h5>Request</h5>
-        <pre className="signal-json">{JSON.stringify(step.request, null, 2)}</pre>
-        <h5>Observation</h5>
-        <pre className="signal-json">
-          {step.response === null
-            ? "No response retained"
-            : JSON.stringify(step.response, null, 2)}
-        </pre>
-      </details>
-    </li>
-  );
-}
 
 function SpendSummary({ analystCase }: { analystCase: SignalAnalystCaseDto }) {
   const provider = analystCase.providerSpend;
@@ -416,7 +261,7 @@ function MemoPanel({
           {analystCase.memoCurrent
             ? "current research memo"
             : analystCase.memoEvidenceCurrent
-              ? "provisional / not verified"
+              ? "current evidence / provisional, not final"
               : "draft / historical"}
         </Badge>
       </div>
@@ -428,8 +273,10 @@ function MemoPanel({
         <LabeledValue label="Memo input hash">
           {memo ? <code>{memo.inputHash}</code> : "No validated memo"}
         </LabeledValue>
-        <LabeledValue label="Current proof">
-          {analystCase.current ? "Matches current Jev proof" : "Does not match current Jev proof"}
+        <LabeledValue label="Evidence alignment">
+          {analystCase.current
+            ? "Matches the current Jev evaluation inputs"
+            : "Does not match the current Jev evaluation inputs"}
         </LabeledValue>
         <LabeledValue label="Next retry">
           {formatTime(analystCase.case.nextAttemptAt)}
@@ -503,24 +350,6 @@ function MemoPanel({
         <h4>Case-wide spend</h4>
         <SpendSummary analystCase={analystCase} />
       </div>
-      <div>
-        <h4>Resource and model attempts</h4>
-        {analystCase.steps.length === 0 ? (
-          <p className="asi-page-description">No retained attempts.</p>
-        ) : (
-          <ol className="signal-step-list">
-            {analystCase.steps.map((step) => (
-              <ResearchStep key={step.id} step={step} />
-            ))}
-          </ol>
-        )}
-        {analystCase.hasMoreSteps ? (
-          <p className="asi-page-description">
-            Only the newest bounded step page is shown. Case-wide spend above
-            includes all steps, not only visible attempts.
-          </p>
-        ) : null}
-      </div>
     </section>
   );
 }
@@ -535,7 +364,7 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
   const [error, setError] = useState<string>();
   const activeRequestRef = useRef<AbortController | null>(null);
   const generationRef = useRef(0);
-  const museResearchHashHandledForRef = useRef<string | null>(null);
+  const hashTargetHandledForRef = useRef<string | null>(null);
 
   const load = useCallback(
     (showInitialLoading: boolean): AbortController | null => {
@@ -550,7 +379,7 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
       setError(undefined);
 
       void apiJson<SignalDetailDto>(
-        `/api/v1/signals/${encodeURIComponent(id)}?caseLimit=10&stepLimit=25`,
+        `/api/v1/signals/${encodeURIComponent(id)}`,
         { signal: controller.signal },
       )
         .then((nextDetail) => {
@@ -597,7 +426,7 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
     activeRequestRef.current?.abort();
     activeRequestRef.current = null;
     generationRef.current += 1;
-    museResearchHashHandledForRef.current = null;
+    hashTargetHandledForRef.current = null;
     setDetail(undefined);
     const controller = load(true);
     return () => controller?.abort();
@@ -612,24 +441,32 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
   );
 
   useEffect(() => {
+    const hash = window.location.hash;
+    const targetId =
+      hash === "#muse-research"
+        ? "muse-research"
+        : hash === "#signal-timeline"
+          ? "signal-timeline"
+          : null;
+    const handledKey = targetId === null ? null : `${id}:${targetId}`;
     if (
       detail?.signal.id !== id ||
-      window.location.hash !== "#muse-research" ||
-      museResearchHashHandledForRef.current === id
+      targetId === null ||
+      hashTargetHandledForRef.current === handledKey
     ) {
       return;
     }
     const frame = window.requestAnimationFrame(() => {
       if (
-        window.location.hash !== "#muse-research" ||
-        museResearchHashHandledForRef.current === id
+        window.location.hash !== hash ||
+        hashTargetHandledForRef.current === handledKey
       ) {
         return;
       }
-      const section = document.getElementById("muse-research");
+      const section = document.getElementById(targetId);
       if (section !== null) {
         section.scrollIntoView({ block: "start" });
-        museResearchHashHandledForRef.current = id;
+        hashTargetHandledForRef.current = handledKey;
       }
     });
     return () => window.cancelAnimationFrame(frame);
@@ -684,6 +521,11 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
   const historicalCases = detail.history.filter(
     (item) => item.case.id !== currentCase?.case.id,
   );
+  const currentCaseCompletedWithGaps =
+    currentCase?.case.status === "completed" &&
+    currentCase.memo?.answers.some((answer) => answer.status !== "answered") ===
+      true;
+
 
   return (
     <div className="admin-stack" aria-busy={refreshing}>
@@ -760,9 +602,9 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
         <InvestorRankingDisplay ranking={detail.ranking} />
         <section className="admin-panel admin-stack">
           <div className="signal-section-heading">
-            <h2>Current research progress</h2>
+            <h2>Current research state</h2>
             <Badge tone={triage ? "success" : "warning"}>
-              {triage ? "Jev current" : "Jev not current"}
+              {triage ? "Jev evaluation matches this revision" : "No matching Jev evaluation"}
             </Badge>
           </div>
           <p className="asi-page-description">
@@ -798,20 +640,30 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
             <LabeledValue label="Jev product fit">
               {triage
                 ? triage.productFit.replaceAll("_", " ")
-                : "No current proof"}
+                : "No matching Jev evaluation"}
             </LabeledValue>
             <LabeledValue label="Muse case">
-              {currentCase
-                ? `${currentCase.case.status} · ${
-                    currentCase.current ? "current proof" : "historical proof"
-                  }`
-                : "No current-policy case"}
+              {currentCase === null
+                ? "No current-policy case"
+                : currentCase.case.status === "deferred"
+                  ? `Blocked: ${currentCase.case.stopReason ?? review?.lastError ?? "Block reason not recorded"}`
+                  : currentCase.case.status === "completed"
+                    ? currentCaseCompletedWithGaps
+                      ? "Finished with unresolved gaps — not a verification status"
+                      : "Completed — not a verification status"
+                    : currentCase.case.status === "exhausted"
+                      ? "Finished without a valid final"
+                      : `${currentCase.case.status} · ${
+                          currentCase.current
+                            ? "uses current Jev evaluation inputs"
+                            : "uses historical Jev evaluation inputs"
+                        }`}
             </LabeledValue>
             <LabeledValue label="Muse research memo">
               {currentCase?.memoCurrent
                 ? "Current research memo"
                 : currentCase?.memoEvidenceCurrent
-                  ? "In progress — provisional / not verified"
+                  ? "Current evidence, provisional / not final"
                   : currentCase?.memo
                     ? "Draft or historical memo"
                     : "Not available"}
@@ -822,6 +674,7 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
           </dl>
         </section>
       </div>
+
       <section
         className="admin-stack"
         id="muse-research"
@@ -842,6 +695,8 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
           </div>
         )}
       </section>
+      <SignalTimeline signalId={signal.id} />
+
 
       <div className="signal-card-grid">
         <section className="admin-panel admin-stack">
@@ -912,7 +767,7 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
         <div className="signal-section-heading">
           <h2>Current Jev triage</h2>
           <Badge tone={triage ? "success" : "warning"}>
-            {triage ? "current proof" : "not current"}
+            {triage ? "matching evaluation" : "no matching evaluation"}
           </Badge>
         </div>
         {triage ? (
@@ -992,8 +847,9 @@ export function SignalDetail({ params }: { params: Promise<{ id: string }> }) {
       <section className="admin-stack" aria-labelledby="history-heading">
         <h2 id="history-heading">Historical cases and drafts</h2>
         <p className="asi-page-description">
-          Showing up to {detail.historyLimit} newest cases. Historical and draft
-          memos are never labelled as current research answers.
+          These case summaries are retained context. The event timeline above is
+          the complete paginated chronology; historical and draft memos are never
+          labelled as current research answers.
         </p>
         {historicalCases.length === 0 ? (
           <div className="admin-panel">

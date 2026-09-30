@@ -6,11 +6,17 @@ import {
   parseSignalOverviewCursor,
   readCurrentSignalAnalystCase,
   readSignalAnalystCaseHistory,
+  readSourceSignalTimeline,
+  SIGNAL_TIMELINE_LIMIT_MAX,
+  sourceSignals,
   type SignalAnalystCaseView,
   type SignalOverviewReadiness,
   type SignalOverviewSort,
+  type SignalTimelinePage,
   type SourceSignalAnalystOverviewCursor,
 } from "@asi/database";
+import { eq } from "drizzle-orm";
+
 import {
   currentFaaReviewInputContract,
   signalAnalystMemoSchema,
@@ -29,12 +35,27 @@ export const SIGNAL_PAGE_LIMIT_MAX = 100;
 export const SIGNAL_HISTORY_LIMIT_MAX = 20;
 export const SIGNAL_STEP_LIMIT_MAX = 100;
 
-export { parseSignalOverviewCursor };
+export { parseSignalOverviewCursor, SIGNAL_TIMELINE_LIMIT_MAX };
 export type {
   SignalOverviewReadiness,
   SignalOverviewSort,
+  SignalTimelinePage,
   SourceSignalAnalystOverviewCursor,
 };
+
+export async function readSignalTimeline(
+  signalId: string,
+  input: { readonly limit: number; readonly after?: string },
+): Promise<SignalTimelinePage | null> {
+  const db = getDatabase();
+  const signal = await db
+    .select({ id: sourceSignals.id })
+    .from(sourceSignals)
+    .where(eq(sourceSignals.id, signalId))
+    .limit(1);
+  if (signal[0] === undefined) return null;
+  return readSourceSignalTimeline(db, signalId, input);
+}
 
 function isJevTriage(value: unknown): value is JevTriageDto {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
