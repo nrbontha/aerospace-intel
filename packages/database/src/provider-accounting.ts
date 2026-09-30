@@ -2,11 +2,17 @@ import { and, eq, inArray, sql } from "drizzle-orm";
 
 import type { Database } from "./client.js";
 import {
+  signalAnalystCapabilityFingerprint,
+  wakeBlockedSignalAnalystReviews,
+} from "./signal-reviews.js";
+import {
+  faaReviewModelUsage,
   researchProviderBudgetScopes,
   researchProviderBudgetScopeSignals,
   researchProviderCooldowns,
   researchProviderLegacyEstimates,
   researchProviderUsage,
+  signalAnalystSteps,
   sourceSignals,
   type ResearchProviderBudgetPermitStatus,
   type ResearchProviderBudgetScope,
@@ -89,11 +95,52 @@ export interface SettleResearchProviderUsageInput {
   actualCostUsd: ResearchProviderUsd | null;
   observedAt: Date;
   error?: string | null;
+  providerReceipt?: SettleResearchProviderUsageReceiptMetadata;
   providerCooldown?: {
     retryAt: Date;
     reason: string;
   };
 }
+
+/**
+ * Non-secret identity observed on the original provider response. The key is a
+ * SHA-256 fingerprint, never an API key or credential fragment.
+ */
+export interface SettleResearchProviderUsageReceiptMetadata {
+  providerGenerationId?: string | null;
+  providerKeyFingerprint?: string | null;
+  providerHttpStatus?: number | null;
+}
+
+export interface ReconcileResearchProviderUsageInput {
+  reservationId: string;
+  providerGenerationId: string;
+  providerKeyFingerprint: string;
+  actualCostUsd: ResearchProviderUsd;
+  reconciledAt: Date;
+}
+
+export type ReconcileResearchProviderUsageResult =
+  | {
+      outcome: "reconciled";
+      receipt: ResearchProviderUsageReceipt;
+    }
+  | {
+      outcome: "existing";
+      receipt: ResearchProviderUsageReceipt;
+    }
+  | {
+      outcome: "held";
+      reason:
+        | "receipt_not_found"
+        | "receipt_unsettled"
+        | "missing_provider_identity"
+        | "provider_identity_conflict"
+        | "known_cost"
+        | "model_usage_cost_conflict"
+        | "analyst_step_cost_conflict";
+      receipt: ResearchProviderUsageReceipt | null;
+    };
 
 export interface ImportLegacyResearchProviderEstimateInput {
   provider: string;
@@ -211,6 +258,52 @@ function utcDay(value: string): string {
 function validDate(value: Date, name: string): Date {
   if (Number.isNaN(value.getTime())) throw new TypeError(`${name} must be valid`);
   return value;
+}
+
+interface NormalizedProviderReceiptMetadata {
+  providerGenerationId: string | null;
+  providerKeyFingerprint: string | null;
+  providerHttpStatus: number | null;
+}
+
+function providerReceiptMetadata(
+  input: SettleResearchProviderUsageReceiptMetadata | undefined,
+): NormalizedProviderReceiptMetadata {
+  const providerGenerationId =
+    input?.providerGenerationId === undefined ||
+    input.providerGenerationId === null
+      ? null
+      : nonempty(input.providerGenerationId, "providerGenerationId");
+  const providerKeyFingerprint =
+    input?.providerKeyFingerprint === undefined ||
+    input.providerKeyFingerprint === null
+      ? null
+      : input.providerKeyFingerprint;
+  if (
+    providerKeyFingerprint !== null &&
+    !SHA256_PATTERN.test(providerKeyFingerprint)
+  ) {
+    throw new TypeError(
+      "providerKeyFingerprint must be a lowercase SHA-256 digest",
+    );
+  }
+  const providerHttpStatus =
+    input?.providerHttpStatus === undefined || input.providerHttpStatus === null
+      ? null
+      : input.providerHttpStatus;
+  if (
+    providerHttpStatus !== null &&
+    (!Number.isInteger(providerHttpStatus) ||
+      providerHttpStatus < 100 ||
+      providerHttpStatus > 599)
+  ) {
+    throw new TypeError("providerHttpStatus must be an HTTP status code");
+  }
+  return {
+    providerGenerationId,
+    providerKeyFingerprint,
+    providerHttpStatus,
+  };
 }
 
 function nextUtcDay(day: string): Date {
@@ -410,7 +503,14 @@ export async function createResearchProviderBudgetScope(
   const normalized = normalizedBudgetScopeInput(input);
   return db.transaction(async (tx) => {
     await lockProvider(tx, normalized.provider);
-    return createResearchProviderBudgetScopeInTransaction(tx, normalized);
+    const scope = await createResearchProviderBudgetScopeInTransaction(
+      tx,
+      normalized,
+    );
+    if (scope.provider === "openrouter" && scope.permitStatus === "active") {
+      await wakeReleasedOpenRouterScope(tx, scope.id, new Date());
+    }
+    return scope;
   });
 }
 
@@ -614,10 +714,18 @@ export async function setResearchProviderBudgetPermit(
       })
       .where(eq(researchProviderBudgetScopes.id, id))
       .returning();
-    if (updated[0] === undefined) {
+    const scope = updated[0];
+    if (scope === undefined) {
       throw new Error(`provider budget scope ${id} was not updated`);
     }
-    return asBudgetScope(updated[0]);
+    if (
+      existing.permitStatus !== "active" &&
+      scope.provider === "openrouter" &&
+      scope.permitStatus === "active"
+    ) {
+      await wakeReleasedOpenRouterScope(tx, scope.id, observedAt);
+    }
+    return asBudgetScope(scope);
   });
 }
 
@@ -1126,6 +1234,67 @@ async function pauseScopeWhenObservedCostExceedsBound(
 }
 
 /**
+ * Wake only model requests whose recorded scoped admission is now actually
+ * admissible. Scope and provider/day totals are locked under the same provider
+ * advisory lock as settlement, so the wake cannot mint capacity that reserve
+ * would reject.
+ */
+async function wakeReleasedOpenRouterScope(
+  tx: ProviderAccountingTransaction,
+  budgetScopeId: string,
+  now: Date,
+): Promise<void> {
+  const scopeRows = await tx
+    .select()
+    .from(researchProviderBudgetScopes)
+    .where(eq(researchProviderBudgetScopes.id, budgetScopeId))
+    .limit(1)
+    .for("update");
+  const scope = scopeRows[0];
+  if (
+    scope === undefined ||
+    scope.provider !== "openrouter" ||
+    scope.sealedAt === null ||
+    scope.permitStatus !== "active" ||
+    scope.startsAt > now
+  ) {
+    return;
+  }
+  const cooldownRows = await tx
+    .select({ retryAt: researchProviderCooldowns.retryAt })
+    .from(researchProviderCooldowns)
+    .where(eq(researchProviderCooldowns.provider, scope.provider))
+    .limit(1);
+  const cooldownRetryAt = cooldownRows[0]?.retryAt;
+  if (cooldownRetryAt !== undefined && cooldownRetryAt > now) return;
+
+  const scopeCommittedCostUsd = await committedScopeCost(tx, budgetScopeId);
+  const providerCommittedCostUsd = await committedProviderCost(
+    tx,
+    scope.provider,
+    now.toISOString().slice(0, 10),
+  );
+
+  await wakeBlockedSignalAnalystReviews(tx, {
+    budgetScopeId,
+    capabilityDomain: "model",
+    capabilityFingerprint: signalAnalystCapabilityFingerprint({
+      mode: "bounded_paid",
+      scopeId: budgetScopeId,
+      permitStatus: scope.permitStatus,
+      operationalStatus: "active",
+      cooldownRetryAt: null,
+    }),
+    modelAdmission: {
+      budgetScopeId,
+      scopeCommittedCostUsd,
+      totalCapUsd: decimal(scope.totalCapUsd, "stored totalCapUsd"),
+      providerCommittedCostUsd,
+    },
+  });
+}
+
+/**
  * Settle a reservation exactly once. A nullable actual is deliberately not
  * converted to zero: future admission continues to count the estimate.
  */
@@ -1139,6 +1308,7 @@ export async function settleResearchProviderUsage(
     input.actualCostUsd === null
       ? null
       : decimal(input.actualCostUsd, "actualCostUsd");
+  const providerReceipt = providerReceiptMetadata(input.providerReceipt);
   const error = input.error?.slice(0, 10_000) ?? null;
   const providerCooldown =
     input.providerCooldown === undefined
@@ -1191,6 +1361,10 @@ export async function settleResearchProviderUsage(
         existingActual !== actualCostUsd ||
         existing.observedAt?.getTime() !== observedAt.getTime() ||
         (existing.error ?? null) !== error ||
+        existing.providerGenerationId !== providerReceipt.providerGenerationId ||
+        existing.providerKeyFingerprint !==
+          providerReceipt.providerKeyFingerprint ||
+        existing.providerHttpStatus !== providerReceipt.providerHttpStatus ||
         existing.providerCooldownRetryAt?.getTime() !==
           providerCooldown?.retryAt.getTime() ||
         (existing.providerCooldownReason ?? undefined) !==
@@ -1216,6 +1390,9 @@ export async function settleResearchProviderUsage(
       .set({
         status: input.status,
         actualCostUsd,
+        providerGenerationId: providerReceipt.providerGenerationId,
+        providerKeyFingerprint: providerReceipt.providerKeyFingerprint,
+        providerHttpStatus: providerReceipt.providerHttpStatus,
         observedAt,
         error,
         providerCooldownRetryAt: providerCooldown?.retryAt ?? null,
@@ -1251,6 +1428,208 @@ export async function settleResearchProviderUsage(
       providerCooldown,
     );
     return asReceipt(receipt);
+  });
+}
+
+/** Read one durable provider receipt without deriving any missing identity. */
+export async function readResearchProviderUsageReceipt(
+  db: Database,
+  reservationId: string,
+): Promise<ResearchProviderUsageReceipt | null> {
+  const id = uuid(reservationId, "reservationId");
+  const rows = await db
+    .select()
+    .from(researchProviderUsage)
+    .where(eq(researchProviderUsage.id, id))
+    .limit(1);
+  return rows[0] === undefined ? null : asReceipt(rows[0]);
+}
+
+/**
+ * Apply provider-verified cost to one attributable unknown receipt, or converge
+ * late unknown mirrors on an exact verified replay. Identity, receipt, model
+ * mirror, and analyst-step mirrors are validated under one transaction; the
+ * provider/day lock remains first so reconciliation cannot race admission or
+ * mint additional allowance.
+ */
+export async function reconcileResearchProviderUsage(
+  db: Database,
+  input: ReconcileResearchProviderUsageInput,
+): Promise<ReconcileResearchProviderUsageResult> {
+  const reservationId = uuid(input.reservationId, "reservationId");
+  const providerGenerationId = nonempty(
+    input.providerGenerationId,
+    "providerGenerationId",
+  );
+  if (!SHA256_PATTERN.test(input.providerKeyFingerprint)) {
+    throw new TypeError(
+      "providerKeyFingerprint must be a lowercase SHA-256 digest",
+    );
+  }
+  const actualCostUsd = decimal(input.actualCostUsd, "actualCostUsd");
+  const reconciledAt = validDate(input.reconciledAt, "reconciledAt");
+
+  return db.transaction(async (tx) => {
+    const providerRows = await tx
+      .select({ provider: researchProviderUsage.provider })
+      .from(researchProviderUsage)
+      .where(eq(researchProviderUsage.id, reservationId))
+      .limit(1);
+    const provider = providerRows[0]?.provider;
+    if (provider === undefined) {
+      return {
+        outcome: "held",
+        reason: "receipt_not_found",
+        receipt: null,
+      };
+    }
+    await lockProvider(tx, provider);
+    const receiptRows = await tx
+      .select()
+      .from(researchProviderUsage)
+      .where(eq(researchProviderUsage.id, reservationId))
+      .limit(1)
+      .for("update");
+    const receipt = receiptRows[0];
+    if (receipt === undefined) {
+      return {
+        outcome: "held",
+        reason: "receipt_not_found",
+        receipt: null,
+      };
+    }
+    const held = (
+      reason: Extract<
+        ReconcileResearchProviderUsageResult,
+        { outcome: "held" }
+      >["reason"],
+    ): ReconcileResearchProviderUsageResult => ({
+      outcome: "held",
+      reason,
+      receipt: asReceipt(receipt),
+    });
+    if (receipt.status === "reserved") return held("receipt_unsettled");
+    if (
+      receipt.providerGenerationId === null ||
+      receipt.providerKeyFingerprint === null
+    ) {
+      return held("missing_provider_identity");
+    }
+    if (
+      receipt.providerGenerationId !== providerGenerationId ||
+      receipt.providerKeyFingerprint !== input.providerKeyFingerprint
+    ) {
+      return held("provider_identity_conflict");
+    }
+    const alreadyVerified = receipt.actualCostUsd !== null;
+    if (
+      receipt.actualCostUsd !== null &&
+      (decimal(receipt.actualCostUsd, "stored actualCostUsd") !== actualCostUsd ||
+        receipt.providerCostVerifiedAt === null)
+    ) {
+      return held("known_cost");
+    }
+
+    // A normal caller can persist these mirrors after the receipt settlement.
+    // Lock and validate them even on exact receipt replay before changing any
+    // unknown mirror, so a conflicting late write leaves every row untouched.
+    const modelRows = await tx
+      .select()
+      .from(faaReviewModelUsage)
+      .where(eq(faaReviewModelUsage.id, reservationId))
+      .limit(1)
+      .for("update");
+    const modelUsageReceipt = modelRows[0];
+    if (
+      modelUsageReceipt !== undefined &&
+      modelUsageReceipt.costUsd !== null &&
+      decimal(modelUsageReceipt.costUsd, "stored model usage cost") !==
+        actualCostUsd
+    ) {
+      return held("model_usage_cost_conflict");
+    }
+    const analystSteps = await tx
+      .select()
+      .from(signalAnalystSteps)
+      .where(eq(signalAnalystSteps.modelUsageReceiptId, reservationId))
+      .for("update");
+    if (
+      analystSteps.some(
+        (step) =>
+          step.costKnown &&
+          (step.costUsd === null ||
+            decimal(step.costUsd, "stored analyst step cost") !== actualCostUsd),
+      )
+    ) {
+      return held("analyst_step_cost_conflict");
+    }
+
+    const settledReceipt = alreadyVerified
+      ? receipt
+      : (
+          await tx
+            .update(researchProviderUsage)
+            .set({
+              actualCostUsd,
+              providerCostVerifiedAt: reconciledAt,
+              updatedAt: sql`clock_timestamp()`,
+            })
+            .where(
+              and(
+                eq(researchProviderUsage.id, reservationId),
+                sql`${researchProviderUsage.actualCostUsd} IS NULL`,
+              ),
+            )
+            .returning()
+        )[0];
+    if (settledReceipt === undefined) {
+      throw new Error(`provider usage receipt ${reservationId} changed while locked`);
+    }
+    if (modelUsageReceipt?.costUsd === null) {
+      await tx
+        .update(faaReviewModelUsage)
+        .set({ costUsd: actualCostUsd })
+        .where(eq(faaReviewModelUsage.id, reservationId));
+    }
+    if (analystSteps.some((step) => !step.costKnown)) {
+      await tx
+        .update(signalAnalystSteps)
+        .set({
+          costKnown: true,
+          costUsd: actualCostUsd,
+          updatedAt: sql`clock_timestamp()`,
+        })
+        .where(
+          and(
+            eq(signalAnalystSteps.modelUsageReceiptId, reservationId),
+            eq(signalAnalystSteps.costKnown, false),
+          ),
+        );
+    }
+    if (alreadyVerified) {
+      // Verified receipt replay may converge late mirrors, but never re-release
+      // capacity after a review was blocked again.
+      return { outcome: "existing", receipt: asReceipt(settledReceipt) };
+    }
+    await pauseScopeWhenObservedCostExceedsBound(
+      tx,
+      settledReceipt.budgetScopeId,
+      actualCostUsd,
+      decimal(settledReceipt.estimatedCostUsd, "stored estimatedCostUsd"),
+      reconciledAt,
+    );
+    const released = await tx.execute<{ released: boolean }>(sql`
+      SELECT ${actualCostUsd}::numeric < ${settledReceipt.estimatedCostUsd}::numeric
+        AS released
+    `);
+    if (released.rows[0]?.released === true) {
+      await wakeReleasedOpenRouterScope(
+        tx,
+        settledReceipt.budgetScopeId,
+        reconciledAt,
+      );
+    }
+    return { outcome: "reconciled", receipt: asReceipt(settledReceipt) };
   });
 }
 

@@ -75,6 +75,8 @@ function formatTime(value: string | null | undefined): string {
 
 function dueText(value: string | null | undefined): string {
   if (!value) return "No retry scheduled";
+  if (value === "9999-12-31T23:59:59.999Z")
+    return "No automatic retry scheduled";
   const parsed = new Date(value);
   return Number.isNaN(parsed.valueOf()) ? value : parsed.toLocaleString();
 }
@@ -86,6 +88,7 @@ function conciseMuseSummary(value: string | null | undefined): string | null {
     ? value
     : `${value.slice(0, maxLength - 1)}…`;
 }
+
 
 function overviewUrl(
   filters: QueueFilters,
@@ -588,16 +591,29 @@ export function SignalExplorer() {
                 <TableHead scope="col">Raw source identity</TableHead>
                 <TableHead scope="col">Verified identity</TableHead>
                 <TableHead scope="col">Readiness and gaps</TableHead>
-                <TableHead scope="col">Current Jev / Muse progress</TableHead>
-                <TableHead scope="col">Next action</TableHead>
+                <TableHead scope="col">Jev → Muse chronology</TableHead>
+                <TableHead scope="col">Schedule / blocker</TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {items.map((item) => {
                 const triage = item.currentTriage?.parsed;
-                const museSummary = item.memoEvidenceCurrent
-                  ? conciseMuseSummary(item.memoSummary)
-                  : null;
+                const museSummary =
+                  item.memoCurrent || item.memoEvidenceCurrent
+                    ? conciseMuseSummary(item.memoSummary)
+                    : null;
+                const memoAnswers = item.currentCase?.memo?.["answers"];
+                const completedWithGaps =
+                  item.currentCase?.status === "completed" &&
+                  Array.isArray(memoAnswers) &&
+                  memoAnswers.some(
+                    (answer: unknown) =>
+                      answer !== null &&
+                      typeof answer === "object" &&
+                      "status" in answer &&
+                      (answer.status === "unresolved" ||
+                        answer.status === "conflicted"),
+                  );
                 return (
                   <TableRow key={item.signal.id}>
                     <TableCell>
@@ -638,60 +654,80 @@ export function SignalExplorer() {
                       )}
                     </TableCell>
                     <TableCell>
-                      <span className="signal-table__stack">
+                      <span className="signal-table__stack signal-queue-timeline">
                         <span>
-                          <strong>Jev:</strong>{" "}
+                          <strong>Jev</strong>{" "}
                           {triage
-                            ? `${triage.productFit.replaceAll("_", " ")} · current`
-                            : "no current proof"}
+                            ? `${triage.productFit.replaceAll("_", " ")} · evaluated ${formatTime(item.currentTriage?.updatedAt)}`
+                            : "No matching current-policy evaluation"}
                         </span>
                         <span>
-                          <strong>Muse:</strong>{" "}
-                          {item.currentCase
-                            ? `${item.currentCase.status} · ${
-                                item.currentCaseProofCurrent
-                                  ? "current proof"
-                                  : "proof not current"
-                              } · ${
-                                item.memoCurrent
-                                  ? "current research memo"
-                                  : item.memoEvidenceCurrent
-                                    ? "Muse research · In progress"
-                                    : item.currentCase.memo
-                                      ? "draft / historical memo"
-                                      : "no memo"
-                              }`
-                            : "no current-policy case"}
+                          <strong>Muse</strong>{" "}
+                          {item.currentCase === null
+                            ? "No current-policy case"
+                            : item.currentCase.status === "deferred"
+                              ? `Blocked: ${item.currentCase.stopReason ?? item.review?.lastError ?? "Block reason not recorded"}`
+                              : item.currentCase.status === "completed"
+                                ? completedWithGaps
+                                  ? "Finished with unresolved gaps"
+                                  : "Completed — not a verification status"
+                                : item.currentCase.status === "exhausted"
+                                  ? "Finished without a valid final"
+                                  : item.currentCase.status === "active"
+                                    ? "Status is active; retained event history is available"
+                                    : `Case status: ${item.currentCase.status}`}
+                        </span>
+                        <span>
+                          <strong>Memo</strong>{" "}
+                          {item.memoCurrent
+                            ? "Current research memo"
+                            : item.memoEvidenceCurrent
+                              ? "Current evidence, provisional / not final"
+                              : item.currentCase?.memo
+                                ? "Draft or historical memo"
+                                : "No retained memo"}
                         </span>
                         {museSummary ? (
                           <span>
                             <strong>
                               {item.memoCurrent
-                                ? "Muse findings"
-                                : "Provisional findings"}
+                                ? "Sourced current research memo"
+                                : "Sourced provisional memo"}
                               :
                             </strong>{" "}
                             {museSummary}{" "}
                             <Link href={`/signals/${item.signal.id}#muse-research`}>
-                              View sourced findings
+                              View sourced memo
                             </Link>
                           </span>
-                        ) : item.currentCase?.memo ? (
-                          <span>
-                            <strong>Muse findings:</strong> Draft or historical
-                            memo — open research record.
-                          </span>
                         ) : null}
-                        <span>Review stage: {item.review?.phase ?? "not started"}</span>
                         <span>
-                          Score updated: {formatTime(item.ranking.updatedAt)}
+                          <strong>Evidence freshness</strong>{" "}
+                          {triage
+                            ? `Jev evaluation recorded ${formatTime(item.currentTriage?.updatedAt)}`
+                            : "No matching evaluation timestamp"}
                         </span>
+                        <Link href={`/signals/${item.signal.id}#signal-timeline`}>
+                          Open full event history
+                        </Link>
                       </span>
                     </TableCell>
                     <TableCell>
-                      {dueText(
-                        item.currentCase?.nextAttemptAt ??
-                          item.review?.nextAttemptAt,
+                      {item.currentCase?.status === "deferred" ? (
+                        <>
+                          Blocked:{" "}
+                          {item.currentCase.stopReason ??
+                            item.review?.lastError ??
+                            "Block reason not recorded"}
+                          {item.currentCase.nextAttemptAt
+                            ? ` · Retry ${dueText(item.currentCase.nextAttemptAt)}`
+                            : ""}
+                        </>
+                      ) : (
+                        dueText(
+                          item.currentCase?.nextAttemptAt ??
+                            item.review?.nextAttemptAt,
+                        )
                       )}
                     </TableCell>
                   </TableRow>

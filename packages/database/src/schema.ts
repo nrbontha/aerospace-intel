@@ -2970,6 +2970,16 @@ export const researchProviderUsage = pgTable(
     estimatedCostUsd: numeric("estimated_cost_usd").notNull(),
     status: text("status").notNull().default("reserved"),
     actualCostUsd: numeric("actual_cost_usd"),
+    /**
+     * Non-secret OpenRouter identity captured from the wire response. Legacy
+     * receipts intentionally retain nulls; no timestamp-based attribution.
+     */
+    providerGenerationId: text("provider_generation_id"),
+    providerKeyFingerprint: char("provider_key_fingerprint", { length: 64 }),
+    providerHttpStatus: integer("provider_http_status"),
+    providerCostVerifiedAt: timestamp("provider_cost_verified_at", {
+      withTimezone: true,
+    }),
     observedAt: timestamp("observed_at", { withTimezone: true }),
     error: text("error"),
     providerCooldownRetryAt: timestamp("provider_cooldown_retry_at", {
@@ -2990,6 +3000,11 @@ export const researchProviderUsage = pgTable(
     uniqueIndex("research_provider_usage_step_uidx")
       .on(t.analystStepId)
       .where(sql`${t.analystStepId} IS NOT NULL`),
+    uniqueIndex("research_provider_usage_provider_generation_uidx")
+      .on(t.provider, t.providerKeyFingerprint, t.providerGenerationId)
+      .where(
+        sql`${t.providerKeyFingerprint} IS NOT NULL AND ${t.providerGenerationId} IS NOT NULL`,
+      ),
     check(
       "research_provider_usage_provider_chk",
       sql`length(btrim(${t.provider})) > 0`,
@@ -3013,6 +3028,18 @@ export const researchProviderUsage = pgTable(
     check(
       "research_provider_usage_actual_chk",
       sql`${t.actualCostUsd} IS NULL OR ${t.actualCostUsd} >= 0`,
+    ),
+    check(
+      "research_provider_usage_generation_id_chk",
+      sql`${t.providerGenerationId} IS NULL OR length(btrim(${t.providerGenerationId})) > 0`,
+    ),
+    check(
+      "research_provider_usage_key_fingerprint_chk",
+      sql`${t.providerKeyFingerprint} IS NULL OR ${t.providerKeyFingerprint} ~ '^[0-9a-f]{64}$'`,
+    ),
+    check(
+      "research_provider_usage_http_status_chk",
+      sql`${t.providerHttpStatus} IS NULL OR ${t.providerHttpStatus} BETWEEN 100 AND 599`,
     ),
     check(
       "research_provider_usage_settlement_chk",

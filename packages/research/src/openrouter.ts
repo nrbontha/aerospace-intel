@@ -6,6 +6,7 @@ import {
   executeAccountedOpenRouterRequest,
   openRouterBudgetScopeConfigured,
   openRouterFailureAccounting,
+  openRouterKeyFingerprint,
   type AccountedOpenRouterResponse,
   type OpenRouterAccountingContext,
   type OpenRouterRequestAccounting,
@@ -236,11 +237,13 @@ interface Parsed<T> {
 
 export class OpenRouterClient {
   readonly #apiKey: string;
+  readonly #apiKeyFingerprint: string;
   constructor(apiKey: string) {
     const key = apiKey.trim();
     if (key.length === 0 || /[\r\n]/u.test(key))
       throw new OpenRouterClientError("configuration_error", false);
     this.#apiKey = key;
+    this.#apiKeyFingerprint = openRouterKeyFingerprint(key);
   }
 
   async generateStructured<T>(
@@ -482,6 +485,7 @@ export class OpenRouterClient {
       return await executeAccountedOpenRouterRequest(
         {
           context: request.accounting!,
+          providerKeyFingerprint: this.#apiKeyFingerprint,
           operation: "openrouter_muse_structured",
           requestBody: body,
           prompt: request.prompt,

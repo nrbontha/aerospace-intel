@@ -60,6 +60,53 @@ export interface FailSignalReviewOptions {
   /** Dependency/configuration/budget deferrals do not consume a candidate attempt. */
   deferred?: boolean;
   retryAfterMs?: number;
+  /**
+   * Preserve an externally supplied retry boundary exactly. Null means that
+   * only a meaningful capability change can make this review claimable again.
+   */
+  retryAt?: Date | null;
+}
+
+export interface WakeBlockedSignalAnalystReviewsOptions {
+  sourceSignalIds?: readonly string[];
+  budgetScopeId?: string;
+  capabilityDomain: "resource" | "model";
+  capabilityFingerprint: string;
+  /**
+   * When a provider settlement releases capacity, require each blocked model
+   * request's recorded admission to pass against the exact current totals.
+   * Missing or malformed legacy metadata deliberately cannot wake a review.
+   */
+  modelAdmission?: {
+    budgetScopeId: string;
+    scopeCommittedCostUsd: string;
+    totalCapUsd: string;
+    providerCommittedCostUsd: string;
+  };
+}
+
+export interface SignalAnalystCapabilityFingerprintInput {
+  mode: "free_only" | "bounded_paid";
+  scopeId: string;
+  permitStatus: string;
+  operationalStatus: string;
+  cooldownRetryAt: string | null;
+}
+
+export function signalAnalystCapabilityFingerprint(
+  input: SignalAnalystCapabilityFingerprintInput,
+): string {
+  return createHash("sha256")
+    .update(
+      JSON.stringify({
+        mode: input.mode,
+        id: input.scopeId,
+        permit: input.permitStatus,
+        status: input.operationalStatus,
+        cooldown: input.cooldownRetryAt,
+      }),
+    )
+    .digest("hex");
 }
 
 export interface CompleteSignalResearchInput {
@@ -440,6 +487,123 @@ export async function reconcileChangedSignalReviews(
   `);
   return reconciled.rows.length;
 }
+/**
+ * Make an unscheduled capability-blocked Muse review claimable when its
+ * available capability has materially changed. This deliberately changes only
+ * the review scheduler: the deferred case, its checkpoint, and its history
+ * remain intact until a worker holds the resulting claim.
+ */
+export async function wakeBlockedSignalAnalystReviews(
+  db: SignalReviewExecutor,
+  options: WakeBlockedSignalAnalystReviewsOptions,
+): Promise<number> {
+  const sourceSignalIds = options.sourceSignalIds;
+  const budgetScopeId = options.budgetScopeId?.trim();
+  if (
+    (sourceSignalIds === undefined) === (budgetScopeId === undefined || budgetScopeId === "")
+  ) {
+    throw new TypeError(
+      "wakeBlockedSignalAnalystReviews requires exactly one source or scope selector",
+    );
+  }
+  if (sourceSignalIds?.length === 0) return 0;
+  const scopeFilter =
+    sourceSignalIds === undefined
+      ? sql`EXISTS (
+          SELECT 1
+          FROM research_provider_budget_scope_signals scope_signal
+          WHERE scope_signal.budget_scope_id = ${budgetScopeId}
+            AND scope_signal.source_signal_id = state.signal_id
+        )`
+      : sql`state.signal_id IN (${sql.join(
+          sourceSignalIds.map((id) => sql`${id}::uuid`),
+          sql`, `,
+        )})`;
+  const modelAdmission = options.modelAdmission;
+  if (modelAdmission !== undefined) {
+    if (options.capabilityDomain !== "model") {
+      throw new TypeError("modelAdmission requires model capabilityDomain");
+    }
+    if (
+      modelAdmission.budgetScopeId.trim().length === 0 ||
+      ![
+        modelAdmission.scopeCommittedCostUsd,
+        modelAdmission.totalCapUsd,
+        modelAdmission.providerCommittedCostUsd,
+      ].every((value) => /^(?:0|[1-9]\d*)(?:\.\d+)?$/u.test(value))
+    ) {
+      throw new TypeError("modelAdmission must contain plain decimal accounting values");
+    }
+  }
+  const modelAdmissionFilter =
+    modelAdmission === undefined
+      ? sql`TRUE`
+      : sql`CASE
+          WHEN jsonb_typeof(
+            analyst.checkpoint->'blockedCapability'->'admission'
+          ) = 'object'
+            AND analyst.checkpoint->'blockedCapability'->'admission'
+              ->>'budgetScopeId' = ${modelAdmission.budgetScopeId}
+            AND analyst.checkpoint->'blockedCapability'->'admission'
+              ->>'estimatedCostUsd' ~ '^(?:0|[1-9][0-9]*)(?:[.][0-9]+)?$'
+            AND analyst.checkpoint->'blockedCapability'->'admission'
+              ->>'dailyCapUsd' ~ '^(?:0|[1-9][0-9]*)(?:[.][0-9]+)?$'
+          THEN (
+            ${modelAdmission.scopeCommittedCostUsd}::numeric
+              + (
+                analyst.checkpoint->'blockedCapability'->'admission'
+                  ->>'estimatedCostUsd'
+              )::numeric
+              <= ${modelAdmission.totalCapUsd}::numeric
+            AND ${modelAdmission.providerCommittedCostUsd}::numeric
+              + (
+                analyst.checkpoint->'blockedCapability'->'admission'
+                  ->>'estimatedCostUsd'
+              )::numeric
+              <= (
+                analyst.checkpoint->'blockedCapability'->'admission'
+                  ->>'dailyCapUsd'
+              )::numeric
+          )
+          ELSE FALSE
+        END`;
+  const woken = await db.execute<{ signal_id: string }>(sql`
+    UPDATE signal_review_state state
+    SET next_attempt_at = clock_timestamp(),
+        updated_at = clock_timestamp()
+    FROM source_signals source,
+         signal_analyst_cases analyst
+    WHERE state.signal_id = source.id
+      AND analyst.signal_id = state.signal_id
+      AND analyst.source_revision = source.review_revision
+      AND analyst.input_hash = state.input_hash
+      AND analyst.policy_version =
+        NULLIF(state.input_manifest->'policy'->>'analyst', '')
+      AND analyst.status = 'deferred'
+      AND analyst.next_attempt_at IS NULL
+      AND ${scopeFilter}
+      AND state.source_revision = source.review_revision
+      AND state.phase = 'muse'
+      AND state.input_hash IS NOT NULL
+      AND state.next_attempt_at = ${MAX_TIMESTAMP}
+      AND (
+        state.lease_expires_at IS NULL
+        OR state.lease_expires_at <= clock_timestamp()
+      )
+      AND jsonb_typeof(analyst.checkpoint->'blockedCapability') = 'object'
+      AND COALESCE(
+        analyst.checkpoint->'blockedCapability'->>'kind',
+        'resource'
+      ) = ${options.capabilityDomain}
+      AND ${modelAdmissionFilter}
+      AND analyst.checkpoint->'blockedCapability'->>'fingerprint'
+        IS DISTINCT FROM ${options.capabilityFingerprint}
+      AND NOT ${investorApprovedSql(sql`state.signal_id`)}
+    RETURNING state.signal_id
+  `);
+  return woken.rows.length;
+}
+
 
 /**
  * Lock the material source revision after the caller has locked review state.
@@ -903,13 +1067,21 @@ export async function failSignalReview(
     FAILURE_BACKOFF_CAP_MS,
     Math.max(0, requestedRetryAfterMs),
   );
+
+  const retryAt =
+    options.retryAt === undefined
+      ? new Date(Date.now() + retryAfterMs)
+      : options.retryAt;
+  if (retryAt !== null && Number.isNaN(retryAt.getTime())) {
+    throw new TypeError("retryAt must be a valid date or null");
+  }
   const message = error instanceof Error ? error.message : String(error);
   const rows = await db
     .update(signalReviewState)
     .set({
       attemptCount: nextAttemptCount,
       lastError: message.slice(0, 10_000),
-      nextAttemptAt: new Date(Date.now() + retryAfterMs),
+      nextAttemptAt: retryAt ?? MAX_TIMESTAMP,
       leaseToken: null,
       leaseExpiresAt: null,
       updatedAt: new Date(),

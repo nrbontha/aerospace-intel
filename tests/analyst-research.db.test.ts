@@ -1960,6 +1960,41 @@ describe.skipIf(!DB_TESTS_ENABLED)(
       ).toEqual([newestUnknown]);
     });
 
+    it("keeps ranking freshness tied to evaluation evidence rather than review or case bookkeeping", async () => {
+      const signalId = await createRankingSignal("ranking-freshness", {
+        evidence: FULL_RANKING_EVIDENCE,
+        productFit: "supported_product",
+        acquisitionReadiness: "ready",
+        jevDecision: "high_priority",
+        completedCase: true,
+      });
+      const readOverview = async () => {
+        const page = await listSourceSignalAnalystOverviews(getDatabase(), {
+          expectedReviewInputContract: EXPECTED_REVIEW_CONTRACT,
+          sourceSignalIds: [signalId],
+        });
+        const item = page.items[0];
+        if (item === undefined) throw new Error("expected ranking overview");
+        return item;
+      };
+      const before = await readOverview();
+      expect(before.ranking).toMatchObject({ status: "ranked", score: 90 });
+      const bookkeepingAt = new Date("2099-04-05T10:00:00.000Z");
+      await getDatabase()
+        .update(signalReviewState)
+        .set({ updatedAt: bookkeepingAt })
+        .where(eq(signalReviewState.signalId, signalId));
+      await getDatabase()
+        .update(signalAnalystCases)
+        .set({ updatedAt: bookkeepingAt })
+        .where(eq(signalAnalystCases.signalId, signalId));
+
+      const after = await readOverview();
+      expect(after.ranking.score).toBe(before.ranking.score);
+      expect(after.ranking.updatedAt).toBe(before.ranking.updatedAt);
+      expect(after.ranking).toEqual(before.ranking);
+    });
+
     it("keeps unknown facts ranked without raw-field points and reserves exclusion for current source blockers", async () => {
       const unknown = await createRankingSignal("unknown-facts", {
         rawName: "Unknown Facts",

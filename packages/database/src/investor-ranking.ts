@@ -403,11 +403,9 @@ export function investorRankingSql(options: InvestorRankingSqlOptions): SQL {
         s.raw_name,
         s.raw_domain,
         s.created_at,
-        s.updated_at AS signal_updated_at,
         st.phase AS review_phase,
         st.input_hash AS review_input_hash,
         st.input_manifest AS review_input_manifest,
-        st.updated_at AS review_updated_at,
         jev.id AS jev_id,
         jev.parsed AS jev_parsed,
         jev.decision AS jev_decision,
@@ -434,7 +432,6 @@ export function investorRankingSql(options: InvestorRankingSqlOptions): SQL {
         analyst.status AS analyst_status,
         analyst.memo AS analyst_memo,
         analyst.completed_at AS analyst_completed_at,
-        analyst.updated_at AS analyst_updated_at,
         COALESCE((
           st.signal_id IS NOT NULL
           AND st.source_revision = s.review_revision
@@ -516,12 +513,9 @@ export function investorRankingSql(options: InvestorRankingSqlOptions): SQL {
         proof.raw_name,
         proof.raw_domain,
         proof.created_at,
-        proof.signal_updated_at,
-        proof.review_updated_at,
         proof.jev_updated_at,
         proof.result_updated_at,
         proof.muse_updated_at,
-        proof.analyst_updated_at,
         proof.triage_current,
         proof.jev_parsed,
         proof.review_input_manifest->'evidence' AS evidence,
@@ -698,12 +692,9 @@ export function investorRankingSql(options: InvestorRankingSqlOptions): SQL {
         CASE
           WHEN facts.triage_current THEN to_char(
             GREATEST(
-              facts.signal_updated_at,
-              facts.review_updated_at,
               facts.jev_updated_at,
               facts.result_updated_at,
-              facts.muse_updated_at,
-              facts.analyst_updated_at
+              facts.muse_updated_at
             ) AT TIME ZONE 'UTC',
             'YYYY-MM-DD"T"HH24:MI:SS.US"Z"'
           )

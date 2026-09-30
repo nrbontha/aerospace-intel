@@ -28,7 +28,9 @@ import {
   publishSignalAnalystEvidence,
   readCurrentSignalAnalystCase,
   readResearchProviderBudgetScope,
+  signalAnalystCapabilityFingerprint,
   updateClaimedSignalReviewInput,
+  wakeBlockedSignalAnalystReviews,
   type Database,
   type ResearchProviderBudgetScopeView,
   type SignalAnalystStep,
@@ -43,6 +45,8 @@ import {
   type OpenRouterAttemptTelemetry,
 } from "../openrouter.js";
 import {
+  OPENROUTER_BUDGET_SCOPE_ID_ENV,
+  OPENROUTER_MAX_COST_PER_DAY_ENV,
   OpenRouterAccountingError,
   OpenRouterBudgetDeferredError,
   openRouterBudgetScopeConfigured,
@@ -1785,8 +1789,17 @@ export interface DailyModelBudgetDependencies {
   readonly dailyBudgetCapUsd?: () => number;
 }
 
+function nextDailyModelBudgetRetryAt(now: Date): Date {
+  return new Date(
+    Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate() + 1),
+  );
+}
+
 class DailyModelBudgetDeferred extends Error {
-  constructor(message: string) {
+  constructor(
+    message: string,
+    readonly retryAt: Date,
+  ) {
     super(message);
     this.name = "DailyModelBudgetDeferred";
   }
@@ -1795,10 +1808,11 @@ class DailyModelBudgetDeferred extends Error {
 function createDailyModelBudgetGate(
   db: Database,
   dependencies: DailyModelBudgetDependencies,
+  now: () => Date = () => new Date(),
 ): () => Promise<void> {
   const readSpend =
     dependencies.getDailySpendUsd ??
-    (() => getRecordedDailySpendUsd(new Date(), db));
+    (() => getRecordedDailySpendUsd(now(), db));
   const readCap = dependencies.dailyBudgetCapUsd ?? configuredDailyBudgetCapUsd;
   // A JEv ladder is one persisted operation: gate before its first paid rung,
   // then let that in-flight operation finish so partially incurred costs are
@@ -1806,6 +1820,7 @@ function createDailyModelBudgetGate(
   let checked = false;
   return async () => {
     if (checked) return;
+    const checkedAt = now();
     let spendUsd: number;
     let capUsd: number;
     try {
@@ -1822,11 +1837,13 @@ function createDailyModelBudgetGate(
     } catch (error) {
       throw new DailyModelBudgetDeferred(
         `Daily model spend accounting unavailable: ${errorMessage(error)}`,
+        nextDailyModelBudgetRetryAt(checkedAt),
       );
     }
     if (spendUsd >= capUsd) {
       throw new DailyModelBudgetDeferred(
         `Daily model budget exhausted (${spendUsd.toFixed(6)} >= ${capUsd.toFixed(6)} USD)`,
+        nextDailyModelBudgetRetryAt(checkedAt),
       );
     }
     checked = true;
@@ -1837,10 +1854,12 @@ async function deferSignalReview(
   db: Database,
   claim: SignalReviewClaim,
   error: unknown,
+  retryAt?: Date | null,
 ): Promise<boolean> {
   return (
     (await failSignalReview(db, claim, errorMessage(error), {
       deferred: true,
+      ...(retryAt === undefined ? {} : { retryAt }),
     })) !== null
   );
 }
@@ -2216,56 +2235,6 @@ function sourcedResearchEvidence(
     : emptyResearchEvidence(row);
 }
 
-const ANALYST_MODEL_ATTEMPT_TIMEOUT_MS = 60_000;
-const ANALYST_NETWORK_RESOURCE_TIMEOUT_MS = 15_000;
-const ANALYST_CLAIM_LEASE_MS = 10 * 60_000;
-
-function stepActiveMs(step: SignalAnalystStep, now: Date): number {
-  if (
-    step.status === "quota_deferred" &&
-    step.modelUsageReceiptId === null &&
-    step.response?.["providerReceiptId"] == null
-  ) {
-    return 0;
-  }
-  const end = step.finishedAt ?? step.lateObservedAt ?? now;
-  const elapsed = Math.max(0, end.getTime() - step.startedAt.getTime());
-  if (
-    step.status !== "in_progress" &&
-    step.status !== "interrupted" &&
-    step.status !== "late_result"
-  ) {
-    return elapsed;
-  }
-  const uncertainExecutionBound =
-    step.kind === "planner" || step.kind === "final_verifier"
-      ? ANALYST_MODEL_ATTEMPT_TIMEOUT_MS
-      : step.kind === "resource:primary_records"
-        ? ANALYST_CLAIM_LEASE_MS
-        : ANALYST_NETWORK_RESOURCE_TIMEOUT_MS;
-  return Math.min(elapsed, uncertainExecutionBound);
-}
-
-function isModelAttempt(step: SignalAnalystStep): boolean {
-  if (step.kind !== "planner" && step.kind !== "final_verifier") return false;
-  return step.status !== "quota_deferred" || step.modelUsageReceiptId !== null;
-}
-
-function isResourceAttempt(step: SignalAnalystStep): boolean {
-  if (!step.kind.startsWith("resource:")) return false;
-  if (step.status === "in_progress" || step.status === "interrupted") return true;
-  if (
-    step.status === "quota_deferred" ||
-    step.status === "exhausted" ||
-    (step.status === "late_result" &&
-      (step.observedStatus === "quota_deferred" ||
-        step.observedStatus === "exhausted"))
-  ) {
-    return step.response?.["providerReceiptId"] != null;
-  }
-  return true;
-}
-
 function observationFromStep(
   step: SignalAnalystStep,
 ): AnalystResourceObservation | null {
@@ -2442,23 +2411,72 @@ function availableTools(
     : free;
 }
 
+function scopeRetryAt(
+  scope: ResearchProviderBudgetScopeView | null,
+  now: Date,
+): Date | null {
+  if (scope === null) return null;
+  const cooldown = (scope as ScopeWithCooldown).providerCooldown;
+  if (cooldown !== null && cooldown !== undefined && cooldown.retryAt > now) {
+    return cooldown.retryAt;
+  }
+  if (scope.scope.startsAt > now) return scope.scope.startsAt;
+  return null;
+}
+function retryAtFromAccessLimit(accessLimit: string | null): Date | null {
+  const match = accessLimit?.match(
+    /(?:^|;\s*)retry_at=([^;]+)|\buntil\s+(\S+)/u,
+  );
+  const value = match?.[1] ?? match?.[2];
+  if (value === undefined) return null;
+  const retryAt = new Date(value);
+  return Number.isNaN(retryAt.getTime()) ? null : retryAt;
+}
+
+
 function capabilityHash(
   mode: Exclude<AnalystExecutionMode, "disabled">,
   scope: ResearchProviderBudgetScopeView,
 ): string {
   const cooldown = (scope as ScopeWithCooldown).providerCooldown;
+  return signalAnalystCapabilityFingerprint({
+    mode,
+    scopeId: scope.scope.id,
+    permitStatus: scope.scope.permitStatus,
+    operationalStatus: scope.status,
+    cooldownRetryAt: cooldown?.retryAt.toISOString() ?? null,
+  });
+}
+function unavailableResourceCapabilityFingerprint(
+  mode: Exclude<AnalystExecutionMode, "disabled">,
+  scopeId: string,
+): string {
+  return signalAnalystCapabilityFingerprint({
+    mode,
+    scopeId,
+    permitStatus: "unavailable",
+    operationalStatus: "unavailable",
+    cooldownRetryAt: null,
+  });
+}
+function configuredModelCapabilityFingerprint(
+  dependencies: DailyModelBudgetDependencies,
+): string {
+  const configuredCap =
+    dependencies.dailyBudgetCapUsd?.().toString() ??
+    process.env[OPENROUTER_MAX_COST_PER_DAY_ENV]?.trim() ??
+    null;
   return createHash("sha256")
     .update(
       JSON.stringify({
-        mode,
-        id: scope.scope.id,
-        permit: scope.scope.permitStatus,
-        status: scope.status,
-        cooldown: cooldown?.retryAt.toISOString() ?? null,
+        scopeId: process.env[OPENROUTER_BUDGET_SCOPE_ID_ENV]?.trim() ?? null,
+        scopeConfigured: openRouterBudgetScopeConfigured(),
+        dailyCapUsd: configuredCap,
       }),
     )
     .digest("hex");
 }
+
 
 function groundedAnalystFacts(
   evidence: FaaEvidencePackage,
@@ -2682,15 +2700,6 @@ async function executeJournalledModelCall(input: {
         : caught instanceof OpenRouterClientError
           ? (caught.accounting ?? openRouterFailureAccounting(caught) ?? undefined)
           : (openRouterFailureAccounting(caught) ?? undefined);
-    if (caught instanceof OpenRouterBudgetDeferredError) {
-      await finishSignalAnalystStep(input.db, input.step.id, {
-        status: "quota_deferred",
-        error: errorMessage(caught),
-        costKnown: false,
-        costUsd: null,
-      });
-      throw caught;
-    }
     if (caught instanceof OpenRouterClientError) {
       returnedModel = caught.attempts.at(-1)?.model ?? null;
     }
@@ -2716,7 +2725,10 @@ async function executeJournalledModelCall(input: {
   }
   const receiptId =
     accounting?.providerReservationId ??
-    (openRouterBudgetScopeConfigured() ? null : randomUUID());
+    (openRouterBudgetScopeConfigured() ||
+    error instanceof OpenRouterBudgetDeferredError
+      ? null
+      : randomUUID());
   if (receiptId !== null) {
     await insertFaaReviewModelUsageReceipt(input.db, {
       id: receiptId,
@@ -2735,7 +2747,8 @@ async function executeJournalledModelCall(input: {
     status:
       result !== null
         ? "completed"
-        : isOpenRouterQuotaError(error)
+        : isOpenRouterQuotaError(error) ||
+            error instanceof OpenRouterBudgetDeferredError
           ? "quota_deferred"
           : "retryable_failure",
     response: result === null ? null : (result.turn as unknown as SignalReviewJson),
@@ -2770,9 +2783,7 @@ export async function runMuseReviews(
   if (scopeId === "") return { ...summary, deferred: 1 };
   const clock = deps.now ?? (() => new Date());
   const initialScope = await readResearchProviderBudgetScope(db, scopeId, clock());
-  if (scopeProblem(mode, initialScope) !== null || initialScope === null) {
-    return { ...summary, deferred: 1 };
-  }
+  if (initialScope === null) return { ...summary, deferred: 1 };
   const config = deps.config ?? resolveEnsembleConfig();
   const reviewInputContract = currentFaaReviewInputContract(config);
   const batchLimit = Math.max(1, opts.limit ?? 120);
@@ -2783,6 +2794,22 @@ export async function runMuseReviews(
     sourceLimit: Math.max(batchLimit, sourceSignalIds.length),
     sourceSignalIds,
     config,
+  });
+  if (
+    mode === "bounded_paid" &&
+    initialScope.status === "active" &&
+    availableTools(mode, initialScope, clock()).includes("exa_search")
+  ) {
+    await wakeBlockedSignalAnalystReviews(db, {
+      sourceSignalIds,
+      capabilityDomain: "resource",
+      capabilityFingerprint: capabilityHash(mode, initialScope),
+    });
+  }
+  await wakeBlockedSignalAnalystReviews(db, {
+    sourceSignalIds,
+    capabilityDomain: "model",
+    capabilityFingerprint: configuredModelCapabilityFingerprint(deps),
   });
   const client =
     deps.callAnalystModel === undefined
@@ -2826,11 +2853,8 @@ export async function runMuseReviews(
           checkpoint: caseState.checkpoint as unknown as SignalReviewJson,
           status: "deferred",
           inputHash: caseState.inputHash,
-          nextAttemptAt: new Date(clock().getTime() + SIGNAL_ANALYST_DEFER_MS),
+          nextAttemptAt: null,
           stopReason: reason,
-          ...(caseState.buildMemo === undefined
-            ? {}
-            : { memo: caseState.buildMemo() }),
         },
       );
       if (!saved.accepted) {
@@ -2838,12 +2862,63 @@ export async function runMuseReviews(
         return true;
       }
     }
-    if (await deferSignalReview(db, claim, reason)) {
+    if (await deferSignalReview(db, claim, reason, null)) {
       summary.deferred += 1;
     } else {
       summary.stale += 1;
     }
     return true;
+  };
+  const deferExistingCaseForExternalProblem = async (
+    claim: SignalReviewClaim,
+    reason: string,
+    scope: ResearchProviderBudgetScopeView | null,
+  ): Promise<void> => {
+    const existing = await readCurrentSignalAnalystCase(db, claim.signalId, {
+      expectedReviewInputContract: reviewInputContract,
+      stepLimit: 1,
+    });
+    const retryAt = scopeRetryAt(scope, clock());
+    if (
+      existing !== null &&
+      existing.case.status === "active" &&
+      existing.case.inputHash === claim.inputHash
+    ) {
+      const checkpoint = signalAnalystCheckpointSchema.parse(
+        existing.case.checkpoint,
+      );
+      const saved = await checkpointSignalAnalystCase(
+        db,
+        claim,
+        existing.case.id,
+        {
+          checkpoint: {
+            ...checkpoint,
+            blockedCapability: {
+              kind: "resource",
+              fingerprint:
+                scope === null
+                  ? unavailableResourceCapabilityFingerprint(mode, scopeId)
+                  : capabilityHash(mode, scope),
+              reason,
+            },
+          } as unknown as SignalReviewJson,
+          status: "deferred",
+          inputHash: claim.inputHash,
+          nextAttemptAt: retryAt,
+          stopReason: reason,
+        },
+      );
+      if (!saved.accepted) {
+        summary.stale += 1;
+        return;
+      }
+    }
+    if (await deferSignalReview(db, claim, reason, retryAt)) {
+      summary.deferred += 1;
+    } else {
+      summary.stale += 1;
+    }
   };
   let claimed = 0;
   while (claimed < batchLimit) {
@@ -2860,12 +2935,6 @@ export async function runMuseReviews(
       try {
         if (await deferIfInvestorApproved(claim)) return;
         let caseScope = await readResearchProviderBudgetScope(db, scopeId, clock());
-        const accessProblem = scopeProblem(mode, caseScope, claim.signalId);
-        if (accessProblem !== null || caseScope === null) {
-          await deferSignalReview(db, claim, accessProblem ?? "Analyst scope unavailable");
-          summary.deferred += 1;
-          return;
-        }
         const row = await loadSignalReviewRow(db, claim.signalId);
         if (row === null || claim.inputHash === null) {
           await failSignalReview(db, claim, "Source signal or current input unavailable");
@@ -2910,12 +2979,116 @@ export async function runMuseReviews(
           return;
         }
         const currentGaps = currentTriageGaps(jev.parsed);
+        const existing = await readCurrentSignalAnalystCase(db, claim.signalId, {
+          expectedReviewInputContract: reviewInputContract,
+          stepLimit: 100,
+        });
+        const accessProblem = scopeProblem(mode, caseScope, claim.signalId);
+        let existingTerminalBoundReached = false;
+        if (
+          existing !== null &&
+          existing.case.inputHash === inputHash &&
+          existing.case.status === "exhausted"
+        ) {
+          const settled = await commitSignalReview(
+            db,
+            claim,
+            { phase: "settled" },
+            async () => undefined,
+          );
+          if (!settled.accepted) summary.stale += 1;
+          return;
+        }
+        if (
+          existing !== null &&
+          existing.case.inputHash === inputHash &&
+          existing.case.status === "deferred"
+        ) {
+          const existingCheckpoint = mergeAnalystGaps(
+            signalAnalystCheckpointSchema.parse(existing.case.checkpoint),
+            currentGaps,
+          );
+          const existingLimits = signalAnalystLimitsSchema.parse(
+            existing.case.limits,
+          );
+          const existingActiveMs = existing.work.activeWorkMs;
+          const terminalBoundReached =
+            existingActiveMs >= existingLimits.maxActiveWorkMs ||
+            (existingCheckpoint.pendingAction === null
+              ? existing.work.modelAttemptCount >= existingLimits.maxModelCalls
+              : existing.work.resourceAttemptCount >=
+                existingLimits.maxResourceActions);
+          existingTerminalBoundReached = terminalBoundReached;
+          const existingCapability =
+            caseScope === null
+              ? unavailableResourceCapabilityFingerprint(mode, scopeId)
+              : capabilityHash(mode, caseScope);
+          const blockedCapability = existingCheckpoint.blockedCapability;
+          const blockedTool = existingCheckpoint.pendingAction?.request.tool;
+          const resourceCapabilityRemainsBlocked =
+            blockedCapability?.kind === "resource" &&
+            (caseScope === null ||
+              (blockedTool === undefined
+                ? !availableTools(mode, caseScope, clock()).includes("exa_search")
+                : !availableTools(mode, caseScope, clock()).includes(
+                    blockedTool,
+                  )));
+          const modelCapabilityChanged =
+            blockedCapability?.kind === "model" &&
+            blockedCapability.fingerprint !==
+              configuredModelCapabilityFingerprint(deps);
+
+          if (
+            !terminalBoundReached &&
+            (
+              (!modelCapabilityChanged &&
+                existing.case.nextAttemptAt !== null &&
+                existing.case.nextAttemptAt > clock()) ||
+              (blockedCapability?.kind === "resource" &&
+                blockedCapability.fingerprint === existingCapability &&
+                resourceCapabilityRemainsBlocked)
+            )
+          ) {
+            const retryAt =
+              existing.case.nextAttemptAt !== null &&
+              existing.case.nextAttemptAt > clock()
+                ? existing.case.nextAttemptAt
+                : scopeRetryAt(caseScope, clock());
+            if (
+              await deferSignalReview(
+                db,
+                claim,
+                existing.case.stopReason ??
+                  existingCheckpoint.blockedCapability?.reason ??
+                  "Analyst capability remains unavailable",
+                retryAt,
+              )
+            ) {
+              summary.deferred += 1;
+            } else {
+              summary.stale += 1;
+            }
+            return;
+          }
+        }
+        if (
+          (accessProblem !== null || caseScope === null) &&
+          !existingTerminalBoundReached
+        ) {
+          await deferExistingCaseForExternalProblem(
+            claim,
+            accessProblem ?? "Analyst scope unavailable",
+            caseScope,
+          );
+          return;
+        }
         const ensured = await ensureSignalAnalystCase(db, claim, {
           policyVersion: FAA_ANALYST_POLICY_VERSION,
           inputHash,
           limits: requestedLimits as unknown as SignalReviewJson,
           initialCheckpoint:
             initialAnalystCheckpoint(currentGaps) as unknown as SignalReviewJson,
+          resumeDeferred: true,
         });
         if (!ensured.accepted) {
           summary.stale += 1;
@@ -2970,29 +3143,6 @@ export async function runMuseReviews(
             async () => undefined,
           );
           if (!settled.accepted) summary.stale += 1;
-          return;
-        }
-        const capability = capabilityHash(mode, caseScope);
-        const initialTools = availableTools(mode, caseScope, clock());
-        const blockedTool = checkpoint.pendingAction?.request.tool;
-        const capabilityRemainsBlocked =
-          blockedTool === undefined
-            ? !initialTools.includes("exa_search")
-            : !initialTools.includes(blockedTool);
-        if (
-          checkpoint.blockedCapability?.fingerprint === capability &&
-          capabilityRemainsBlocked
-        ) {
-          await checkpointSignalAnalystCase(db, claim, view.case.id, {
-            checkpoint: checkpoint as unknown as SignalReviewJson,
-            status: "deferred",
-            inputHash,
-            nextAttemptAt: new Date(clock().getTime() + SIGNAL_ANALYST_DEFER_MS),
-            stopReason: checkpoint.blockedCapability.reason,
-            memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
-          });
-          await deferSignalReview(db, claim, checkpoint.blockedCapability.reason);
-          summary.deferred += 1;
           return;
         }
         const completeBoundedEpisodeWithoutVerification = async (
@@ -3079,15 +3229,20 @@ export async function runMuseReviews(
             summary.stale += 1;
             return;
           }
-          const steps = view.steps;
+          const steps = [
+            ...new Map(
+              [...view.executionSteps, ...view.steps].map((step) => [
+                step.id,
+                step,
+              ]),
+            ).values(),
+          ];
           const observations = retainedObservations(steps);
-          const modelCount = steps.filter(isModelAttempt).length;
-          const resourceCount = steps.filter(isResourceAttempt).length;
-          const activeMs = steps.reduce(
-            (total, step) => total + stepActiveMs(step, clock()),
-            0,
-          );
-          let tools = availableTools(mode, caseScope, clock());
+          const modelCount = view.work.modelAttemptCount;
+          const resourceCount = view.work.resourceAttemptCount;
+          const activeMs = view.work.activeWorkMs;
+          let tools =
+            caseScope === null ? [] : availableTools(mode, caseScope, clock());
           const mustFinalize =
             modelCount + 1 >= limits.maxModelCalls ||
             resourceCount >= limits.maxResourceActions ||
@@ -3166,25 +3321,29 @@ export async function runMuseReviews(
                   pendingScopeProblem ?? "Analyst scope unavailable";
                 checkpoint = {
                   ...checkpoint,
-                  blockedCapability:
-                    caseScope === null
-                      ? checkpoint.blockedCapability
-                      : {
-                          fingerprint: capabilityHash(mode, caseScope),
-                          reason,
-                        },
+                  blockedCapability: {
+                    kind: "resource",
+                    fingerprint:
+                      caseScope === null
+                        ? unavailableResourceCapabilityFingerprint(mode, scopeId)
+                        : capabilityHash(mode, caseScope),
+                    reason,
+                  },
                 };
                 await checkpointSignalAnalystCase(db, claim, view.case.id, {
                   checkpoint: checkpoint as unknown as SignalReviewJson,
                   status: "deferred",
                   inputHash,
-                  nextAttemptAt: new Date(
-                    clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
-                  ),
+                  nextAttemptAt: scopeRetryAt(caseScope, clock()),
                   stopReason: reason,
                   memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
                 });
-                await deferSignalReview(db, claim, reason);
+                await deferSignalReview(
+                  db,
+                  claim,
+                  reason,
+                  scopeRetryAt(caseScope, clock()),
+                );
                 summary.deferred += 1;
                 return;
               }
@@ -3194,6 +3353,7 @@ export async function runMuseReviews(
                 checkpoint = {
                   ...checkpoint,
                   blockedCapability: {
+                    kind: "resource",
                     fingerprint: capabilityHash(mode, caseScope),
                     reason,
                   },
@@ -3202,13 +3362,16 @@ export async function runMuseReviews(
                   checkpoint: checkpoint as unknown as SignalReviewJson,
                   status: "deferred",
                   inputHash,
-                  nextAttemptAt: new Date(
-                    clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
-                  ),
+                  nextAttemptAt: scopeRetryAt(caseScope, clock()),
                   stopReason: reason,
                   memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
                 });
-                await deferSignalReview(db, claim, reason);
+                await deferSignalReview(
+                  db,
+                  claim,
+                  reason,
+                  scopeRetryAt(caseScope, clock()),
+                );
                 summary.deferred += 1;
                 return;
               }
@@ -3375,13 +3538,28 @@ export async function runMuseReviews(
                 return;
               }
               if (observedStatus === "quota_deferred") {
+                const retryAt = retryAtFromAccessLimit(observation.accessLimit);
+                caseScope = await readResearchProviderBudgetScope(
+                  db,
+                  scopeId,
+                  clock(),
+                );
+                checkpoint = {
+                  ...checkpoint,
+                  blockedCapability: {
+                    kind: "resource",
+                    fingerprint:
+                      caseScope === null
+                        ? unavailableResourceCapabilityFingerprint(mode, scopeId)
+                        : capabilityHash(mode, caseScope),
+                    reason: observation.accessLimit ?? "Provider quota deferred",
+                  },
+                };
                 await checkpointSignalAnalystCase(db, claim, view.case.id, {
                   checkpoint: checkpoint as unknown as SignalReviewJson,
                   status: "deferred",
                   inputHash,
-                  nextAttemptAt: new Date(
-                    clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
-                  ),
+                  nextAttemptAt: retryAt,
                   stopReason: observation.accessLimit ?? "Provider quota deferred",
                   memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
                 });
@@ -3389,6 +3567,7 @@ export async function runMuseReviews(
                   db,
                   claim,
                   observation.accessLimit ?? "Provider quota deferred",
+                  retryAt,
                 );
                 summary.deferred += 1;
                 return;
@@ -3491,27 +3670,6 @@ export async function runMuseReviews(
           }
 
           if (checkpoint.pendingModelTurn === null) {
-            caseScope = await readResearchProviderBudgetScope(db, scopeId, clock());
-            const liveProblem = scopeProblem(mode, caseScope, claim.signalId);
-            if (liveProblem !== null || caseScope === null) {
-              await checkpointSignalAnalystCase(db, claim, view.case.id, {
-                checkpoint: checkpoint as unknown as SignalReviewJson,
-                status: "deferred",
-                inputHash,
-                nextAttemptAt: new Date(
-                  clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
-                ),
-                stopReason: liveProblem,
-                memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
-              });
-              await deferSignalReview(
-                db,
-                claim,
-                liveProblem ?? "Analyst scope unavailable",
-              );
-              summary.deferred += 1;
-              return;
-            }
             if (
               modelCount >= limits.maxModelCalls ||
               activeMs >= limits.maxActiveWorkMs
@@ -3521,6 +3679,26 @@ export async function runMuseReviews(
                   ? "Model-call limit reached without a valid final verification"
                   : "Active-work limit reached without a valid final verification",
               );
+              return;
+            }
+            caseScope = await readResearchProviderBudgetScope(db, scopeId, clock());
+            const liveProblem = scopeProblem(mode, caseScope, claim.signalId);
+            if (liveProblem !== null || caseScope === null) {
+              await checkpointSignalAnalystCase(db, claim, view.case.id, {
+                checkpoint: checkpoint as unknown as SignalReviewJson,
+                status: "deferred",
+                inputHash,
+                nextAttemptAt: scopeRetryAt(caseScope, clock()),
+                stopReason: liveProblem,
+                memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
+              });
+              await deferSignalReview(
+                db,
+                claim,
+                liveProblem ?? "Analyst scope unavailable",
+                scopeRetryAt(caseScope, clock()),
+              );
+              summary.deferred += 1;
               return;
             }
             const liveTools = availableTools(mode, caseScope, clock());
@@ -3690,12 +3868,25 @@ export async function runMuseReviews(
               )?.returnedModel ?? null;
           } else if (begun.value.outcome === "started") {
             try {
-              const ensureBudget = createDailyModelBudgetGate(db, deps);
+              const ensureBudget = createDailyModelBudgetGate(db, deps, clock);
               await ensureBudget();
             } catch (error) {
+              const retryAt =
+                error instanceof DailyModelBudgetDeferred
+                  ? error.retryAt
+                  : null;
+              const reason = errorMessage(error);
+              checkpoint = {
+                ...checkpoint,
+                blockedCapability: {
+                  kind: "model",
+                  fingerprint: configuredModelCapabilityFingerprint(deps),
+                  reason,
+                },
+              };
               await finishSignalAnalystStep(db, begun.value.step.id, {
                 status: "quota_deferred",
-                error: errorMessage(error),
+                error: reason,
                 costKnown: false,
                 costUsd: null,
               });
@@ -3703,13 +3894,16 @@ export async function runMuseReviews(
                 checkpoint: checkpoint as unknown as SignalReviewJson,
                 status: "deferred",
                 inputHash,
-                nextAttemptAt: new Date(
-                  clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
-                ),
-                stopReason: errorMessage(error),
+                nextAttemptAt: retryAt,
+                stopReason: reason,
                 memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
               });
-              throw error;
+              if (await deferSignalReview(db, claim, error, retryAt)) {
+                summary.deferred += 1;
+              } else {
+                summary.stale += 1;
+              }
+              return;
             }
             await sleep(config.requestDelayMs);
             const modelResult = await executeJournalledModelCall({
@@ -3739,18 +3933,36 @@ export async function runMuseReviews(
               return;
             }
             if (modelResult.result === null) {
-              if (isOpenRouterQuotaError(modelResult.error)) {
+              if (
+                isOpenRouterQuotaError(modelResult.error) ||
+                modelResult.error instanceof OpenRouterBudgetDeferredError
+              ) {
+                const retryAt =
+                  modelResult.error instanceof OpenRouterBudgetDeferredError
+                    ? modelResult.error.retryAt
+                    : null;
+                const reason = errorMessage(modelResult.error);
+                checkpoint = {
+                  ...checkpoint,
+                  blockedCapability: {
+                    kind: "model",
+                    fingerprint: configuredModelCapabilityFingerprint(deps),
+                    reason,
+                    ...(modelResult.error instanceof OpenRouterBudgetDeferredError &&
+                    modelResult.error.admission !== undefined
+                      ? { admission: modelResult.error.admission }
+                      : {}),
+                  },
+                };
                 await checkpointSignalAnalystCase(db, claim, view.case.id, {
                   checkpoint: checkpoint as unknown as SignalReviewJson,
                   status: "deferred",
                   inputHash,
-                  nextAttemptAt: new Date(
-                    clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
-                  ),
-                  stopReason: errorMessage(modelResult.error),
+                  nextAttemptAt: retryAt,
+                  stopReason: reason,
                   memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
                 });
-                await deferSignalReview(db, claim, modelResult.error);
+                await deferSignalReview(db, claim, modelResult.error, retryAt);
                 summary.deferred += 1;
               } else if (modelCount + 1 >= limits.maxModelCalls) {
                 await completeBoundedEpisodeWithoutVerification(
@@ -3824,14 +4036,13 @@ export async function runMuseReviews(
               summary.stale += 1;
               return;
             }
-            const postModelCount = postModelView.steps.filter(isModelAttempt).length;
-            const postActiveMs = postModelView.steps.reduce(
-              (total, step) => total + stepActiveMs(step, clock()),
-              0,
-            );
+            const postModelCount = postModelView.work.modelAttemptCount;
+            const postResourceCount = postModelView.work.resourceAttemptCount;
+            const postActiveMs = postModelView.work.activeWorkMs;
             if (
               pendingModel.mustFinalize ||
               postModelCount >= limits.maxModelCalls ||
+              postResourceCount >= limits.maxResourceActions ||
               postActiveMs >= limits.maxActiveWorkMs
             ) {
               await completeBoundedEpisodeWithoutVerification(
@@ -3851,6 +4062,7 @@ export async function runMuseReviews(
                 ...checkpoint,
                 pendingAction,
                 blockedCapability: {
+                  kind: "resource",
                   fingerprint: capabilityHash(mode, caseScope),
                   reason,
                 },
@@ -3859,13 +4071,16 @@ export async function runMuseReviews(
                 checkpoint: checkpoint as unknown as SignalReviewJson,
                 status: "deferred",
                 inputHash,
-                nextAttemptAt: new Date(
-                  clock().getTime() + SIGNAL_ANALYST_DEFER_MS,
-                ),
+                nextAttemptAt: scopeRetryAt(caseScope, clock()),
                 stopReason: reason,
                 memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
               });
-              await deferSignalReview(db, claim, reason);
+              await deferSignalReview(
+                db,
+                claim,
+                reason,
+                scopeRetryAt(caseScope, clock()),
+              );
               summary.deferred += 1;
               return;
             }
@@ -3923,38 +4138,6 @@ export async function runMuseReviews(
           const unresolved = memo.answers.some(
             (answer) => answer.status !== "answered",
           );
-          const evidenceBackedBlocker =
-            asRecord(jev.parsed)["acquisitionReadiness"] === "blocked";
-          const paidUnavailable =
-            mode === "free_only" ||
-            caseScope.status === "exhausted" ||
-            !liveTools.includes("exa_search");
-          if (unresolved && paidUnavailable && !evidenceBackedBlocker) {
-            const reason =
-              mode === "free_only"
-                ? "Unresolved research requires paid discovery unavailable in free-only mode"
-                : "Unresolved research is waiting for paid provider availability";
-            checkpoint = {
-              ...checkpoint,
-              pendingModelTurn: null,
-              lastAnalysisSummary: turn.analysisSummary,
-              blockedCapability: {
-                fingerprint: capabilityHash(mode, caseScope),
-                reason,
-              },
-            };
-            await checkpointSignalAnalystCase(db, claim, view.case.id, {
-              checkpoint: checkpoint as unknown as SignalReviewJson,
-              status: "deferred",
-              inputHash,
-              nextAttemptAt: new Date(clock().getTime() + SIGNAL_ANALYST_DEFER_MS),
-              stopReason: reason,
-              memo: buildDeferredGroundedMemo() as unknown as SignalReviewJson,
-            });
-            await deferSignalReview(db, claim, reason);
-            summary.deferred += 1;
-            return;
-          }
           const finalTurn = turn as SignalAnalystFinalTurn;
           const outcome: ModelEvalOutcome = {
             ok: true,
@@ -4060,8 +4243,16 @@ export async function runMuseReviews(
           error instanceof OpenRouterBudgetDeferredError ||
           isOpenRouterQuotaError(error)
         ) {
-          if (await deferSignalReview(db, claim, error)) summary.deferred += 1;
-          else summary.stale += 1;
+          const retryAt =
+            error instanceof DailyModelBudgetDeferred ||
+            error instanceof OpenRouterBudgetDeferredError
+              ? error.retryAt
+              : null;
+          if (await deferSignalReview(db, claim, error, retryAt)) {
+            summary.deferred += 1;
+          } else {
+            summary.stale += 1;
+          }
           return;
         }
         await failSignalReview(db, claim, errorMessage(error));
